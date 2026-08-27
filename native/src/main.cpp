@@ -69,6 +69,7 @@ std::atomic<int> gCachedThreshold{kDefaultThreshold};
 std::atomic<int64_t> gLastThresholdReadMs{0};
 std::atomic<int> gCachedScreenWidth{0};
 std::atomic<int64_t> gLastScreenWidthReadMs{0};
+std::atomic<int64_t> gLastSwipeLogMs{0};
 
 int64_t monotonicMs() {
     timespec ts{};
@@ -216,13 +217,27 @@ void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
                         const void *point, float horizontalDistancePx) {
     const int width = getScreenWidth();
     const int threshold = readThresholdPercent();
+    float progress = -1.0f;
+    bool pauseReset = false;
+
     if (self != nullptr && width > 0 && gPauseDetectorReset != nullptr) {
-        const float progress = std::fabs(horizontalDistancePx) / static_cast<float>(width);
+        progress = std::fabs(horizontalDistancePx) / static_cast<float>(width);
         if (progress < static_cast<float>(threshold) / 100.0f) {
             void *detector = reinterpret_cast<void *>(
                     reinterpret_cast<uintptr_t>(self) + kPauseDetectorOffsetInBackHelper);
             gPauseDetectorReset(detector);
+            pauseReset = true;
         }
+    }
+
+    const int64_t now = monotonicMs();
+    int64_t last = gLastSwipeLogMs.load(std::memory_order_relaxed);
+    if (now - last >= 150 && gLastSwipeLogMs.compare_exchange_strong(
+            last, now, std::memory_order_relaxed)) {
+        logLine(ANDROID_LOG_INFO,
+                "swipe x=%.2f width=%d progress=%.4f threshold=%d%% pauseReset=%d readyFinish=%d side=%u self=%p",
+                horizontalDistancePx, width, progress, threshold, pauseReset ? 1 : 0,
+                readyFinish ? 1 : 0, side, self);
     }
 
     if (gOriginalOnSwipeProcess) {
@@ -238,18 +253,25 @@ bool installHook(uintptr_t base) {
     const uintptr_t reset = base + kPauseDetectorResetOffset;
     const uintptr_t dimensions = base + kGetScreenDimensionsOffset;
 
-    if (!matchesSignature(onSwipe, kOnSwipeProcessSignature, sizeof(kOnSwipeProcessSignature))
-            || !matchesSignature(reset, kPauseResetSignature, sizeof(kPauseResetSignature))
-            || !matchesSignature(dimensions, kGetScreenDimensionsSignature,
-                                 sizeof(kGetScreenDimensionsSignature))) {
+    const bool swipeSignatureOk = matchesSignature(
+            onSwipe, kOnSwipeProcessSignature, sizeof(kOnSwipeProcessSignature));
+    const bool resetSignatureOk = matchesSignature(
+            reset, kPauseResetSignature, sizeof(kPauseResetSignature));
+    const bool dimensionsSignatureOk = matchesSignature(
+            dimensions, kGetScreenDimensionsSignature, sizeof(kGetScreenDimensionsSignature));
+    if (!swipeSignatureOk || !resetSignatureOk || !dimensionsSignatureOk) {
         logLine(ANDROID_LOG_ERROR,
-                "launcher signature mismatch; unsupported libapp_launcher.so, hook skipped");
+                "launcher signature mismatch base=%p swipe=%d reset=%d dimensions=%d; hook skipped",
+                reinterpret_cast<void *>(base), swipeSignatureOk ? 1 : 0,
+                resetSignatureOk ? 1 : 0, dimensionsSignatureOk ? 1 : 0);
         return false;
     }
 
     gPauseDetectorReset = reinterpret_cast<PauseDetectorResetFn>(reset);
     gGetScreenDimensions = reinterpret_cast<GetScreenDimensionsFn>(dimensions);
-    resolveDisplayApi();
+    const bool displayApiOk = resolveDisplayApi();
+    logLine(displayApiOk ? ANDROID_LOG_INFO : ANDROID_LOG_WARN,
+            "display API resolved=%d", displayApiOk ? 1 : 0);
 
     void *backup = nullptr;
     int rc = gHookFunction(reinterpret_cast<void *>(onSwipe),
@@ -262,14 +284,17 @@ bool installHook(uintptr_t base) {
     gOriginalOnSwipeProcess = reinterpret_cast<OnSwipeProcessFn>(backup);
     gHookInstalled.store(true, std::memory_order_release);
     logLine(ANDROID_LOG_INFO,
-            "hook installed launcher=8.01.02.5459 base=%p defaultThreshold=%d%%",
+            "hook installed launcher=8.01.02.5459 base=%p threshold=%d%%",
             reinterpret_cast<void *>(base), readThresholdPercent());
     return true;
 }
 
 void hookWorker() {
     for (int attempt = 1; attempt <= 200; ++attempt) {
-        if (!isTargetProcess()) return;
+        if (!isTargetProcess()) {
+            logLine(ANDROID_LOG_WARN, "hook worker left target process; aborting");
+            return;
+        }
         LibraryInfo library = findLauncherLibrary();
         if (library.base != 0) {
             logLine(ANDROID_LOG_INFO, "found %s base=%p", library.path.c_str(),
@@ -292,6 +317,7 @@ void ensureWorkerStarted() {
 void onLibraryLoaded(const char *name, void *) {
     if (!isTargetProcess() || name == nullptr) return;
     if (std::strstr(name, kTargetLibrary) != nullptr) {
+        logLine(ANDROID_LOG_INFO, "LSPosed library callback: %s", name);
         LibraryInfo library = findLauncherLibrary();
         if (library.base != 0) installHook(library.base);
     }
@@ -301,12 +327,29 @@ void onLibraryLoaded(const char *name, void *) {
 
 extern "C" __attribute__((visibility("default"), used))
 NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
-    if (entries == nullptr || entries->hook_func == nullptr || !isTargetProcess()) {
+    if (entries == nullptr) {
         return nullptr;
     }
+
+    const std::string exe = readExecutable();
+    const std::string process = readProcessName();
+    logLine(ANDROID_LOG_INFO, "native_init candidate api=%u exe=%s process=%s hook_func=%p",
+            entries->version, exe.c_str(), process.c_str(),
+            reinterpret_cast<void *>(entries->hook_func));
+
+    if (entries->hook_func == nullptr) {
+        logLine(ANDROID_LOG_ERROR, "native_init rejected: hook_func is null");
+        return nullptr;
+    }
+    if (exe != kSpawnerPath || process != kTargetPackage) {
+        logLine(ANDROID_LOG_WARN,
+                "native_init rejected: expected exe=%s process=%s",
+                kSpawnerPath, kTargetPackage);
+        return nullptr;
+    }
+
     gHookFunction = entries->hook_func;
-    logLine(ANDROID_LOG_INFO, "native_init api=%u exe=%s process=%s",
-            entries->version, readExecutable().c_str(), readProcessName().c_str());
+    logLine(ANDROID_LOG_INFO, "native_init accepted api=%u", entries->version);
     ensureWorkerStarted();
     return onLibraryLoaded;
 }
