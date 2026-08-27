@@ -2,6 +2,7 @@
 <resources>
     <string name="app_name">HyperOS4 SwipeGate</string>
     <string name="tab_settings">设置</string>
+    <string name="tab_logs">日志</string>
     <string name="tab_about">关于</string>
 
     <string name="settings_category_gesture">侧滑停顿</string>
@@ -15,6 +16,12 @@
     <string name="status_applying">正在写入 %1$d%%…</string>
     <string name="status_applied">已生效：%1$d%%（无需重启桌面）</string>
     <string name="status_failed">写入失败：%1$s</string>
+
+    <string name="log_intro">用于排查 HYOS 注入、Native Hook、桌面版本匹配和 X 轴滑动阈值。首次读取会申请 Root，仅用于读取 com.miui.home 的模块日志和 logcat。</string>
+    <string name="log_refresh">刷新日志</string>
+    <string name="log_copy">复制全部</string>
+    <string name="log_loading">正在读取诊断日志…</string>
+    <string name="log_copied">日志已复制</string>
 
     <string name="about_version">版本 %1$s</string>
     <string name="about_intro_title">HyperOS 4 原生手势增强</string>
