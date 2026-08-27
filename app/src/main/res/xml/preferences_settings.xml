@@ -4,15 +4,15 @@
 
     <PreferenceCategory android:title="@string/settings_category_gesture">
         <fan.preference.SeekBarPreferenceCompat
-            android:key="trigger_threshold_percent"
+            android:key="trigger_threshold_px"
             android:summary="@string/threshold_summary"
             android:title="@string/threshold_title"
-            app:defaultValue="55"
-            app:format="%s %%"
-            app:maxValue="100"
+            app:defaultValue="660"
+            app:format="%s px"
+            app:maxValue="1600"
             app:minValue="0"
             app:showSeekBarValue="true"
-            app:stepValue="1" />
+            app:stepValue="10" />
 
         <Preference
             android:selectable="false"
