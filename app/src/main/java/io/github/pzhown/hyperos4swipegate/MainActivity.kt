@@ -16,21 +16,20 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.calculateBottomPadding
+import androidx.compose.foundation.layout.calculateTopPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RectangleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Description
-import androidx.compose.material.icons.rounded.Info
-import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -43,6 +42,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -66,6 +66,10 @@ import top.yukonga.miuix.kmp.blur.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
 import top.yukonga.miuix.kmp.blur.textureBlur
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Info
+import top.yukonga.miuix.kmp.icon.extended.ListView
+import top.yukonga.miuix.kmp.icon.extended.Settings
 import top.yukonga.miuix.kmp.preference.SliderPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.ColorSchemeMode
@@ -77,10 +81,10 @@ private const val PREF_UI_FLOATING_BAR = "ui_floating_bottom_bar"
 private const val PREF_UI_LIQUID_GLASS = "ui_liquid_glass"
 private const val PREF_DP_MIGRATED = "threshold_dp_migrated_v1"
 
-private enum class MainTab(val title: String) {
-    Settings("设置"),
-    Logs("日志"),
-    About("关于"),
+private enum class MainTab(val title: String, val icon: ImageVector) {
+    Settings("设置", MiuixIcons.Settings),
+    Logs("日志", MiuixIcons.ListView),
+    About("关于", MiuixIcons.Info),
 }
 
 class MainActivity : ComponentActivity() {
@@ -96,14 +100,9 @@ private fun SwipeGateManager() {
     val context = androidx.compose.ui.platform.LocalContext.current
     val prefs = remember { PreferenceManager.getDefaultSharedPreferences(context) }
     val themeController = remember { ThemeController(ColorSchemeMode.System) }
-
     var selectedTab by remember { mutableIntStateOf(0) }
-    var useFloatingBar by remember {
-        mutableStateOf(prefs.getBoolean(PREF_UI_FLOATING_BAR, true))
-    }
-    var useLiquidGlass by remember {
-        mutableStateOf(prefs.getBoolean(PREF_UI_LIQUID_GLASS, true))
-    }
+    var floatingBar by remember { mutableStateOf(prefs.getBoolean(PREF_UI_FLOATING_BAR, true)) }
+    var liquidGlass by remember { mutableStateOf(prefs.getBoolean(PREF_UI_LIQUID_GLASS, true)) }
     val blurSupported = isRuntimeShaderSupported()
 
     MiuixTheme(controller = themeController) {
@@ -123,12 +122,12 @@ private fun SwipeGateManager() {
                     )
                 },
                 bottomBar = {
-                    if (!useFloatingBar) {
+                    if (!floatingBar) {
                         StandardBottomBar(
                             selectedTab = selectedTab,
                             onSelected = { selectedTab = it },
                             backdrop = backdrop,
-                            liquidGlass = useLiquidGlass && blurSupported,
+                            liquidGlass = liquidGlass && blurSupported,
                         )
                     }
                 },
@@ -141,32 +140,31 @@ private fun SwipeGateManager() {
                     when (currentTab) {
                         MainTab.Settings -> SettingsPage(
                             contentPadding = innerPadding,
-                            floatingBar = useFloatingBar,
-                            liquidGlass = useLiquidGlass,
+                            floatingBar = floatingBar,
+                            liquidGlass = liquidGlass,
                             blurSupported = blurSupported,
                             onFloatingBarChanged = {
-                                useFloatingBar = it
+                                floatingBar = it
                                 prefs.edit().putBoolean(PREF_UI_FLOATING_BAR, it).apply()
                             },
                             onLiquidGlassChanged = {
-                                useLiquidGlass = it
+                                liquidGlass = it
                                 prefs.edit().putBoolean(PREF_UI_LIQUID_GLASS, it).apply()
                             },
                         )
-
-                        MainTab.Logs -> LogsPage(innerPadding, useFloatingBar)
-                        MainTab.About -> AboutPage(innerPadding, useFloatingBar)
+                        MainTab.Logs -> LogsPage(innerPadding, floatingBar)
+                        MainTab.About -> AboutPage(innerPadding, floatingBar)
                     }
                 }
             }
 
-            if (useFloatingBar) {
+            if (floatingBar) {
                 FloatingBottomBar(
                     modifier = Modifier.align(Alignment.BottomCenter),
                     selectedTab = selectedTab,
                     onSelected = { selectedTab = it },
                     backdrop = backdrop,
-                    liquidGlass = useLiquidGlass && blurSupported,
+                    liquidGlass = liquidGlass && blurSupported,
                 )
             }
         }
@@ -191,7 +189,19 @@ private fun StandardBottomBar(
         showDivider = !liquidGlass,
         mode = NavigationBarDisplayMode.IconAndText,
     ) {
-        BottomItems(selectedTab, onSelected, floating = false)
+        StandardBottomItems(selectedTab, onSelected)
+    }
+}
+
+@Composable
+private fun RowScope.StandardBottomItems(selectedTab: Int, onSelected: (Int) -> Unit) {
+    MainTab.entries.forEachIndexed { index, tab ->
+        NavigationBarItem(
+            selected = selectedTab == index,
+            onClick = { onSelected(index) },
+            icon = tab.icon,
+            label = tab.title,
+        )
     }
 }
 
@@ -204,41 +214,22 @@ private fun FloatingBottomBar(
     liquidGlass: Boolean,
 ) {
     val shape = RoundedCornerShape(36.dp)
-    val glassModifier = if (liquidGlass) {
+    val barModifier = if (liquidGlass) {
         modifier.textureBlur(backdrop = backdrop, shape = shape)
     } else {
         modifier
     }
     FloatingNavigationBar(
-        modifier = glassModifier,
+        modifier = barModifier,
         color = if (liquidGlass) Color.Transparent else MiuixTheme.colorScheme.surfaceContainer,
         cornerRadius = 36.dp,
         showDivider = false,
     ) {
-        BottomItems(selectedTab, onSelected, floating = true)
-    }
-}
-
-@Composable
-private fun BottomItems(
-    selectedTab: Int,
-    onSelected: (Int) -> Unit,
-    floating: Boolean,
-) {
-    val icons = listOf(Icons.Rounded.Settings, Icons.Rounded.Description, Icons.Rounded.Info)
-    MainTab.entries.forEachIndexed { index, tab ->
-        if (floating) {
+        MainTab.entries.forEachIndexed { index, tab ->
             FloatingNavigationBarItem(
                 selected = selectedTab == index,
                 onClick = { onSelected(index) },
-                icon = icons[index],
-                label = tab.title,
-            )
-        } else {
-            NavigationBarItem(
-                selected = selectedTab == index,
-                onClick = { onSelected(index) },
-                icon = icons[index],
+                icon = tab.icon,
                 label = tab.title,
             )
         }
@@ -256,9 +247,7 @@ private fun SettingsPage(
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val prefs = remember { PreferenceManager.getDefaultSharedPreferences(context) }
-    var thresholdDp by remember {
-        mutableFloatStateOf(loadAndMigrateThresholdDp(context).toFloat())
-    }
+    var thresholdDp by remember { mutableFloatStateOf(loadAndMigrateThresholdDp(context).toFloat()) }
     var appliedStatus by remember {
         mutableStateOf(
             if (thresholdDp.roundToInt() == 0) "当前：默认（88 dp）"
@@ -304,12 +293,11 @@ private fun SettingsPage(
                     showKeyPoints = true,
                     keyPoints = listOf(0f, 88f, 160f, 220f, 320f),
                 )
-                Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) {
-                    Text(
-                        text = appliedStatus,
-                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                    )
-                }
+                Text(
+                    text = appliedStatus,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                )
             }
         }
 
@@ -317,29 +305,28 @@ private fun SettingsPage(
             SmallTitle("界面")
             Card {
                 SwitchPreference(
-                    title = "悬浮底栏",
-                    summary = "使用 Miuix 官方 FloatingNavigationBar",
                     checked = floatingBar,
                     onCheckedChange = onFloatingBarChanged,
+                    title = "悬浮底栏",
+                    summary = "使用 Miuix 官方 FloatingNavigationBar",
                 )
                 SwitchPreference(
+                    checked = liquidGlass && blurSupported,
+                    onCheckedChange = onLiquidGlassChanged,
                     title = "液态玻璃",
                     summary = if (blurSupported) {
-                        "使用 Miuix miuix-blur 背景模糊；切换立即生效"
+                        "使用 Miuix miuix-blur；切换立即生效"
                     } else {
-                        "当前系统不支持 RuntimeShader，已自动回退为普通底栏"
+                        "当前系统不支持 RuntimeShader，自动回退普通底栏"
                     },
-                    checked = liquidGlass && blurSupported,
                     enabled = blurSupported,
-                    onCheckedChange = onLiquidGlassChanged,
                 )
                 AnimatedVisibility(visible = floatingBar && liquidGlass && blurSupported) {
-                    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
-                        Text(
-                            text = "当前：悬浮底栏 + 液态玻璃",
-                            color = MiuixTheme.colorScheme.primary,
-                        )
-                    }
+                    Text(
+                        text = "当前：悬浮底栏 + 液态玻璃",
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                        color = MiuixTheme.colorScheme.primary,
+                    )
                 }
             }
         }
@@ -352,7 +339,7 @@ private fun SettingsPage(
                     Spacer(modifier = Modifier.height(6.dp))
                     Text("只有达到设定距离后，才允许原厂侧边栏状态机跨过 88 dp 边界。")
                     Spacer(modifier = Modifier.height(6.dp))
-                    Text("修改设置无需重启；更新 Native 版本后仍建议完整重启一次。")
+                    Text("修改设置无需重启；更新 Native 版本后建议完整重启一次。")
                 }
             }
         }
@@ -395,9 +382,7 @@ private fun LogsPage(contentPadding: PaddingValues, floatingBar: Boolean) {
                     onClick = { refresh() },
                     enabled = !loading,
                     modifier = Modifier.weight(1f),
-                ) {
-                    Text(if (loading) "读取中" else "刷新")
-                }
+                ) { Text(if (loading) "读取中" else "刷新") }
                 Button(
                     onClick = {
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -406,9 +391,7 @@ private fun LogsPage(contentPadding: PaddingValues, floatingBar: Boolean) {
                     },
                     enabled = logs.isNotBlank() && !loading,
                     modifier = Modifier.weight(1f),
-                ) {
-                    Text("复制")
-                }
+                ) { Text("复制") }
             }
         }
         item {
@@ -441,7 +424,7 @@ private fun AboutPage(contentPadding: PaddingValues, floatingBar: Boolean) {
     ) {
         Card {
             Column(modifier = Modifier.padding(20.dp)) {
-                Text("HyperOS4 SwipeGate", style = MiuixTheme.textStyles.title2)
+                Text("HyperOS4 SwipeGate")
                 Spacer(modifier = Modifier.height(6.dp))
                 Text("${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
                 Spacer(modifier = Modifier.height(12.dp))
@@ -452,16 +435,14 @@ private fun AboutPage(contentPadding: PaddingValues, floatingBar: Boolean) {
                 Text("LSPosed API 102 Native · Android 17")
             }
         }
-
         Card {
             Column(modifier = Modifier.padding(20.dp)) {
-                Text("界面组件", style = MiuixTheme.textStyles.title3)
+                Text("界面组件")
                 Spacer(modifier = Modifier.height(8.dp))
                 Text("Compose Miuix 0.9.3")
-                Text("miuix-ui · miuix-preference · miuix-blur")
+                Text("miuix-ui · miuix-preference · miuix-icons · miuix-blur")
             }
         }
-
         Button(
             onClick = {
                 context.startActivity(
@@ -469,9 +450,7 @@ private fun AboutPage(contentPadding: PaddingValues, floatingBar: Boolean) {
                 )
             },
             modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("打开 GitHub 项目")
-        }
+        ) { Text("打开 GitHub 项目") }
     }
 }
 
@@ -488,7 +467,6 @@ private fun loadAndMigrateThresholdDp(context: Context): Int {
         ConfigBridge.PREF_KEY_THRESHOLD_DP,
         ConfigBridge.DEFAULT_THRESHOLD_DP,
     )
-
     when {
         prefs.contains(ConfigBridge.LEGACY_PREF_KEY_THRESHOLD_PX) -> {
             val legacyPx = prefs.getInt(ConfigBridge.LEGACY_PREF_KEY_THRESHOLD_PX, 0)
@@ -499,7 +477,6 @@ private fun loadAndMigrateThresholdDp(context: Context): Int {
                 if (density > 0f) (legacyPx / density).roundToInt() else ConfigBridge.DEFAULT_THRESHOLD_DP
             }
         }
-
         prefs.contains(ConfigBridge.LEGACY_PREF_KEY_EXTRA_DP) -> {
             val extraDp = prefs.getInt(ConfigBridge.LEGACY_PREF_KEY_EXTRA_DP, 0)
             migrated = if (extraDp <= 0) 0 else ConfigBridge.STOCK_THRESHOLD_DP + extraDp
