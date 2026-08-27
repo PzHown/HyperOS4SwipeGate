@@ -11,10 +11,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class ConfigBridge {
-    public static final String PREF_KEY_THRESHOLD = "trigger_threshold_px";
-    public static final int DEFAULT_THRESHOLD = 660;
-    public static final int MAX_THRESHOLD = 1600;
-    public static final String SYSTEM_PROPERTY = "persist.hyperos4swipegate.threshold_px";
+    public static final String PREF_KEY_EXTRA_DP = "trigger_extra_dp";
+    public static final int DEFAULT_EXTRA_DP = 0;
+    public static final int MAX_EXTRA_DP = 450;
+    public static final String SYSTEM_PROPERTY = "persist.hyperos4swipegate.extra_dp";
 
     private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
@@ -27,16 +27,16 @@ public final class ConfigBridge {
 
     public record Result(boolean success, int value, String message) {}
 
-    public static void applyThresholdAsync(Context context, int threshold, Callback callback) {
-        int safeThreshold = Math.max(0, Math.min(MAX_THRESHOLD, threshold));
+    public static void applyExtraDpAsync(Context context, int extraDp, Callback callback) {
+        int safeValue = Math.max(0, Math.min(MAX_EXTRA_DP, extraDp));
         EXECUTOR.execute(() -> {
-            Result result = applyThreshold(safeThreshold);
+            Result result = applyExtraDp(safeValue);
             MAIN.post(() -> callback.onResult(result));
         });
     }
 
-    private static Result applyThreshold(int threshold) {
-        String value = Integer.toString(threshold);
+    private static Result applyExtraDp(int extraDp) {
+        String value = Integer.toString(extraDp);
         CommandResult resetProp = runSu("resetprop " + SYSTEM_PROPERTY + " " + value);
         if (!resetProp.success()) {
             CommandResult setProp = runSu("setprop " + SYSTEM_PROPERTY + " " + value);
@@ -47,15 +47,15 @@ public final class ConfigBridge {
                 if (detail.isBlank()) {
                     detail = "需要 Root，且 resetprop/setprop 不可用";
                 }
-                return new Result(false, threshold, detail);
+                return new Result(false, extraDp, detail);
             }
         }
 
         CommandResult verify = runSu("getprop " + SYSTEM_PROPERTY);
         if (!verify.success() || !value.equals(verify.output().trim())) {
-            return new Result(false, threshold, "系统属性校验失败");
+            return new Result(false, extraDp, "系统属性校验失败");
         }
-        return new Result(true, threshold, "ok");
+        return new Result(true, extraDp, "ok");
     }
 
     private static CommandResult runSu(String command) {
