@@ -55,7 +55,6 @@ android {
 dependencies {
     implementation("androidx.core:core:1.19.0")
     implementation("androidx.fragment:fragment:1.8.9")
-    implementation("androidx.preference:preference:1.2.1")
 
     implementation("fan.miuix:appcompat:1.0.13.0")
     implementation("fan.miuix:basewidget:1.0.13.0")
