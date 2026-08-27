@@ -39,7 +39,6 @@ public final class LogFragment extends Fragment {
 
         refreshButton.setOnClickListener(v -> refreshLogs());
         copyButton.setOnClickListener(v -> copyLogs());
-        ConfigBridge.syncScreenWidthAsync(requireContext());
         refreshLogs();
     }
 
@@ -58,7 +57,6 @@ public final class LogFragment extends Fragment {
     }
 
     private void refreshLogs() {
-        ConfigBridge.syncScreenWidthAsync(requireContext());
         if (refreshButton != null) refreshButton.setEnabled(false);
         if (logText != null) logText.setText(R.string.log_loading);
 
@@ -99,8 +97,9 @@ public final class LogFragment extends Fragment {
                 + "echo '[threshold]'\n"
                 + "getprop persist.hyperos4swipegate.threshold\n"
                 + "echo\n"
-                + "echo '[screen width]'\n"
-                + "getprop persist.hyperos4swipegate.screen_width\n"
+                + "echo '[native display sources]'\n"
+                + "for p in persist.sys.miui_resolution persist.sys.display-size vendor.display-size ro.boot.display_resolution; do v=$(getprop $p); [ -n \"$v\" ] && echo \"$p=$v\"; done\n"
+                + "for f in /sys/class/graphics/fb0/virtual_size /sys/class/drm/card0-DSI-1/modes /sys/class/drm/card0-DSI-0/modes /sys/class/drm/card0-DSI-2/modes; do [ -r \"$f\" ] && echo \"$f=$(head -n 1 \"$f\")\"; done\n"
                 + "echo\n"
                 + "echo '[processes]'\n"
                 + "ps -A 2>/dev/null | grep -E 'hyos_spawner|com.miui.home' || true\n"
