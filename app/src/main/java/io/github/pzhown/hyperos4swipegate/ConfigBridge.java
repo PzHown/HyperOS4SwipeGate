@@ -11,9 +11,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class ConfigBridge {
-    public static final String PREF_KEY_THRESHOLD = "trigger_threshold_percent";
-    public static final int DEFAULT_THRESHOLD = 55;
-    public static final String SYSTEM_PROPERTY = "persist.hyperos4swipegate.threshold";
+    public static final String PREF_KEY_THRESHOLD = "trigger_threshold_px";
+    public static final int DEFAULT_THRESHOLD = 660;
+    public static final int MAX_THRESHOLD = 1600;
+    public static final String SYSTEM_PROPERTY = "persist.hyperos4swipegate.threshold_px";
 
     private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
@@ -27,7 +28,7 @@ public final class ConfigBridge {
     public record Result(boolean success, int value, String message) {}
 
     public static void applyThresholdAsync(Context context, int threshold, Callback callback) {
-        int safeThreshold = Math.max(0, Math.min(100, threshold));
+        int safeThreshold = Math.max(0, Math.min(MAX_THRESHOLD, threshold));
         EXECUTOR.execute(() -> {
             Result result = applyThreshold(safeThreshold);
             MAIN.post(() -> callback.onResult(result));
