@@ -7,6 +7,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -24,9 +25,10 @@ constexpr const char *kTag = "HyperOS4SwipeGateNative";
 constexpr const char *kTargetPackage = "com.miui.home";
 constexpr const char *kSpawnerPath = "/system_ext/bin/hyos_spawner";
 constexpr const char *kTargetLibrary = "libapp_launcher.so";
-constexpr const char *kThresholdPxProperty = "persist.hyperos4swipegate.threshold_px";
-constexpr int kDefaultThresholdPx = 660;
-constexpr int kMaxThresholdPx = 1600;
+constexpr const char *kThresholdDpProperty = "persist.hyperos4swipegate.threshold_dp";
+constexpr int kDefaultThresholdDp = 0;       // 0 = Xiaomi stock/default boundary.
+constexpr int kStockBoundaryDp = 88;
+constexpr int kMaxThresholdDp = 320;
 
 // Exact reverse engineering target:
 // HyperOS 4 System Launcher RELEASE-8.01.02.5459-260807-08242024-R.
@@ -34,15 +36,16 @@ constexpr int kMaxThresholdPx = 1600;
 // GestureInputBackHelper::on_swipe_process keeps the real horizontal distance
 // in s8. It calls BackGestureUtils::convert_offset(distance), divides the result
 // by 20, and repeatedly compares that normalized value against float 0.8.
-// convert_offset normalizes pixels by (110dp), therefore the stock transition
-// boundary is 110dp * 0.8 = 88dp. On the test device (480 dpi / density 3.0)
-// this is exactly 264px.
+// convert_offset normalizes pixels by 110dp, therefore Xiaomi's stock sidebar
+// transition boundary is 110dp * 0.8 = 88dp.
 //
-// Before the user gate is reached we keep calling Xiaomi's original function,
-// but clamp its X input to one pixel below the stock 88dp boundary. This keeps
-// the complete stock BACK animation, release handling, haptics and reversible
-// state machine alive, while preventing IntentBallPauseDetector::fire() and
-// start_intent_ball_exit_anim() from being reached early.
+// User configuration is expressed only in dp. Value 0 means "stock/default"
+// and aliases the dynamically resolved 88dp stock boundary. To avoid relying
+// on Android density APIs inside the HYOS native process, custom dp values are
+// converted to launcher pixels relative to Xiaomi's own resolved boundary:
+//     userGatePx = stockBoundaryPx * max(requestedDp, 88) / 88
+// Values 1..87dp cannot make Xiaomi trigger earlier than its own 88dp state
+// boundary, so they intentionally collapse to stock behavior.
 constexpr uintptr_t kOnSwipeProcessOffset = 0x816fc4;
 constexpr uintptr_t kConvertOffsetOffset = 0x773814;
 
@@ -65,7 +68,7 @@ ConvertOffsetFn gConvertOffset = nullptr;
 
 std::atomic<bool> gWorkerStarted{false};
 std::atomic<bool> gHookInstalled{false};
-std::atomic<int> gCachedThresholdPx{kDefaultThresholdPx};
+std::atomic<int> gCachedThresholdDp{kDefaultThresholdDp};
 std::atomic<int64_t> gLastThresholdReadMs{0};
 std::atomic<int64_t> gLastBoundaryReadMs{0};
 std::atomic<int64_t> gLastSwipeLogMs{0};
@@ -172,30 +175,33 @@ float bitsFloat(uint32_t bits) {
     return value;
 }
 
-int readThresholdPx() {
+int readThresholdDp() {
     const int64_t now = monotonicMs();
     const int64_t last = gLastThresholdReadMs.load(std::memory_order_relaxed);
-    if (now - last < 250) return gCachedThresholdPx.load(std::memory_order_relaxed);
+    if (now - last < 250) return gCachedThresholdDp.load(std::memory_order_relaxed);
 
-    int thresholdPx = kDefaultThresholdPx;
+    int thresholdDp = kDefaultThresholdDp;
     char value[PROP_VALUE_MAX]{};
-    if (__system_property_get(kThresholdPxProperty, value) > 0) {
+    if (__system_property_get(kThresholdDpProperty, value) > 0) {
         char *end = nullptr;
         long parsed = std::strtol(value, &end, 10);
         if (end != value && *end == '\0') {
             if (parsed < 0) parsed = 0;
-            if (parsed > kMaxThresholdPx) parsed = kMaxThresholdPx;
-            thresholdPx = static_cast<int>(parsed);
+            if (parsed > kMaxThresholdDp) parsed = kMaxThresholdDp;
+            thresholdDp = static_cast<int>(parsed);
         }
     }
 
-    const int previous = gCachedThresholdPx.exchange(thresholdPx, std::memory_order_relaxed);
+    const int previous = gCachedThresholdDp.exchange(thresholdDp, std::memory_order_relaxed);
     gLastThresholdReadMs.store(now, std::memory_order_relaxed);
-    if (previous != thresholdPx) {
-        logLine(ANDROID_LOG_INFO, "STOCK_GATE threshold changed: %dpx enabled=%d",
-                thresholdPx, thresholdPx > 0 ? 1 : 0);
+    if (previous != thresholdDp) {
+        logLine(ANDROID_LOG_INFO,
+                "DP_GATE threshold changed: configured=%ddp effective=%ddp defaultAlias=%d",
+                thresholdDp,
+                thresholdDp == 0 ? kStockBoundaryDp : std::max(thresholdDp, kStockBoundaryDp),
+                thresholdDp == 0 ? 1 : 0);
     }
-    return thresholdPx;
+    return thresholdDp;
 }
 
 float readStockBoundaryPx() {
@@ -223,25 +229,45 @@ float readStockBoundaryPx() {
     const float previous = bitsFloat(oldBits);
     if (std::fabs(previous - boundaryPx) >= 0.5f) {
         logLine(ANDROID_LOG_INFO,
-                "STOCK_GATE stock boundary resolved: %.2fpx (88dp), guard=%.2fpx",
-                boundaryPx, std::max(0.0f, boundaryPx - 1.0f));
+                "DP_GATE stock boundary resolved: %.2fpx = %ddp, guard=%.2fpx",
+                boundaryPx, kStockBoundaryDp, std::max(0.0f, boundaryPx - 1.0f));
     }
     return boundaryPx;
 }
 
+float userGatePxFromDp(int configuredDp, float stockBoundaryPx) {
+    const int effectiveDp = configuredDp == 0
+            ? kStockBoundaryDp
+            : std::max(configuredDp, kStockBoundaryDp);
+    return stockBoundaryPx * static_cast<float>(effectiveDp)
+            / static_cast<float>(kStockBoundaryDp);
+}
+
 void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
                         const void *point, float horizontalDistancePx) {
-    const int thresholdPx = readThresholdPx();
+    const int configuredDp = readThresholdDp();
     const float stockBoundaryPx = readStockBoundaryPx();
     const float stockGuardPx = stockBoundaryPx > 1.0f ? stockBoundaryPx - 1.0f : 0.0f;
     const float absDx = std::fabs(horizontalDistancePx);
-    const bool enabled = thresholdPx > 0 && stockGuardPx > 0.0f;
-    const bool userGateReached = !enabled || absDx >= static_cast<float>(thresholdPx);
+    const float userGatePx = stockBoundaryPx > 0.0f
+            ? userGatePxFromDp(configuredDp, stockBoundaryPx)
+            : 0.0f;
+    const int effectiveDp = configuredDp == 0
+            ? kStockBoundaryDp
+            : std::max(configuredDp, kStockBoundaryDp);
+
+    // 0dp (and any custom value <= stock 88dp) is true Xiaomi stock behavior:
+    // no clamp at all. Clamping is only needed when the requested gate is later
+    // than Xiaomi's own state transition boundary.
+    const bool delayBeyondStock = effectiveDp > kStockBoundaryDp
+            && stockGuardPx > 0.0f
+            && userGatePx > stockBoundaryPx;
+    const bool userGateReached = !delayBeyondStock || absDx >= userGatePx;
 
     float effectiveDistancePx = horizontalDistancePx;
     bool clamped = false;
 
-    if (enabled && !userGateReached && absDx > stockGuardPx) {
+    if (delayBeyondStock && !userGateReached && absDx > stockGuardPx) {
         effectiveDistancePx = std::copysign(stockGuardPx, horizontalDistancePx);
         clamped = true;
         gClampedCount.fetch_add(1, std::memory_order_relaxed);
@@ -254,9 +280,11 @@ void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
     if (now - last >= 120 && gLastSwipeLogMs.compare_exchange_strong(
             last, now, std::memory_order_relaxed)) {
         logLine(ANDROID_LOG_INFO,
-                "STOCK_GATE rawDx=%.2f effectiveDx=%.2f thresholdPx=%d stockBoundaryPx=%.2f guardPx=%.2f gateReached=%d clamped=%d readyFinish=%d side=%u clampedCount=%llu passthroughCount=%llu",
-                horizontalDistancePx, effectiveDistancePx, thresholdPx,
-                stockBoundaryPx, stockGuardPx, userGateReached ? 1 : 0,
+                "DP_GATE rawDx=%.2f effectiveDx=%.2f configuredDp=%d effectiveDp=%d userGatePx=%.2f stockBoundaryPx=%.2f guardPx=%.2f delayBeyondStock=%d gateReached=%d clamped=%d readyFinish=%d side=%u clampedCount=%llu passthroughCount=%llu",
+                horizontalDistancePx, effectiveDistancePx,
+                configuredDp, effectiveDp, userGatePx,
+                stockBoundaryPx, stockGuardPx,
+                delayBeyondStock ? 1 : 0, userGateReached ? 1 : 0,
                 clamped ? 1 : 0, readyFinish ? 1 : 0, side,
                 static_cast<unsigned long long>(gClampedCount.load(std::memory_order_relaxed)),
                 static_cast<unsigned long long>(gPassthroughCount.load(std::memory_order_relaxed)));
@@ -275,13 +303,13 @@ bool installHook(uintptr_t base) {
     const uintptr_t convertOffset = base + kConvertOffsetOffset;
     if (!matchesSignature(onSwipe, kOnSwipeProcessSignature, sizeof(kOnSwipeProcessSignature))) {
         logLine(ANDROID_LOG_ERROR,
-                "STOCK_GATE on_swipe_process signature mismatch; hook skipped");
+                "DP_GATE on_swipe_process signature mismatch; hook skipped");
         return false;
     }
     if (!matchesSignature(convertOffset, kConvertOffsetSignature,
                           sizeof(kConvertOffsetSignature))) {
         logLine(ANDROID_LOG_ERROR,
-                "STOCK_GATE convert_offset signature mismatch; hook skipped");
+                "DP_GATE convert_offset signature mismatch; hook skipped");
         return false;
     }
 
@@ -289,7 +317,7 @@ bool installHook(uintptr_t base) {
     const float boundary = readStockBoundaryPx();
     if (!(boundary > 0.0f)) {
         logLine(ANDROID_LOG_ERROR,
-                "STOCK_GATE failed to resolve stock 88dp boundary; hook skipped");
+                "DP_GATE failed to resolve stock 88dp boundary; hook skipped");
         gConvertOffset = nullptr;
         return false;
     }
@@ -299,17 +327,21 @@ bool installHook(uintptr_t base) {
                                  reinterpret_cast<void *>(onSwipeProcessHook), &backup);
     if (rc != 0 || backup == nullptr) {
         logLine(ANDROID_LOG_ERROR,
-                "STOCK_GATE hook_func failed rc=%d backup=%p", rc, backup);
+                "DP_GATE hook_func failed rc=%d backup=%p", rc, backup);
         gConvertOffset = nullptr;
         return false;
     }
 
     gOriginalOnSwipeProcess = reinterpret_cast<OnSwipeProcessFn>(backup);
     gHookInstalled.store(true, std::memory_order_release);
-    const int thresholdPx = readThresholdPx();
+    const int configuredDp = readThresholdDp();
+    const int effectiveDp = configuredDp == 0
+            ? kStockBoundaryDp
+            : std::max(configuredDp, kStockBoundaryDp);
     logLine(ANDROID_LOG_INFO,
-            "STOCK_GATE hook installed launcher=8.01.02.5459 base=%p thresholdPx=%d stockBoundaryPx=%.2f guardPx=%.2f",
-            reinterpret_cast<void *>(base), thresholdPx, boundary, boundary - 1.0f);
+            "DP_GATE hook installed launcher=8.01.02.5459 base=%p configuredDp=%d effectiveDp=%d stockBoundaryPx=%.2f userGatePx=%.2f",
+            reinterpret_cast<void *>(base), configuredDp, effectiveDp,
+            boundary, userGatePxFromDp(configuredDp, boundary));
     return true;
 }
 
@@ -318,14 +350,14 @@ void hookWorker() {
         if (!isTargetProcess()) return;
         const LibraryInfo library = findLauncherLibrary();
         if (library.base != 0) {
-            logLine(ANDROID_LOG_INFO, "STOCK_GATE found %s base=%p",
+            logLine(ANDROID_LOG_INFO, "DP_GATE found %s base=%p",
                     library.path.c_str(), reinterpret_cast<void *>(library.base));
             installHook(library.base);
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    logLine(ANDROID_LOG_ERROR, "STOCK_GATE timed out waiting for %s", kTargetLibrary);
+    logLine(ANDROID_LOG_ERROR, "DP_GATE timed out waiting for %s", kTargetLibrary);
 }
 
 void ensureWorkerStarted() {
@@ -352,8 +384,9 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     }
     gHookFunction = entries->hook_func;
     logLine(ANDROID_LOG_INFO,
-            "STOCK_GATE native_init api=%u exe=%s process=%s",
-            entries->version, readExecutable().c_str(), readProcessName().c_str());
+            "DP_GATE native_init accepted api=%u exe=%s process=%s hook_func=%p",
+            entries->version, readExecutable().c_str(), readProcessName().c_str(),
+            reinterpret_cast<void *>(entries->hook_func));
     ensureWorkerStarted();
     return onLibraryLoaded;
 }
