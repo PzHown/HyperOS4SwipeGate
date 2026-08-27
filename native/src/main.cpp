@@ -45,8 +45,8 @@ std::atomic<bool> gHookInstalled{false};
 std::atomic<int> gCachedThresholdPx{kDefaultThresholdPx};
 std::atomic<int64_t> gLastThresholdReadMs{0};
 std::atomic<int64_t> gLastSwipeLogMs{0};
-std::atomic<uint64_t> gSuppressedCount{0};
-std::atomic<uint64_t> gPassedCount{0};
+std::atomic<uint64_t> gForcedNotReadyCount{0};
+std::atomic<uint64_t> gStockReadyCount{0};
 
 int64_t monotonicMs() {
     timespec ts{};
@@ -155,7 +155,7 @@ int readThresholdPx() {
     gLastThresholdReadMs.store(now, std::memory_order_relaxed);
     if (previous != thresholdPx) {
         logLine(ANDROID_LOG_INFO,
-                "hard-gate threshold changed: %dpx enabled=%d",
+                "stage-gate threshold changed: %dpx enabled=%d",
                 thresholdPx, thresholdPx > 0 ? 1 : 0);
     }
     return thresholdPx;
@@ -166,13 +166,20 @@ void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
     const int thresholdPx = readThresholdPx();
     const float absDx = std::fabs(horizontalDistancePx);
     const bool enabled = thresholdPx > 0;
-    const bool suppressOriginal = enabled
-            && absDx < static_cast<float>(thresholdPx);
 
-    if (suppressOriginal) {
-        gSuppressedCount.fetch_add(1, std::memory_order_relaxed);
-    } else {
-        gPassedCount.fetch_add(1, std::memory_order_relaxed);
+    // Preserve Xiaomi's complete onSwipeProcess path so the normal back arrow,
+    // progress animation and release handling continue to run. Only withhold
+    // the ready-to-finish state until the configured horizontal distance has
+    // been reached. A zero threshold is a strict stock passthrough.
+    const bool forceNotReady = enabled
+            && absDx < static_cast<float>(thresholdPx)
+            && readyFinish;
+    const bool effectiveReadyFinish = forceNotReady ? false : readyFinish;
+
+    if (forceNotReady) {
+        gForcedNotReadyCount.fetch_add(1, std::memory_order_relaxed);
+    } else if (readyFinish) {
+        gStockReadyCount.fetch_add(1, std::memory_order_relaxed);
     }
 
     const int64_t now = monotonicMs();
@@ -180,24 +187,19 @@ void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
     if (now - last >= 120 && gLastSwipeLogMs.compare_exchange_strong(
             last, now, std::memory_order_relaxed)) {
         logLine(ANDROID_LOG_INFO,
-                "HARD_GATE internalDx=%.2f absDx=%.2f thresholdPx=%d enabled=%d suppressOriginal=%d readyFinish=%d side=%u suppressed=%llu passed=%llu",
+                "STAGE_GATE internalDx=%.2f absDx=%.2f thresholdPx=%d enabled=%d inputReady=%d effectiveReady=%d forceNotReady=%d side=%u forced=%llu stockReady=%llu",
                 horizontalDistancePx, absDx, thresholdPx, enabled ? 1 : 0,
-                suppressOriginal ? 1 : 0, readyFinish ? 1 : 0, side,
+                readyFinish ? 1 : 0, effectiveReadyFinish ? 1 : 0,
+                forceNotReady ? 1 : 0, side,
                 static_cast<unsigned long long>(
-                        gSuppressedCount.load(std::memory_order_relaxed)),
+                        gForcedNotReadyCount.load(std::memory_order_relaxed)),
                 static_cast<unsigned long long>(
-                        gPassedCount.load(std::memory_order_relaxed)));
+                        gStockReadyCount.load(std::memory_order_relaxed)));
     }
 
-    // Hard gate: below the configured distance, do not enter Xiaomi's
-    // onSwipeProcess path at all. The previous PauseDetector::reset approach
-    // was observably ineffective on Launcher 8.01.02.5459: the detector reset
-    // returned successfully while the SecurityManager sidebar still opened.
-    // A zero threshold disables this gate and always preserves stock behavior.
-    if (suppressOriginal) return;
-
     if (gOriginalOnSwipeProcess != nullptr) {
-        gOriginalOnSwipeProcess(self, readyFinish, side, point, horizontalDistancePx);
+        gOriginalOnSwipeProcess(
+                self, effectiveReadyFinish, side, point, horizontalDistancePx);
     }
 }
 
@@ -210,7 +212,7 @@ bool installHook(uintptr_t base) {
             onSwipe, kOnSwipeProcessSignature, sizeof(kOnSwipeProcessSignature));
     if (!swipeOk) {
         logLine(ANDROID_LOG_ERROR,
-                "HARD_GATE launcher signature mismatch base=%p; hook skipped",
+                "STAGE_GATE launcher signature mismatch base=%p; hook skipped",
                 reinterpret_cast<void *>(base));
         return false;
     }
@@ -221,7 +223,7 @@ bool installHook(uintptr_t base) {
             reinterpret_cast<void *>(onSwipeProcessHook), &backup);
     if (rc != 0 || backup == nullptr) {
         logLine(ANDROID_LOG_ERROR,
-                "HARD_GATE hook_func failed rc=%d backup=%p", rc, backup);
+                "STAGE_GATE hook_func failed rc=%d backup=%p", rc, backup);
         return false;
     }
 
@@ -229,7 +231,7 @@ bool installHook(uintptr_t base) {
     gHookInstalled.store(true, std::memory_order_release);
     const int thresholdPx = readThresholdPx();
     logLine(ANDROID_LOG_INFO,
-            "HARD_GATE hook installed launcher=8.01.02.5459 base=%p thresholdPx=%d enabled=%d",
+            "STAGE_GATE hook installed launcher=8.01.02.5459 base=%p thresholdPx=%d enabled=%d",
             reinterpret_cast<void *>(base), thresholdPx, thresholdPx > 0 ? 1 : 0);
     return true;
 }
@@ -237,19 +239,19 @@ bool installHook(uintptr_t base) {
 void hookWorker() {
     for (int attempt = 1; attempt <= 200; ++attempt) {
         if (!isTargetProcess()) {
-            logLine(ANDROID_LOG_WARN, "HARD_GATE hook worker left target process; aborting");
+            logLine(ANDROID_LOG_WARN, "STAGE_GATE hook worker left target process; aborting");
             return;
         }
         const LibraryInfo library = findLauncherLibrary();
         if (library.base != 0) {
-            logLine(ANDROID_LOG_INFO, "HARD_GATE found %s base=%p",
+            logLine(ANDROID_LOG_INFO, "STAGE_GATE found %s base=%p",
                     library.path.c_str(), reinterpret_cast<void *>(library.base));
             installHook(library.base);
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    logLine(ANDROID_LOG_ERROR, "HARD_GATE timed out waiting for %s", kTargetLibrary);
+    logLine(ANDROID_LOG_ERROR, "STAGE_GATE timed out waiting for %s", kTargetLibrary);
 }
 
 void ensureWorkerStarted() {
@@ -276,18 +278,18 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     const std::string exe = readExecutable();
     const std::string process = readProcessName();
     logLine(ANDROID_LOG_INFO,
-            "HARD_GATE native_init candidate api=%u exe=%s process=%s hook_func=%p",
+            "STAGE_GATE native_init candidate api=%u exe=%s process=%s hook_func=%p",
             entries->version, exe.c_str(), process.c_str(),
             reinterpret_cast<void *>(entries->hook_func));
 
     if (entries->hook_func == nullptr) {
-        logLine(ANDROID_LOG_ERROR, "HARD_GATE native_init rejected: hook_func is null");
+        logLine(ANDROID_LOG_ERROR, "STAGE_GATE native_init rejected: hook_func is null");
         return nullptr;
     }
     if (exe != kSpawnerPath || process != kTargetPackage) return nullptr;
 
     gHookFunction = entries->hook_func;
-    logLine(ANDROID_LOG_INFO, "HARD_GATE native_init accepted api=%u", entries->version);
+    logLine(ANDROID_LOG_INFO, "STAGE_GATE native_init accepted api=%u", entries->version);
     ensureWorkerStarted();
     return onLibraryLoaded;
 }
