@@ -1,6 +1,5 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
@@ -33,12 +32,8 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
-    }
-
-    kotlinOptions {
-        jvmTarget = "21"
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     externalNativeBuild {
@@ -62,16 +57,16 @@ android {
 dependencies {
     implementation("androidx.core:core:1.19.0")
     implementation("androidx.fragment:fragment:1.8.9")
-    implementation("androidx.activity:activity-compose:1.12.1")
+    implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.compose.material:material-icons-extended:1.10.2")
 
-    // Existing View-based UI remains available while the manager migrates to Compose Miuix.
+    // Keep legacy View fragments compiling during the manager migration.
     implementation("fan.miuix:appcompat:1.0.13.0")
     implementation("fan.miuix:basewidget:1.0.13.0")
     implementation("fan.miuix:preference:1.0.13.0")
     implementation("fan.miuix:springback:1.0.13.0")
 
-    // Reuse the upstream Compose Miuix components instead of recreating HyperOS widgets.
+    // Reuse the official Compose Miuix widgets and blur stack.
     implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.3")
     implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.3")
     implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.3")
