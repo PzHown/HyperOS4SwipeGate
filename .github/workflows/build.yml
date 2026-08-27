@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  packages: read
 
 concurrency:
   group: hyperos4-swipe-gate-${{ github.ref }}
@@ -16,6 +17,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      GITHUB_ACTOR: ${{ github.actor }}
+      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
