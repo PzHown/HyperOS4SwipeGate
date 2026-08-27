@@ -28,12 +28,18 @@ constexpr const char *kThresholdPxProperty = "persist.hyperos4swipegate.threshol
 constexpr int kDefaultThresholdPx = 660;
 constexpr int kMaxThresholdPx = 1600;
 
-// Keep Xiaomi's normal back-arrow progress updates alive only through the
-// first, ordinary-back animation window. Device testing on Launcher 5459
-// proved that fully suppressing onSwipeProcess blocks the sidebar but leaves
-// the first animation incomplete, while the final BACK action still succeeds.
-// Past this window we reuse that proven hard gate until the user threshold.
-constexpr float kBackAnimationWindowPx = 200.0f;
+// HyperOS 4's stock gesture is already a reversible X-axis state machine:
+// while the finger remains down, moving inward can switch from BACK to the
+// sidebar-prep state and moving outward can switch back to BACK. Keep feeding
+// every update to Xiaomi, but before the user-configured gate is reached clamp
+// the X distance to just below the stock sidebar transition region. This keeps
+// stock BACK animation/haptics/release behavior alive without letting the
+// stock state machine cross into the sidebar branch early.
+//
+// 199 px is intentionally one pixel below the first 200 px boundary used by
+// the previous window-gate experiment. If device testing shows the actual
+// stock transition boundary differs, only this guard value needs tuning.
+constexpr float kStockSidebarGuardPx = 199.0f;
 
 // HyperOS 4 System Launcher RELEASE-8.01.02.5459-260807-08242024-R
 constexpr uintptr_t kOnSwipeProcessOffset = 0x816fc4;
@@ -52,9 +58,8 @@ std::atomic<bool> gHookInstalled{false};
 std::atomic<int> gCachedThresholdPx{kDefaultThresholdPx};
 std::atomic<int64_t> gLastThresholdReadMs{0};
 std::atomic<int64_t> gLastSwipeLogMs{0};
-std::atomic<uint64_t> gAnimationPassCount{0};
-std::atomic<uint64_t> gHardBlockCount{0};
-std::atomic<uint64_t> gThresholdPassCount{0};
+std::atomic<uint64_t> gClampedCount{0};
+std::atomic<uint64_t> gPassthroughCount{0};
 
 int64_t monotonicMs() {
     timespec ts{};
@@ -163,8 +168,8 @@ int readThresholdPx() {
     gLastThresholdReadMs.store(now, std::memory_order_relaxed);
     if (previous != thresholdPx) {
         logLine(ANDROID_LOG_INFO,
-                "window-gate threshold changed: %dpx enabled=%d animationWindow=%.0fpx",
-                thresholdPx, thresholdPx > 0 ? 1 : 0, kBackAnimationWindowPx);
+                "x-clamp threshold changed: %dpx enabled=%d guard=%.0fpx",
+                thresholdPx, thresholdPx > 0 ? 1 : 0, kStockSidebarGuardPx);
     }
     return thresholdPx;
 }
@@ -174,31 +179,19 @@ void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
     const int thresholdPx = readThresholdPx();
     const float absDx = std::fabs(horizontalDistancePx);
     const bool enabled = thresholdPx > 0;
-
-    // Three zones:
-    // 1) Stock passthrough while the ordinary BACK arrow animation is forming.
-    // 2) Proven hard suppression after that animation window but before the
-    //    configured sidebar threshold.
-    // 3) Stock passthrough again once the configured threshold is reached.
-    // Threshold 0 is an unconditional stock passthrough.
     const bool thresholdReached = !enabled
             || absDx >= static_cast<float>(thresholdPx);
-    const bool animationPass = enabled
-            && !thresholdReached
-            && absDx < kBackAnimationWindowPx;
-    const bool hardBlock = enabled
-            && !thresholdReached
-            && !animationPass;
 
-    const char *zone = "thresholdPass";
-    if (animationPass) {
-        zone = "animationPass";
-        gAnimationPassCount.fetch_add(1, std::memory_order_relaxed);
-    } else if (hardBlock) {
-        zone = "hardBlock";
-        gHardBlockCount.fetch_add(1, std::memory_order_relaxed);
+    float effectiveDistancePx = horizontalDistancePx;
+    bool clamped = false;
+
+    if (enabled && !thresholdReached && absDx > kStockSidebarGuardPx) {
+        effectiveDistancePx = std::copysign(kStockSidebarGuardPx,
+                                             horizontalDistancePx);
+        clamped = true;
+        gClampedCount.fetch_add(1, std::memory_order_relaxed);
     } else {
-        gThresholdPassCount.fetch_add(1, std::memory_order_relaxed);
+        gPassthroughCount.fetch_add(1, std::memory_order_relaxed);
     }
 
     const int64_t now = monotonicMs();
@@ -206,25 +199,24 @@ void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
     if (now - last >= 120 && gLastSwipeLogMs.compare_exchange_strong(
             last, now, std::memory_order_relaxed)) {
         logLine(ANDROID_LOG_INFO,
-                "WINDOW_GATE internalDx=%.2f absDx=%.2f thresholdPx=%d animationWindow=%.0f enabled=%d zone=%s inputReady=%d side=%u animationPass=%llu hardBlock=%llu thresholdPass=%llu",
-                horizontalDistancePx, absDx, thresholdPx, kBackAnimationWindowPx,
-                enabled ? 1 : 0, zone, readyFinish ? 1 : 0, side,
+                "X_CLAMP rawDx=%.2f effectiveDx=%.2f thresholdPx=%d guardPx=%.0f enabled=%d thresholdReached=%d clamped=%d readyFinish=%d side=%u clampedCount=%llu passthroughCount=%llu",
+                horizontalDistancePx, effectiveDistancePx, thresholdPx,
+                kStockSidebarGuardPx, enabled ? 1 : 0,
+                thresholdReached ? 1 : 0, clamped ? 1 : 0,
+                readyFinish ? 1 : 0, side,
                 static_cast<unsigned long long>(
-                        gAnimationPassCount.load(std::memory_order_relaxed)),
+                        gClampedCount.load(std::memory_order_relaxed)),
                 static_cast<unsigned long long>(
-                        gHardBlockCount.load(std::memory_order_relaxed)),
-                static_cast<unsigned long long>(
-                        gThresholdPassCount.load(std::memory_order_relaxed)));
+                        gPassthroughCount.load(std::memory_order_relaxed)));
     }
 
-    // This is the same effective block that succeeded in 0.1.4-hardgate, but
-    // it begins only after Xiaomi has received enough progress calls to render
-    // the normal first-stage BACK animation.
-    if (hardBlock) return;
-
+    // Always call Xiaomi's original state machine. Only the X distance is
+    // delayed. This preserves the stock reversible transition: after crossing
+    // the user gate, moving the still-held finger back below the gate clamps X
+    // again and lets Xiaomi naturally animate back to the BACK state.
     if (gOriginalOnSwipeProcess != nullptr) {
         gOriginalOnSwipeProcess(
-                self, readyFinish, side, point, horizontalDistancePx);
+                self, readyFinish, side, point, effectiveDistancePx);
     }
 }
 
@@ -237,7 +229,7 @@ bool installHook(uintptr_t base) {
             onSwipe, kOnSwipeProcessSignature, sizeof(kOnSwipeProcessSignature));
     if (!swipeOk) {
         logLine(ANDROID_LOG_ERROR,
-                "WINDOW_GATE launcher signature mismatch base=%p; hook skipped",
+                "X_CLAMP launcher signature mismatch base=%p; hook skipped",
                 reinterpret_cast<void *>(base));
         return false;
     }
@@ -248,7 +240,7 @@ bool installHook(uintptr_t base) {
             reinterpret_cast<void *>(onSwipeProcessHook), &backup);
     if (rc != 0 || backup == nullptr) {
         logLine(ANDROID_LOG_ERROR,
-                "WINDOW_GATE hook_func failed rc=%d backup=%p", rc, backup);
+                "X_CLAMP hook_func failed rc=%d backup=%p", rc, backup);
         return false;
     }
 
@@ -256,28 +248,28 @@ bool installHook(uintptr_t base) {
     gHookInstalled.store(true, std::memory_order_release);
     const int thresholdPx = readThresholdPx();
     logLine(ANDROID_LOG_INFO,
-            "WINDOW_GATE hook installed launcher=8.01.02.5459 base=%p thresholdPx=%d enabled=%d animationWindow=%.0fpx",
-            reinterpret_cast<void *>(base), thresholdPx, thresholdPx > 0 ? 1 : 0,
-            kBackAnimationWindowPx);
+            "X_CLAMP hook installed launcher=8.01.02.5459 base=%p thresholdPx=%d enabled=%d guardPx=%.0f",
+            reinterpret_cast<void *>(base), thresholdPx,
+            thresholdPx > 0 ? 1 : 0, kStockSidebarGuardPx);
     return true;
 }
 
 void hookWorker() {
     for (int attempt = 1; attempt <= 200; ++attempt) {
         if (!isTargetProcess()) {
-            logLine(ANDROID_LOG_WARN, "WINDOW_GATE hook worker left target process; aborting");
+            logLine(ANDROID_LOG_WARN, "X_CLAMP hook worker left target process; aborting");
             return;
         }
         const LibraryInfo library = findLauncherLibrary();
         if (library.base != 0) {
-            logLine(ANDROID_LOG_INFO, "WINDOW_GATE found %s base=%p",
+            logLine(ANDROID_LOG_INFO, "X_CLAMP found %s base=%p",
                     library.path.c_str(), reinterpret_cast<void *>(library.base));
             installHook(library.base);
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    logLine(ANDROID_LOG_ERROR, "WINDOW_GATE timed out waiting for %s", kTargetLibrary);
+    logLine(ANDROID_LOG_ERROR, "X_CLAMP timed out waiting for %s", kTargetLibrary);
 }
 
 void ensureWorkerStarted() {
@@ -304,18 +296,18 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     const std::string exe = readExecutable();
     const std::string process = readProcessName();
     logLine(ANDROID_LOG_INFO,
-            "WINDOW_GATE native_init candidate api=%u exe=%s process=%s hook_func=%p",
+            "X_CLAMP native_init candidate api=%u exe=%s process=%s hook_func=%p",
             entries->version, exe.c_str(), process.c_str(),
             reinterpret_cast<void *>(entries->hook_func));
 
     if (entries->hook_func == nullptr) {
-        logLine(ANDROID_LOG_ERROR, "WINDOW_GATE native_init rejected: hook_func is null");
+        logLine(ANDROID_LOG_ERROR, "X_CLAMP native_init rejected: hook_func is null");
         return nullptr;
     }
     if (exe != kSpawnerPath || process != kTargetPackage) return nullptr;
 
     gHookFunction = entries->hook_func;
-    logLine(ANDROID_LOG_INFO, "WINDOW_GATE native_init accepted api=%u", entries->version);
+    logLine(ANDROID_LOG_INFO, "X_CLAMP native_init accepted api=%u", entries->version);
     ensureWorkerStarted();
     return onLibraryLoaded;
 }
