@@ -26,6 +26,7 @@ constexpr const char *kTargetPackage = "com.miui.home";
 constexpr const char *kSpawnerPath = "/system_ext/bin/hyos_spawner";
 constexpr const char *kTargetLibrary = "libapp_launcher.so";
 constexpr const char *kThresholdProperty = "persist.hyperos4swipegate.threshold";
+constexpr const char *kScreenWidthProperty = "persist.hyperos4swipegate.screen_width";
 constexpr int kDefaultThreshold = 55;
 
 // HyperOS 4 System Launcher RELEASE-8.01.02.5459-260807-08242024-R
@@ -156,23 +157,25 @@ bool matchesSignature(uintptr_t address, const uint8_t *signature, size_t size) 
     return address != 0 && std::memcmp(reinterpret_cast<const void *>(address), signature, size) == 0;
 }
 
+int readIntegerProperty(const char *name, int minimum, int maximum, int fallback) {
+    char value[PROP_VALUE_MAX]{};
+    if (__system_property_get(name, value) <= 0) return fallback;
+
+    char *end = nullptr;
+    long parsed = strtol(value, &end, 10);
+    if (end == value || *end != '\0' || parsed < minimum || parsed > maximum) {
+        return fallback;
+    }
+    return static_cast<int>(parsed);
+}
+
 int readThresholdPercent() {
     const int64_t now = monotonicMs();
     const int64_t last = gLastThresholdReadMs.load(std::memory_order_relaxed);
     if (now - last < 250) return gCachedThreshold.load(std::memory_order_relaxed);
 
-    char value[PROP_VALUE_MAX]{};
-    int threshold = kDefaultThreshold;
-    if (__system_property_get(kThresholdProperty, value) > 0) {
-        char *end = nullptr;
-        long parsed = strtol(value, &end, 10);
-        if (end != value && *end == '\0') {
-            if (parsed < 0) parsed = 0;
-            if (parsed > 100) parsed = 100;
-            threshold = static_cast<int>(parsed);
-        }
-    }
-
+    const int threshold = readIntegerProperty(
+            kThresholdProperty, 0, 100, kDefaultThreshold);
     const int previous = gCachedThreshold.exchange(threshold, std::memory_order_relaxed);
     gLastThresholdReadMs.store(now, std::memory_order_relaxed);
     if (previous != threshold) {
@@ -196,18 +199,42 @@ int getScreenWidth() {
     const int64_t last = gLastScreenWidthReadMs.load(std::memory_order_relaxed);
     int cached = gCachedScreenWidth.load(std::memory_order_relaxed);
     if (cached > 0 && now - last < 1000) return cached;
-    if (!gGetScreenDimensions || !resolveDisplayApi()) return cached;
+
+    const int propertyWidth = readIntegerProperty(kScreenWidthProperty, 200, 10000, 0);
+    if (propertyWidth > 0) {
+        const int previous = gCachedScreenWidth.exchange(propertyWidth, std::memory_order_relaxed);
+        gLastScreenWidthReadMs.store(now, std::memory_order_relaxed);
+        if (previous != propertyWidth) {
+            logLine(ANDROID_LOG_INFO,
+                    "screen width=%d source=system_property", propertyWidth);
+        }
+        return propertyWidth;
+    }
+
+    if (!gGetScreenDimensions || !resolveDisplayApi()) {
+        gLastScreenWidthReadMs.store(now, std::memory_order_relaxed);
+        return cached;
+    }
 
     void *manager = gDisplayManagerGetInstance();
-    if (!manager) return cached;
+    if (!manager) {
+        gLastScreenWidthReadMs.store(now, std::memory_order_relaxed);
+        return cached;
+    }
     void *display = gDisplayManagerGetDisplay(manager, 0);
-    if (!display) return cached;
+    if (!display) {
+        gLastScreenWidthReadMs.store(now, std::memory_order_relaxed);
+        return cached;
+    }
 
     int width = gGetScreenDimensions(display);
     gDisplayDrop(display);
+    gLastScreenWidthReadMs.store(now, std::memory_order_relaxed);
     if (width > 0) {
-        gCachedScreenWidth.store(width, std::memory_order_relaxed);
-        gLastScreenWidthReadMs.store(now, std::memory_order_relaxed);
+        const int previous = gCachedScreenWidth.exchange(width, std::memory_order_relaxed);
+        if (previous != width) {
+            logLine(ANDROID_LOG_INFO, "screen width=%d source=native_display_api", width);
+        }
         return width;
     }
     return cached;
@@ -259,7 +286,7 @@ bool installHook(uintptr_t base) {
             reset, kPauseResetSignature, sizeof(kPauseResetSignature));
     const bool dimensionsSignatureOk = matchesSignature(
             dimensions, kGetScreenDimensionsSignature, sizeof(kGetScreenDimensionsSignature));
-    if (!swipeSignatureOk || !resetSignatureOk || !dimensionsSignatureOk) {
+    if (!swipeSignatureOk || !resetSignatureOk) {
         logLine(ANDROID_LOG_ERROR,
                 "launcher signature mismatch base=%p swipe=%d reset=%d dimensions=%d; hook skipped",
                 reinterpret_cast<void *>(base), swipeSignatureOk ? 1 : 0,
@@ -268,10 +295,19 @@ bool installHook(uintptr_t base) {
     }
 
     gPauseDetectorReset = reinterpret_cast<PauseDetectorResetFn>(reset);
-    gGetScreenDimensions = reinterpret_cast<GetScreenDimensionsFn>(dimensions);
-    const bool displayApiOk = resolveDisplayApi();
+    if (dimensionsSignatureOk) {
+        gGetScreenDimensions = reinterpret_cast<GetScreenDimensionsFn>(dimensions);
+    } else {
+        gGetScreenDimensions = nullptr;
+        logLine(ANDROID_LOG_WARN,
+                "screen-dimensions fingerprint mismatch; property width will be used");
+    }
+
+    const bool displayApiOk = gGetScreenDimensions != nullptr && resolveDisplayApi();
     logLine(displayApiOk ? ANDROID_LOG_INFO : ANDROID_LOG_WARN,
-            "display API resolved=%d", displayApiOk ? 1 : 0);
+            "display API resolved=%d propertyWidth=%d",
+            displayApiOk ? 1 : 0,
+            readIntegerProperty(kScreenWidthProperty, 200, 10000, 0));
 
     void *backup = nullptr;
     int rc = gHookFunction(reinterpret_cast<void *>(onSwipe),
@@ -284,8 +320,8 @@ bool installHook(uintptr_t base) {
     gOriginalOnSwipeProcess = reinterpret_cast<OnSwipeProcessFn>(backup);
     gHookInstalled.store(true, std::memory_order_release);
     logLine(ANDROID_LOG_INFO,
-            "hook installed launcher=8.01.02.5459 base=%p threshold=%d%%",
-            reinterpret_cast<void *>(base), readThresholdPercent());
+            "hook installed launcher=8.01.02.5459 base=%p threshold=%d%% screenWidth=%d",
+            reinterpret_cast<void *>(base), readThresholdPercent(), getScreenWidth());
     return true;
 }
 
