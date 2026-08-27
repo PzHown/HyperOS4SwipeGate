@@ -58,7 +58,6 @@ dependencies {
     implementation("androidx.core:core:1.19.0")
     implementation("androidx.fragment:fragment:1.8.9")
     implementation("androidx.activity:activity-compose:1.13.0")
-    implementation("androidx.compose.material:material-icons-extended:1.10.2")
 
     // Keep legacy View fragments compiling during the manager migration.
     implementation("fan.miuix:appcompat:1.0.13.0")
@@ -66,9 +65,10 @@ dependencies {
     implementation("fan.miuix:preference:1.0.13.0")
     implementation("fan.miuix:springback:1.0.13.0")
 
-    // Reuse the official Compose Miuix widgets and blur stack.
+    // Reuse the official Compose Miuix widgets, icons and blur stack.
     implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.3")
     implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.3")
+    implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.3")
     implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.3")
 
     compileOnly("io.github.libxposed:api:102.0.0")
