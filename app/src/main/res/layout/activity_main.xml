@@ -20,6 +20,12 @@
             android:text="@string/tab_settings" />
 
         <fan.miuixbase.widget.FilterSortTabView
+            android:id="@+id/tab_logs"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/tab_logs" />
+
+        <fan.miuixbase.widget.FilterSortTabView
             android:id="@+id/tab_about"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
