@@ -25,20 +25,16 @@ constexpr const char *kTargetLibrary = "libapp_launcher.so";
 
 // Exact target used only for this read-only reverse-engineering probe:
 // HyperOS 4 System Launcher RELEASE-8.01.02.5459-260807-08242024-R.
-// The address and prologue were recovered from this exact library's
-// .gnu_debugdata local Rust symbols and already verified on-device.
 constexpr uintptr_t kOnSwipeProcessOffset = 0x816fc4;
 constexpr uint8_t kOnSwipeProcessSignature[] = {
         0xff, 0x83, 0x05, 0xd1, 0xea, 0x7b, 0x00, 0xfd,
         0xe9, 0xa3, 0x0f, 0x6d, 0xfd, 0xfb, 0x10, 0xa9,
 };
 
-// Old 8.x builds show on_swipe_process as roughly 0x1544 bytes. Do not assume
-// that size for 5459: dump a bounded 0x2000-byte RX window instead, then locate
-// the actual function end from the exact 5459 instructions offline.
 constexpr size_t kProbeBytes = 0x2000;
 constexpr size_t kBytesPerLogLine = 256;
 
+HookFunType gHookFunction = nullptr;
 std::atomic<bool> gWorkerStarted{false};
 std::atomic<bool> gProbeDone{false};
 
@@ -242,12 +238,25 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     const std::string exe = readExecutable();
     const std::string process = readProcessName();
     logLine(ANDROID_LOG_INFO,
-            "CODE_PROBE native_init candidate api=%u exe=%s process=%s",
-            entries->version, exe.c_str(), process.c_str());
+            "CODE_PROBE native_init candidate api=%u exe=%s process=%s hook_func=%p",
+            entries->version, exe.c_str(), process.c_str(),
+            reinterpret_cast<void *>(entries->hook_func));
+
+    // Keep the same API102 initialization envelope as the previously proven
+    // calibration/hard-gate builds. The probe itself installs no function hook,
+    // but validating and retaining hook_func avoids changing the loader contract
+    // while we isolate the missing native callback issue.
+    if (entries->hook_func == nullptr) {
+        logLine(ANDROID_LOG_ERROR,
+                "CODE_PROBE native_init rejected: hook_func is null");
+        return nullptr;
+    }
     if (exe != kSpawnerPath || process != kTargetPackage) return nullptr;
 
+    gHookFunction = entries->hook_func;
     logLine(ANDROID_LOG_INFO,
-            "CODE_PROBE native_init accepted; read-only probe, no hook installed");
+            "CODE_PROBE native_init accepted api=%u; read-only probe, no hook installed",
+            entries->version);
     ensureWorkerStarted();
     return onLibraryLoaded;
 }
