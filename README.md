@@ -55,6 +55,10 @@ progress = horizontalDistancePx / screenWidth
 - `SeekBarPreferenceCompat`：触发阈值横条。
 - “关于”页采用 MIUIX LSP 项目常见的版本卡片 / 信息卡片结构，设计参考 HyperCeiler 的 About 页面，但未复制其自定义组件代码。
 
+## 开发状态
+
+当前为首个 alpha 适配版本，GitHub Actions 会对每次主分支提交构建 APK，并检查 LSPosed API 102 元数据、native 入口和 16 KB ELF 对齐。
+
 ## 风险提示
 
 该项目会 Hook 系统桌面 native/Rust 代码。仅对上面列出的桌面版本启用；升级系统桌面后如签名变化，模块会 fail-closed 并保持原厂行为，需重新适配偏移。
