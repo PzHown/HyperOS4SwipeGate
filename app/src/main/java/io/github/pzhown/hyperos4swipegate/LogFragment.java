@@ -88,17 +88,20 @@ public final class LogFragment extends Fragment {
                 .append(" sdk=").append(Build.VERSION.SDK_INT).append('\n');
         out.append("expectedLauncher=RELEASE-8.01.02.5459\n");
         out.append("stockSidebarBoundary=88dp (264px at 480dpi)\n");
+        out.append("thresholdSemantics=0 means stock/default 88dp; 89..320dp delays stock transition\n");
         out.append("expectedExe=/system_ext/bin/hyos_spawner\n\n");
 
         String script = ""
                 + "echo '[root]'\n"
                 + "id\n"
                 + "echo\n"
-                + "echo '[threshold px]'\n"
-                + "getprop persist.hyperos4swipegate.threshold_px\n"
+                + "echo '[threshold dp]'\n"
+                + "getprop persist.hyperos4swipegate.threshold_dp\n"
                 + "echo\n"
-                + "echo '[legacy threshold percent - ignored]'\n"
-                + "getprop persist.hyperos4swipegate.threshold\n"
+                + "echo '[legacy properties - ignored]'\n"
+                + "echo \"threshold_px=$(getprop persist.hyperos4swipegate.threshold_px)\"\n"
+                + "echo \"extra_dp=$(getprop persist.hyperos4swipegate.extra_dp)\"\n"
+                + "echo \"threshold_percent=$(getprop persist.hyperos4swipegate.threshold)\"\n"
                 + "echo\n"
                 + "echo '[native display sources - reference only]'\n"
                 + "for p in persist.sys.miui_resolution persist.sys.display-size vendor.display-size ro.boot.display_resolution; do v=$(getprop $p); [ -n \"$v\" ] && echo \"$p=$v\"; done\n"
