@@ -34,7 +34,7 @@
                 android:layout_gravity="center_horizontal"
                 android:layout_marginTop="14dp"
                 android:text="@string/app_name"
-                android:textAppearance="?android:attr/textAppearanceHeadlineSmall"
+                android:textSize="24sp"
                 android:textStyle="bold" />
 
             <TextView
