@@ -39,6 +39,7 @@ public final class LogFragment extends Fragment {
 
         refreshButton.setOnClickListener(v -> refreshLogs());
         copyButton.setOnClickListener(v -> copyLogs());
+        ConfigBridge.syncScreenWidthAsync(requireContext());
         refreshLogs();
     }
 
@@ -57,6 +58,7 @@ public final class LogFragment extends Fragment {
     }
 
     private void refreshLogs() {
+        ConfigBridge.syncScreenWidthAsync(requireContext());
         if (refreshButton != null) refreshButton.setEnabled(false);
         if (logText != null) logText.setText(R.string.log_loading);
 
@@ -96,6 +98,9 @@ public final class LogFragment extends Fragment {
                 + "echo\n"
                 + "echo '[threshold]'\n"
                 + "getprop persist.hyperos4swipegate.threshold\n"
+                + "echo\n"
+                + "echo '[screen width]'\n"
+                + "getprop persist.hyperos4swipegate.screen_width\n"
                 + "echo\n"
                 + "echo '[processes]'\n"
                 + "ps -A 2>/dev/null | grep -E 'hyos_spawner|com.miui.home' || true\n"
