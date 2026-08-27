@@ -12,7 +12,8 @@ import fan.miuixbase.widget.FilterSortView2;
 public final class MainActivity extends AppCompatActivity {
     private static final String STATE_TAB = "tab";
     private static final int TAB_SETTINGS = 0;
-    private static final int TAB_ABOUT = 1;
+    private static final int TAB_LOGS = 1;
+    private static final int TAB_ABOUT = 2;
 
     private FilterSortView2 tabBar;
     private int currentTab = TAB_SETTINGS;
@@ -25,6 +26,7 @@ public final class MainActivity extends AppCompatActivity {
 
         tabBar = findViewById(R.id.main_tabs);
         FilterSortTabView settingsTab = findViewById(R.id.tab_settings);
+        FilterSortTabView logsTab = findViewById(R.id.tab_logs);
         FilterSortTabView aboutTab = findViewById(R.id.tab_about);
 
         if (savedInstanceState != null) {
@@ -32,6 +34,7 @@ public final class MainActivity extends AppCompatActivity {
         }
 
         settingsTab.setOnClickListener(v -> showTab(TAB_SETTINGS));
+        logsTab.setOnClickListener(v -> showTab(TAB_LOGS));
         aboutTab.setOnClickListener(v -> showTab(TAB_ABOUT));
         tabBar.setFilteredTab(currentTab);
 
@@ -49,7 +52,16 @@ public final class MainActivity extends AppCompatActivity {
     private void showTab(int tab) {
         currentTab = tab;
         tabBar.setFilteredTab(tab);
-        Fragment fragment = tab == TAB_SETTINGS ? new SettingsFragment() : new AboutFragment();
+
+        Fragment fragment;
+        if (tab == TAB_LOGS) {
+            fragment = new LogFragment();
+        } else if (tab == TAB_ABOUT) {
+            fragment = new AboutFragment();
+        } else {
+            fragment = new SettingsFragment();
+        }
+
         getSupportFragmentManager()
                 .beginTransaction()
                 .replace(R.id.content_container, fragment)
