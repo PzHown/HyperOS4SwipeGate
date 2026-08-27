@@ -24,8 +24,6 @@ public final class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
         setTitle(R.string.app_name);
 
-        ConfigBridge.syncScreenWidthAsync(this);
-
         tabBar = findViewById(R.id.main_tabs);
         FilterSortTabView settingsTab = findViewById(R.id.tab_settings);
         FilterSortTabView logsTab = findViewById(R.id.tab_logs);
@@ -43,12 +41,6 @@ public final class MainActivity extends AppCompatActivity {
         if (savedInstanceState == null) {
             showTab(currentTab);
         }
-    }
-
-    @Override
-    protected void onResume() {
-        super.onResume();
-        ConfigBridge.syncScreenWidthAsync(this);
     }
 
     @Override
