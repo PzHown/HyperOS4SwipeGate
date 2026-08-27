@@ -1,5 +1,7 @@
 plugins {
     id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
@@ -12,8 +14,8 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        versionCode = 13
-        versionName = "0.2.2-dpgate-safefix"
+        versionCode = 14
+        versionName = "0.3.0-miuix-ui"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -27,11 +29,16 @@ android {
 
     buildFeatures {
         buildConfig = true
+        compose = true
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
+    }
+
+    kotlinOptions {
+        jvmTarget = "21"
     }
 
     externalNativeBuild {
@@ -55,11 +62,19 @@ android {
 dependencies {
     implementation("androidx.core:core:1.19.0")
     implementation("androidx.fragment:fragment:1.8.9")
+    implementation("androidx.activity:activity-compose:1.12.1")
+    implementation("androidx.compose.material:material-icons-extended:1.10.2")
 
+    // Existing View-based UI remains available while the manager migrates to Compose Miuix.
     implementation("fan.miuix:appcompat:1.0.13.0")
     implementation("fan.miuix:basewidget:1.0.13.0")
     implementation("fan.miuix:preference:1.0.13.0")
     implementation("fan.miuix:springback:1.0.13.0")
+
+    // Reuse the upstream Compose Miuix components instead of recreating HyperOS widgets.
+    implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.3")
+    implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.3")
+    implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.3")
 
     compileOnly("io.github.libxposed:api:102.0.0")
     implementation("io.github.libxposed:service:102.0.0")
