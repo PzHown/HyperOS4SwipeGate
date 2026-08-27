@@ -30,30 +30,23 @@ constexpr int kMaxThresholdPx = 1600;
 
 // HyperOS 4 System Launcher RELEASE-8.01.02.5459-260807-08242024-R
 constexpr uintptr_t kOnSwipeProcessOffset = 0x816fc4;
-constexpr uintptr_t kPauseDetectorResetOffset = 0x783aa8;
-constexpr uintptr_t kPauseDetectorOffsetInBackHelper = 0x178;
-
 constexpr uint8_t kOnSwipeProcessSignature[] = {
         0xff, 0x83, 0x05, 0xd1, 0xea, 0x7b, 0x00, 0xfd,
         0xe9, 0xa3, 0x0f, 0x6d, 0xfd, 0xfb, 0x10, 0xa9,
 };
-constexpr uint8_t kPauseResetSignature[] = {
-        0xff, 0x83, 0x02, 0xd1, 0xfd, 0x7b, 0x08, 0xa9,
-        0xf4, 0x4f, 0x09, 0xa9, 0xfd, 0x03, 0x02, 0x91,
-};
 
 using OnSwipeProcessFn = void (*)(void *, bool, uint32_t, const void *, float);
-using PauseDetectorResetFn = void (*)(void *);
 
 HookFunType gHookFunction = nullptr;
 OnSwipeProcessFn gOriginalOnSwipeProcess = nullptr;
-PauseDetectorResetFn gPauseDetectorReset = nullptr;
 
 std::atomic<bool> gWorkerStarted{false};
 std::atomic<bool> gHookInstalled{false};
 std::atomic<int> gCachedThresholdPx{kDefaultThresholdPx};
 std::atomic<int64_t> gLastThresholdReadMs{0};
 std::atomic<int64_t> gLastSwipeLogMs{0};
+std::atomic<uint64_t> gSuppressedCount{0};
+std::atomic<uint64_t> gPassedCount{0};
 
 int64_t monotonicMs() {
     timespec ts{};
@@ -162,7 +155,7 @@ int readThresholdPx() {
     gLastThresholdReadMs.store(now, std::memory_order_relaxed);
     if (previous != thresholdPx) {
         logLine(ANDROID_LOG_INFO,
-                "pixel threshold changed: %dpx enabled=%d",
+                "hard-gate threshold changed: %dpx enabled=%d",
                 thresholdPx, thresholdPx > 0 ? 1 : 0);
     }
     return thresholdPx;
@@ -173,14 +166,13 @@ void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
     const int thresholdPx = readThresholdPx();
     const float absDx = std::fabs(horizontalDistancePx);
     const bool enabled = thresholdPx > 0;
-    bool pauseReset = false;
+    const bool suppressOriginal = enabled
+            && absDx < static_cast<float>(thresholdPx);
 
-    if (enabled && self != nullptr && gPauseDetectorReset != nullptr
-            && absDx < static_cast<float>(thresholdPx)) {
-        void *detector = reinterpret_cast<void *>(
-                reinterpret_cast<uintptr_t>(self) + kPauseDetectorOffsetInBackHelper);
-        gPauseDetectorReset(detector);
-        pauseReset = true;
+    if (suppressOriginal) {
+        gSuppressedCount.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        gPassedCount.fetch_add(1, std::memory_order_relaxed);
     }
 
     const int64_t now = monotonicMs();
@@ -188,10 +180,21 @@ void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
     if (now - last >= 120 && gLastSwipeLogMs.compare_exchange_strong(
             last, now, std::memory_order_relaxed)) {
         logLine(ANDROID_LOG_INFO,
-                "PIXEL_GATE internalDx=%.2f absDx=%.2f thresholdPx=%d enabled=%d pauseReset=%d readyFinish=%d side=%u",
+                "HARD_GATE internalDx=%.2f absDx=%.2f thresholdPx=%d enabled=%d suppressOriginal=%d readyFinish=%d side=%u suppressed=%llu passed=%llu",
                 horizontalDistancePx, absDx, thresholdPx, enabled ? 1 : 0,
-                pauseReset ? 1 : 0, readyFinish ? 1 : 0, side);
+                suppressOriginal ? 1 : 0, readyFinish ? 1 : 0, side,
+                static_cast<unsigned long long>(
+                        gSuppressedCount.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(
+                        gPassedCount.load(std::memory_order_relaxed)));
     }
+
+    // Hard gate: below the configured distance, do not enter Xiaomi's
+    // onSwipeProcess path at all. The previous PauseDetector::reset approach
+    // was observably ineffective on Launcher 8.01.02.5459: the detector reset
+    // returned successfully while the SecurityManager sidebar still opened.
+    // A zero threshold disables this gate and always preserves stock behavior.
+    if (suppressOriginal) return;
 
     if (gOriginalOnSwipeProcess != nullptr) {
         gOriginalOnSwipeProcess(self, readyFinish, side, point, horizontalDistancePx);
@@ -203,19 +206,14 @@ bool installHook(uintptr_t base) {
     if (base == 0 || gHookFunction == nullptr) return false;
 
     const uintptr_t onSwipe = base + kOnSwipeProcessOffset;
-    const uintptr_t reset = base + kPauseDetectorResetOffset;
     const bool swipeOk = matchesSignature(
             onSwipe, kOnSwipeProcessSignature, sizeof(kOnSwipeProcessSignature));
-    const bool resetOk = matchesSignature(
-            reset, kPauseResetSignature, sizeof(kPauseResetSignature));
-    if (!swipeOk || !resetOk) {
+    if (!swipeOk) {
         logLine(ANDROID_LOG_ERROR,
-                "PIXEL_GATE launcher signature mismatch base=%p swipe=%d reset=%d; hook skipped",
-                reinterpret_cast<void *>(base), swipeOk ? 1 : 0, resetOk ? 1 : 0);
+                "HARD_GATE launcher signature mismatch base=%p; hook skipped",
+                reinterpret_cast<void *>(base));
         return false;
     }
-
-    gPauseDetectorReset = reinterpret_cast<PauseDetectorResetFn>(reset);
 
     void *backup = nullptr;
     const int rc = gHookFunction(
@@ -223,7 +221,7 @@ bool installHook(uintptr_t base) {
             reinterpret_cast<void *>(onSwipeProcessHook), &backup);
     if (rc != 0 || backup == nullptr) {
         logLine(ANDROID_LOG_ERROR,
-                "PIXEL_GATE hook_func failed rc=%d backup=%p", rc, backup);
+                "HARD_GATE hook_func failed rc=%d backup=%p", rc, backup);
         return false;
     }
 
@@ -231,7 +229,7 @@ bool installHook(uintptr_t base) {
     gHookInstalled.store(true, std::memory_order_release);
     const int thresholdPx = readThresholdPx();
     logLine(ANDROID_LOG_INFO,
-            "PIXEL_GATE hook installed launcher=8.01.02.5459 base=%p thresholdPx=%d enabled=%d",
+            "HARD_GATE hook installed launcher=8.01.02.5459 base=%p thresholdPx=%d enabled=%d",
             reinterpret_cast<void *>(base), thresholdPx, thresholdPx > 0 ? 1 : 0);
     return true;
 }
@@ -239,19 +237,19 @@ bool installHook(uintptr_t base) {
 void hookWorker() {
     for (int attempt = 1; attempt <= 200; ++attempt) {
         if (!isTargetProcess()) {
-            logLine(ANDROID_LOG_WARN, "PIXEL_GATE hook worker left target process; aborting");
+            logLine(ANDROID_LOG_WARN, "HARD_GATE hook worker left target process; aborting");
             return;
         }
         const LibraryInfo library = findLauncherLibrary();
         if (library.base != 0) {
-            logLine(ANDROID_LOG_INFO, "PIXEL_GATE found %s base=%p",
+            logLine(ANDROID_LOG_INFO, "HARD_GATE found %s base=%p",
                     library.path.c_str(), reinterpret_cast<void *>(library.base));
             installHook(library.base);
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    logLine(ANDROID_LOG_ERROR, "PIXEL_GATE timed out waiting for %s", kTargetLibrary);
+    logLine(ANDROID_LOG_ERROR, "HARD_GATE timed out waiting for %s", kTargetLibrary);
 }
 
 void ensureWorkerStarted() {
@@ -278,18 +276,18 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     const std::string exe = readExecutable();
     const std::string process = readProcessName();
     logLine(ANDROID_LOG_INFO,
-            "PIXEL_GATE native_init candidate api=%u exe=%s process=%s hook_func=%p",
+            "HARD_GATE native_init candidate api=%u exe=%s process=%s hook_func=%p",
             entries->version, exe.c_str(), process.c_str(),
             reinterpret_cast<void *>(entries->hook_func));
 
     if (entries->hook_func == nullptr) {
-        logLine(ANDROID_LOG_ERROR, "PIXEL_GATE native_init rejected: hook_func is null");
+        logLine(ANDROID_LOG_ERROR, "HARD_GATE native_init rejected: hook_func is null");
         return nullptr;
     }
     if (exe != kSpawnerPath || process != kTargetPackage) return nullptr;
 
     gHookFunction = entries->hook_func;
-    logLine(ANDROID_LOG_INFO, "PIXEL_GATE native_init accepted api=%u", entries->version);
+    logLine(ANDROID_LOG_INFO, "HARD_GATE native_init accepted api=%u", entries->version);
     ensureWorkerStarted();
     return onLibraryLoaded;
 }
