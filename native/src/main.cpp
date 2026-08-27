@@ -3,6 +3,7 @@
 #include <android/log.h>
 #include <fcntl.h>
 #include <link.h>
+#include <sys/system_properties.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -12,6 +13,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -22,23 +24,36 @@ constexpr const char *kTag = "HyperOS4SwipeGateNative";
 constexpr const char *kTargetPackage = "com.miui.home";
 constexpr const char *kSpawnerPath = "/system_ext/bin/hyos_spawner";
 constexpr const char *kTargetLibrary = "libapp_launcher.so";
+constexpr const char *kThresholdProperty = "persist.hyperos4swipegate.threshold";
+constexpr int kDefaultThreshold = 55;
+constexpr float kLauncherCoordinateWidthPx = 1200.0f;
 
 // HyperOS 4 System Launcher RELEASE-8.01.02.5459-260807-08242024-R
 constexpr uintptr_t kOnSwipeProcessOffset = 0x816fc4;
+constexpr uintptr_t kPauseDetectorResetOffset = 0x783aa8;
+constexpr uintptr_t kPauseDetectorOffsetInBackHelper = 0x178;
+
 constexpr uint8_t kOnSwipeProcessSignature[] = {
         0xff, 0x83, 0x05, 0xd1, 0xea, 0x7b, 0x00, 0xfd,
         0xe9, 0xa3, 0x0f, 0x6d, 0xfd, 0xfb, 0x10, 0xa9,
 };
+constexpr uint8_t kPauseResetSignature[] = {
+        0xff, 0x83, 0x02, 0xd1, 0xfd, 0x7b, 0x08, 0xa9,
+        0xf4, 0x4f, 0x09, 0xa9, 0xfd, 0x03, 0x02, 0x91,
+};
 
 using OnSwipeProcessFn = void (*)(void *, bool, uint32_t, const void *, float);
+using PauseDetectorResetFn = void (*)(void *);
 
 HookFunType gHookFunction = nullptr;
 OnSwipeProcessFn gOriginalOnSwipeProcess = nullptr;
+PauseDetectorResetFn gPauseDetectorReset = nullptr;
 
 std::atomic<bool> gWorkerStarted{false};
 std::atomic<bool> gHookInstalled{false};
+std::atomic<int> gCachedThreshold{kDefaultThreshold};
+std::atomic<int64_t> gLastThresholdReadMs{0};
 std::atomic<int64_t> gLastSwipeLogMs{0};
-std::atomic<uint64_t> gSwipeSampleCounter{0};
 
 int64_t monotonicMs() {
     timespec ts{};
@@ -126,23 +141,57 @@ bool matchesSignature(uintptr_t address, const uint8_t *signature, size_t size) 
             && std::memcmp(reinterpret_cast<const void *>(address), signature, size) == 0;
 }
 
-void onSwipeProcessCalibrationHook(void *self, bool readyFinish, uint32_t side,
-                                   const void *point, float horizontalDistancePx) {
+int readThresholdPercent() {
     const int64_t now = monotonicMs();
-    int64_t last = gLastSwipeLogMs.load(std::memory_order_relaxed);
-    if (now - last >= 100 && gLastSwipeLogMs.compare_exchange_strong(
-            last, now, std::memory_order_relaxed)) {
-        const uint64_t sample = gSwipeSampleCounter.fetch_add(
-                1, std::memory_order_relaxed) + 1;
-        logLine(ANDROID_LOG_INFO,
-                "CAL sample=%llu internalDx=%.2f absDx=%.2f readyFinish=%d side=%u self=%p",
-                static_cast<unsigned long long>(sample),
-                horizontalDistancePx, std::fabs(horizontalDistancePx),
-                readyFinish ? 1 : 0, side, self);
+    const int64_t last = gLastThresholdReadMs.load(std::memory_order_relaxed);
+    if (now - last < 250) return gCachedThreshold.load(std::memory_order_relaxed);
+
+    int threshold = kDefaultThreshold;
+    char value[PROP_VALUE_MAX]{};
+    if (__system_property_get(kThresholdProperty, value) > 0) {
+        char *end = nullptr;
+        long parsed = std::strtol(value, &end, 10);
+        if (end != value) {
+            if (parsed < 0) parsed = 0;
+            if (parsed > 100) parsed = 100;
+            threshold = static_cast<int>(parsed);
+        }
     }
 
-    // Calibration build: observe only. Never reset Xiaomi's PauseDetector and
-    // never alter the stock Back/sidebar behavior.
+    const int previous = gCachedThreshold.exchange(threshold, std::memory_order_relaxed);
+    gLastThresholdReadMs.store(now, std::memory_order_relaxed);
+    if (previous != threshold) {
+        logLine(ANDROID_LOG_INFO, "threshold changed: %d%%", threshold);
+    }
+    return threshold;
+}
+
+void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
+                        const void *point, float horizontalDistancePx) {
+    const int threshold = readThresholdPercent();
+    const float absDx = std::fabs(horizontalDistancePx);
+    const float thresholdPx = kLauncherCoordinateWidthPx
+            * static_cast<float>(threshold) / 100.0f;
+    const float progress = absDx / kLauncherCoordinateWidthPx;
+    bool pauseReset = false;
+
+    if (self != nullptr && gPauseDetectorReset != nullptr && absDx < thresholdPx) {
+        void *detector = reinterpret_cast<void *>(
+                reinterpret_cast<uintptr_t>(self) + kPauseDetectorOffsetInBackHelper);
+        gPauseDetectorReset(detector);
+        pauseReset = true;
+    }
+
+    const int64_t now = monotonicMs();
+    int64_t last = gLastSwipeLogMs.load(std::memory_order_relaxed);
+    if (now - last >= 120 && gLastSwipeLogMs.compare_exchange_strong(
+            last, now, std::memory_order_relaxed)) {
+        logLine(ANDROID_LOG_INFO,
+                "FIXED1200 internalDx=%.2f absDx=%.2f progress=%.4f threshold=%d%% thresholdPx=%.2f pauseReset=%d readyFinish=%d side=%u",
+                horizontalDistancePx, absDx, progress, threshold, thresholdPx,
+                pauseReset ? 1 : 0, readyFinish ? 1 : 0, side);
+    }
+
     if (gOriginalOnSwipeProcess != nullptr) {
         gOriginalOnSwipeProcess(self, readyFinish, side, point, horizontalDistancePx);
     }
@@ -153,47 +202,56 @@ bool installHook(uintptr_t base) {
     if (base == 0 || gHookFunction == nullptr) return false;
 
     const uintptr_t onSwipe = base + kOnSwipeProcessOffset;
-    if (!matchesSignature(onSwipe, kOnSwipeProcessSignature,
-                          sizeof(kOnSwipeProcessSignature))) {
+    const uintptr_t reset = base + kPauseDetectorResetOffset;
+    const bool swipeOk = matchesSignature(
+            onSwipe, kOnSwipeProcessSignature, sizeof(kOnSwipeProcessSignature));
+    const bool resetOk = matchesSignature(
+            reset, kPauseResetSignature, sizeof(kPauseResetSignature));
+    if (!swipeOk || !resetOk) {
         logLine(ANDROID_LOG_ERROR,
-                "CAL launcher signature mismatch base=%p; hook skipped",
-                reinterpret_cast<void *>(base));
+                "FIXED1200 launcher signature mismatch base=%p swipe=%d reset=%d; hook skipped",
+                reinterpret_cast<void *>(base), swipeOk ? 1 : 0, resetOk ? 1 : 0);
         return false;
     }
+
+    gPauseDetectorReset = reinterpret_cast<PauseDetectorResetFn>(reset);
 
     void *backup = nullptr;
     const int rc = gHookFunction(
             reinterpret_cast<void *>(onSwipe),
-            reinterpret_cast<void *>(onSwipeProcessCalibrationHook), &backup);
+            reinterpret_cast<void *>(onSwipeProcessHook), &backup);
     if (rc != 0 || backup == nullptr) {
-        logLine(ANDROID_LOG_ERROR, "CAL hook_func failed rc=%d backup=%p", rc, backup);
+        logLine(ANDROID_LOG_ERROR,
+                "FIXED1200 hook_func failed rc=%d backup=%p", rc, backup);
         return false;
     }
 
     gOriginalOnSwipeProcess = reinterpret_cast<OnSwipeProcessFn>(backup);
     gHookInstalled.store(true, std::memory_order_release);
+    const int threshold = readThresholdPercent();
     logLine(ANDROID_LOG_INFO,
-            "CALIBRATION_ONLY hook installed launcher=8.01.02.5459 base=%p; stock behavior preserved",
-            reinterpret_cast<void *>(base));
+            "FIXED1200 hook installed launcher=8.01.02.5459 base=%p width=1200 threshold=%d%% thresholdPx=%.2f",
+            reinterpret_cast<void *>(base), threshold,
+            kLauncherCoordinateWidthPx * static_cast<float>(threshold) / 100.0f);
     return true;
 }
 
 void hookWorker() {
     for (int attempt = 1; attempt <= 200; ++attempt) {
         if (!isTargetProcess()) {
-            logLine(ANDROID_LOG_WARN, "CAL hook worker left target process; aborting");
+            logLine(ANDROID_LOG_WARN, "FIXED1200 hook worker left target process; aborting");
             return;
         }
         const LibraryInfo library = findLauncherLibrary();
         if (library.base != 0) {
-            logLine(ANDROID_LOG_INFO, "CAL found %s base=%p",
+            logLine(ANDROID_LOG_INFO, "FIXED1200 found %s base=%p",
                     library.path.c_str(), reinterpret_cast<void *>(library.base));
             installHook(library.base);
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    logLine(ANDROID_LOG_ERROR, "CAL timed out waiting for %s", kTargetLibrary);
+    logLine(ANDROID_LOG_ERROR, "FIXED1200 timed out waiting for %s", kTargetLibrary);
 }
 
 void ensureWorkerStarted() {
@@ -220,20 +278,18 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     const std::string exe = readExecutable();
     const std::string process = readProcessName();
     logLine(ANDROID_LOG_INFO,
-            "CAL native_init candidate api=%u exe=%s process=%s hook_func=%p",
+            "FIXED1200 native_init candidate api=%u exe=%s process=%s hook_func=%p",
             entries->version, exe.c_str(), process.c_str(),
             reinterpret_cast<void *>(entries->hook_func));
 
     if (entries->hook_func == nullptr) {
-        logLine(ANDROID_LOG_ERROR, "CAL native_init rejected: hook_func is null");
+        logLine(ANDROID_LOG_ERROR, "FIXED1200 native_init rejected: hook_func is null");
         return nullptr;
     }
-    if (exe != kSpawnerPath || process != kTargetPackage) {
-        return nullptr;
-    }
+    if (exe != kSpawnerPath || process != kTargetPackage) return nullptr;
 
     gHookFunction = entries->hook_func;
-    logLine(ANDROID_LOG_INFO, "CAL native_init accepted api=%u", entries->version);
+    logLine(ANDROID_LOG_INFO, "FIXED1200 native_init accepted api=%u", entries->version);
     ensureWorkerStarted();
     return onLibraryLoaded;
 }
