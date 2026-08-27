@@ -24,9 +24,9 @@ constexpr const char *kTag = "HyperOS4SwipeGateNative";
 constexpr const char *kTargetPackage = "com.miui.home";
 constexpr const char *kSpawnerPath = "/system_ext/bin/hyos_spawner";
 constexpr const char *kTargetLibrary = "libapp_launcher.so";
-constexpr const char *kThresholdProperty = "persist.hyperos4swipegate.threshold";
-constexpr int kDefaultThreshold = 55;
-constexpr float kLauncherCoordinateWidthPx = 1200.0f;
+constexpr const char *kThresholdPxProperty = "persist.hyperos4swipegate.threshold_px";
+constexpr int kDefaultThresholdPx = 660;
+constexpr int kMaxThresholdPx = 1600;
 
 // HyperOS 4 System Launcher RELEASE-8.01.02.5459-260807-08242024-R
 constexpr uintptr_t kOnSwipeProcessOffset = 0x816fc4;
@@ -51,7 +51,7 @@ PauseDetectorResetFn gPauseDetectorReset = nullptr;
 
 std::atomic<bool> gWorkerStarted{false};
 std::atomic<bool> gHookInstalled{false};
-std::atomic<int> gCachedThreshold{kDefaultThreshold};
+std::atomic<int> gCachedThresholdPx{kDefaultThresholdPx};
 std::atomic<int64_t> gLastThresholdReadMs{0};
 std::atomic<int64_t> gLastSwipeLogMs{0};
 
@@ -141,41 +141,42 @@ bool matchesSignature(uintptr_t address, const uint8_t *signature, size_t size) 
             && std::memcmp(reinterpret_cast<const void *>(address), signature, size) == 0;
 }
 
-int readThresholdPercent() {
+int readThresholdPx() {
     const int64_t now = monotonicMs();
     const int64_t last = gLastThresholdReadMs.load(std::memory_order_relaxed);
-    if (now - last < 250) return gCachedThreshold.load(std::memory_order_relaxed);
+    if (now - last < 250) return gCachedThresholdPx.load(std::memory_order_relaxed);
 
-    int threshold = kDefaultThreshold;
+    int thresholdPx = kDefaultThresholdPx;
     char value[PROP_VALUE_MAX]{};
-    if (__system_property_get(kThresholdProperty, value) > 0) {
+    if (__system_property_get(kThresholdPxProperty, value) > 0) {
         char *end = nullptr;
         long parsed = std::strtol(value, &end, 10);
         if (end != value) {
             if (parsed < 0) parsed = 0;
-            if (parsed > 100) parsed = 100;
-            threshold = static_cast<int>(parsed);
+            if (parsed > kMaxThresholdPx) parsed = kMaxThresholdPx;
+            thresholdPx = static_cast<int>(parsed);
         }
     }
 
-    const int previous = gCachedThreshold.exchange(threshold, std::memory_order_relaxed);
+    const int previous = gCachedThresholdPx.exchange(thresholdPx, std::memory_order_relaxed);
     gLastThresholdReadMs.store(now, std::memory_order_relaxed);
-    if (previous != threshold) {
-        logLine(ANDROID_LOG_INFO, "threshold changed: %d%%", threshold);
+    if (previous != thresholdPx) {
+        logLine(ANDROID_LOG_INFO,
+                "pixel threshold changed: %dpx enabled=%d",
+                thresholdPx, thresholdPx > 0 ? 1 : 0);
     }
-    return threshold;
+    return thresholdPx;
 }
 
 void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
                         const void *point, float horizontalDistancePx) {
-    const int threshold = readThresholdPercent();
+    const int thresholdPx = readThresholdPx();
     const float absDx = std::fabs(horizontalDistancePx);
-    const float thresholdPx = kLauncherCoordinateWidthPx
-            * static_cast<float>(threshold) / 100.0f;
-    const float progress = absDx / kLauncherCoordinateWidthPx;
+    const bool enabled = thresholdPx > 0;
     bool pauseReset = false;
 
-    if (self != nullptr && gPauseDetectorReset != nullptr && absDx < thresholdPx) {
+    if (enabled && self != nullptr && gPauseDetectorReset != nullptr
+            && absDx < static_cast<float>(thresholdPx)) {
         void *detector = reinterpret_cast<void *>(
                 reinterpret_cast<uintptr_t>(self) + kPauseDetectorOffsetInBackHelper);
         gPauseDetectorReset(detector);
@@ -187,8 +188,8 @@ void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
     if (now - last >= 120 && gLastSwipeLogMs.compare_exchange_strong(
             last, now, std::memory_order_relaxed)) {
         logLine(ANDROID_LOG_INFO,
-                "FIXED1200 internalDx=%.2f absDx=%.2f progress=%.4f threshold=%d%% thresholdPx=%.2f pauseReset=%d readyFinish=%d side=%u",
-                horizontalDistancePx, absDx, progress, threshold, thresholdPx,
+                "PIXEL_GATE internalDx=%.2f absDx=%.2f thresholdPx=%d enabled=%d pauseReset=%d readyFinish=%d side=%u",
+                horizontalDistancePx, absDx, thresholdPx, enabled ? 1 : 0,
                 pauseReset ? 1 : 0, readyFinish ? 1 : 0, side);
     }
 
@@ -209,7 +210,7 @@ bool installHook(uintptr_t base) {
             reset, kPauseResetSignature, sizeof(kPauseResetSignature));
     if (!swipeOk || !resetOk) {
         logLine(ANDROID_LOG_ERROR,
-                "FIXED1200 launcher signature mismatch base=%p swipe=%d reset=%d; hook skipped",
+                "PIXEL_GATE launcher signature mismatch base=%p swipe=%d reset=%d; hook skipped",
                 reinterpret_cast<void *>(base), swipeOk ? 1 : 0, resetOk ? 1 : 0);
         return false;
     }
@@ -222,36 +223,35 @@ bool installHook(uintptr_t base) {
             reinterpret_cast<void *>(onSwipeProcessHook), &backup);
     if (rc != 0 || backup == nullptr) {
         logLine(ANDROID_LOG_ERROR,
-                "FIXED1200 hook_func failed rc=%d backup=%p", rc, backup);
+                "PIXEL_GATE hook_func failed rc=%d backup=%p", rc, backup);
         return false;
     }
 
     gOriginalOnSwipeProcess = reinterpret_cast<OnSwipeProcessFn>(backup);
     gHookInstalled.store(true, std::memory_order_release);
-    const int threshold = readThresholdPercent();
+    const int thresholdPx = readThresholdPx();
     logLine(ANDROID_LOG_INFO,
-            "FIXED1200 hook installed launcher=8.01.02.5459 base=%p width=1200 threshold=%d%% thresholdPx=%.2f",
-            reinterpret_cast<void *>(base), threshold,
-            kLauncherCoordinateWidthPx * static_cast<float>(threshold) / 100.0f);
+            "PIXEL_GATE hook installed launcher=8.01.02.5459 base=%p thresholdPx=%d enabled=%d",
+            reinterpret_cast<void *>(base), thresholdPx, thresholdPx > 0 ? 1 : 0);
     return true;
 }
 
 void hookWorker() {
     for (int attempt = 1; attempt <= 200; ++attempt) {
         if (!isTargetProcess()) {
-            logLine(ANDROID_LOG_WARN, "FIXED1200 hook worker left target process; aborting");
+            logLine(ANDROID_LOG_WARN, "PIXEL_GATE hook worker left target process; aborting");
             return;
         }
         const LibraryInfo library = findLauncherLibrary();
         if (library.base != 0) {
-            logLine(ANDROID_LOG_INFO, "FIXED1200 found %s base=%p",
+            logLine(ANDROID_LOG_INFO, "PIXEL_GATE found %s base=%p",
                     library.path.c_str(), reinterpret_cast<void *>(library.base));
             installHook(library.base);
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    logLine(ANDROID_LOG_ERROR, "FIXED1200 timed out waiting for %s", kTargetLibrary);
+    logLine(ANDROID_LOG_ERROR, "PIXEL_GATE timed out waiting for %s", kTargetLibrary);
 }
 
 void ensureWorkerStarted() {
@@ -278,18 +278,18 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     const std::string exe = readExecutable();
     const std::string process = readProcessName();
     logLine(ANDROID_LOG_INFO,
-            "FIXED1200 native_init candidate api=%u exe=%s process=%s hook_func=%p",
+            "PIXEL_GATE native_init candidate api=%u exe=%s process=%s hook_func=%p",
             entries->version, exe.c_str(), process.c_str(),
             reinterpret_cast<void *>(entries->hook_func));
 
     if (entries->hook_func == nullptr) {
-        logLine(ANDROID_LOG_ERROR, "FIXED1200 native_init rejected: hook_func is null");
+        logLine(ANDROID_LOG_ERROR, "PIXEL_GATE native_init rejected: hook_func is null");
         return nullptr;
     }
     if (exe != kSpawnerPath || process != kTargetPackage) return nullptr;
 
     gHookFunction = entries->hook_func;
-    logLine(ANDROID_LOG_INFO, "FIXED1200 native_init accepted api=%u", entries->version);
+    logLine(ANDROID_LOG_INFO, "PIXEL_GATE native_init accepted api=%u", entries->version);
     ensureWorkerStarted();
     return onLibraryLoaded;
 }
