@@ -287,16 +287,14 @@ int getScreenWidth() {
     return width;
 }
 
-bool callerIsLauncher() {
-    const uintptr_t caller = reinterpret_cast<uintptr_t>(
-            __builtin_extract_return_addr(__builtin_return_address(0)));
+bool callerIsLauncher(uintptr_t caller) {
     const uintptr_t base = gLauncherBase.load(std::memory_order_relaxed);
     const uintptr_t end = gLauncherEnd.load(std::memory_order_relaxed);
     return base != 0 && end > base && caller >= base && caller < end;
 }
 
-void captureMotion(void *event, int32_t action) {
-    if (event == nullptr || gMotionGetRawX == nullptr || !callerIsLauncher()) return;
+void captureMotion(void *event, int32_t action, uintptr_t caller) {
+    if (event == nullptr || gMotionGetRawX == nullptr || !callerIsLauncher(caller)) return;
     const float rawX = gMotionGetRawX(event);
     if (!(rawX >= 0.0f && rawX <= 10000.0f)) return;
 
@@ -313,15 +311,19 @@ void captureMotion(void *event, int32_t action) {
 
 int32_t motionGetActionHook(void *event) {
     if (gOriginalMotionGetAction == nullptr) return -1;
+    const uintptr_t caller = reinterpret_cast<uintptr_t>(
+            __builtin_extract_return_addr(__builtin_return_address(0)));
     const int32_t action = gOriginalMotionGetAction(event);
-    captureMotion(event, action);
+    captureMotion(event, action, caller);
     return action;
 }
 
 int32_t motionGetActionMaskedHook(void *event) {
     if (gOriginalMotionGetActionMasked == nullptr) return -1;
+    const uintptr_t caller = reinterpret_cast<uintptr_t>(
+            __builtin_extract_return_addr(__builtin_return_address(0)));
     const int32_t action = gOriginalMotionGetActionMasked(event);
-    captureMotion(event, action);
+    captureMotion(event, action, caller);
     return action;
 }
 
