@@ -6,21 +6,22 @@
     <string name="tab_about">关于</string>
 
     <string name="settings_category_gesture">侧滑停顿</string>
-    <string name="threshold_title">额外侧滑距离</string>
-    <string name="threshold_summary">在系统原厂侧边栏门槛基础上增加距离。0 dp 表示完全使用系统默认；当前 Launcher 5459 的原厂门槛为 88 dp。</string>
-    <string name="value_default">默认</string>
+    <string name="threshold_title">侧滑停顿触发距离</string>
+    <string name="threshold_summary">以 dp 设置侧边栏触发距离。0 表示系统默认，当前 Launcher 5459 原厂边界为 88 dp；设置高于 88 dp 时才会延后侧边栏触发。</string>
+    <string name="value_default">默认（88 dp）</string>
     <string name="behavior_title">行为</string>
-    <string name="behavior_summary">0 dp：保持原厂行为；大于 0：返回动画与原厂状态机始终正常运行，但只有达到“原厂门槛 + 额外距离”后才允许进入侧边栏预备状态。手指未松开往回滑时仍可恢复返回状态。</string>
+    <string name="behavior_summary">0：完全使用原厂 88 dp。1–88 dp 受原厂最低边界限制，实际仍按 88 dp；89–320 dp 为自定义门槛。未达到门槛时保留完整返回动画和原厂可逆状态，达到后才允许进入侧边栏预备状态。</string>
     <string name="settings_category_runtime">运行状态</string>
     <string name="status_title">配置同步</string>
     <string name="status_waiting">等待写入系统配置</string>
     <string name="status_applying_default">正在恢复系统默认…</string>
-    <string name="status_applying">正在写入额外 %1$d dp…</string>
-    <string name="status_applied_default">已生效：系统默认（当前原厂 88 dp，无需重启桌面）</string>
-    <string name="status_applied">已生效：原厂门槛 + %1$d dp（无需重启桌面）</string>
+    <string name="status_applying">正在写入 %1$d dp…</string>
+    <string name="status_applied_default">已生效：系统默认（88 dp，无需重启桌面）</string>
+    <string name="status_applied_stock_floor">已生效：设置 %1$d dp；受原厂最低边界限制，实际为 88 dp</string>
+    <string name="status_applied">已生效：%1$d dp（无需重启桌面）</string>
     <string name="status_failed">写入失败：%1$s</string>
 
-    <string name="log_intro">用于排查 HYOS 注入、Native Hook、桌面版本匹配和侧滑门槛。首次读取会申请 Root，仅用于读取 com.miui.home 的模块日志和 logcat。</string>
+    <string name="log_intro">用于排查 HYOS 注入、Native Hook、桌面版本匹配和 dp 侧滑门槛。首次读取会申请 Root，仅用于读取 com.miui.home 的模块日志和 logcat。</string>
     <string name="log_refresh">刷新日志</string>
     <string name="log_copy">复制全部</string>
     <string name="log_loading">正在读取诊断日志…</string>
@@ -28,7 +29,7 @@
 
     <string name="about_version">版本 %1$s</string>
     <string name="about_intro_title">HyperOS 4 原生手势增强</string>
-    <string name="about_intro_body">延后 HyperOS 4 Rust 系统桌面的“侧滑停顿呼出”X 轴门槛，同时保留完整返回动画和原厂可逆状态机。0 dp 跟随系统默认；正值表示在原厂门槛基础上增加的额外距离。</string>
+    <string name="about_intro_body">延后 HyperOS 4 Rust 系统桌面的“侧滑停顿呼出”X 轴门槛，同时保留完整返回动画和原厂可逆状态机。0 表示系统默认 88 dp；89–320 dp 可直接设置新的触发距离。</string>
     <string name="about_compat_title">当前适配</string>
     <string name="about_compat_launcher">系统桌面 RELEASE-8.01.02.5459</string>
     <string name="about_compat_api">LSPosed Modern API 102 · native_init</string>
