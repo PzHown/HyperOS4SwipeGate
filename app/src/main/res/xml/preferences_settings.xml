@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <PreferenceCategory android:title="@string/settings_category_gesture">
+        <fan.preference.SeekBarPreferenceCompat
+            android:key="trigger_threshold_percent"
+            android:summary="@string/threshold_summary"
+            android:title="@string/threshold_title"
+            app:defaultValue="55"
+            app:format="%s %%"
+            app:maxValue="100"
+            app:minValue="0"
+            app:showSeekBarValue="true"
+            app:stepValue="1" />
+
+        <Preference
+            android:selectable="false"
+            android:summary="@string/behavior_summary"
+            android:title="@string/behavior_title" />
+    </PreferenceCategory>
+
+    <PreferenceCategory android:title="@string/settings_category_runtime">
+        <Preference
+            android:key="runtime_status"
+            android:selectable="false"
+            android:summary="@string/status_waiting"
+            android:title="@string/status_title" />
+    </PreferenceCategory>
+
+</PreferenceScreen>

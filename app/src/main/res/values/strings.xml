@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HyperOS4 SwipeGate</string>
+    <string name="tab_settings">设置</string>
+    <string name="tab_about">关于</string>
+
+    <string name="settings_category_gesture">侧滑停顿</string>
+    <string name="threshold_title">侧滑停顿触发阈值</string>
+    <string name="threshold_summary">水平滑动距离达到屏幕宽度的设定占比后，才允许系统桌面触发侧边栏。</string>
+    <string name="behavior_title">行为</string>
+    <string name="behavior_summary">未达到阈值：保持系统返回；达到阈值：恢复 HyperOS 4 原生“侧滑停顿呼出”判断。</string>
+    <string name="settings_category_runtime">运行状态</string>
+    <string name="status_title">阈值同步</string>
+    <string name="status_waiting">等待写入系统配置</string>
+    <string name="status_applying">正在写入 %1$d%%…</string>
+    <string name="status_applied">已生效：%1$d%%（无需重启桌面）</string>
+    <string name="status_failed">写入失败：%1$s</string>
+
+    <string name="about_version">版本 %1$s</string>
+    <string name="about_intro_title">HyperOS 4 原生手势增强</string>
+    <string name="about_intro_body">为 HyperOS 4 Rust 系统桌面的“侧滑停顿呼出”增加横向距离门槛。低于阈值时仍执行返回，达到阈值后才允许原生侧边栏停顿检测继续工作。</string>
+    <string name="about_compat_title">当前适配</string>
+    <string name="about_compat_launcher">系统桌面 RELEASE-8.01.02.5459</string>
+    <string name="about_compat_api">LSPosed Modern API 102 · native_init</string>
+    <string name="about_compat_arch">arm64-v8a · HyperOS 4 / Android 17</string>
+    <string name="about_project_title">项目</string>
+    <string name="about_repository">GitHub 仓库</string>
+    <string name="about_issues">问题反馈</string>
+    <string name="about_footer">PzHown · 非小米官方项目</string>
+</resources>
