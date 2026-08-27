@@ -327,20 +327,26 @@ int32_t motionGetActionMaskedHook(void *event) {
     return action;
 }
 
-bool installMotionHooks() {
+void *resolveLauncherSymbol(void *launcherHandle, const char *name) {
+    void *symbol = launcherHandle == nullptr ? nullptr : dlsym(launcherHandle, name);
+    if (symbol == nullptr) symbol = dlsym(RTLD_DEFAULT, name);
+    return symbol;
+}
+
+bool installMotionHooks(void *launcherHandle) {
     if (gMotionHooksInstalled.load(std::memory_order_acquire)) return true;
     if (gHookFunction == nullptr) return false;
 
     auto *getAction = reinterpret_cast<MotionEventIntFn>(
-            dlsym(RTLD_DEFAULT, "input_MotionEvent_getAction"));
+            resolveLauncherSymbol(launcherHandle, "input_MotionEvent_getAction"));
     auto *getActionMasked = reinterpret_cast<MotionEventIntFn>(
-            dlsym(RTLD_DEFAULT, "input_MotionEvent_getActionMasked"));
+            resolveLauncherSymbol(launcherHandle, "input_MotionEvent_getActionMasked"));
     gMotionGetRawX = reinterpret_cast<MotionEventFloatFn>(
-            dlsym(RTLD_DEFAULT, "input_MotionEvent_getRawX"));
+            resolveLauncherSymbol(launcherHandle, "input_MotionEvent_getRawX"));
 
     logLine(ANDROID_LOG_INFO,
-            "motion symbols action=%p masked=%p rawX=%p",
-            reinterpret_cast<void *>(getAction),
+            "motion symbols handle=%p action=%p masked=%p rawX=%p",
+            launcherHandle, reinterpret_cast<void *>(getAction),
             reinterpret_cast<void *>(getActionMasked),
             reinterpret_cast<void *>(gMotionGetRawX));
 
@@ -397,9 +403,6 @@ void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
     const float rawDistance = rawValid
             ? std::fabs(currentRawX - downRawX) : -1.0f;
 
-    // If no static display source is readable, a real right-edge gesture gives
-    // us a process-local width estimate from its DOWN coordinate. This happens
-    // entirely inside MiuiHome and does not depend on the module App running.
     if (width <= 0 && rawValid && downRawX > 256.0f) {
         const int learned = roundUpTo8(downRawX + 1.0f);
         if (learned > 0) {
@@ -425,9 +428,6 @@ void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
             pauseReset = true;
         }
     } else if (self != nullptr && gPauseDetectorReset != nullptr) {
-        // Missing RawX/width must never silently restore the sidebar. Until the
-        // exact gate inputs exist, keep resetting Xiaomi's pause detector while
-        // leaving the normal Back path untouched.
         void *detector = reinterpret_cast<void *>(
                 reinterpret_cast<uintptr_t>(self) + kPauseDetectorOffsetInBackHelper);
         gPauseDetectorReset(detector);
@@ -450,12 +450,14 @@ void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
     }
 }
 
-bool installSwipeHook(const LibraryInfo &library) {
-    if (gSwipeHookInstalled.load(std::memory_order_acquire)) return true;
+bool installSwipeHook(const LibraryInfo &library, void *launcherHandle) {
     if (library.base == 0 || gHookFunction == nullptr) return false;
 
     gLauncherBase.store(library.base, std::memory_order_relaxed);
     gLauncherEnd.store(library.end, std::memory_order_relaxed);
+    installMotionHooks(launcherHandle);
+
+    if (gSwipeHookInstalled.load(std::memory_order_acquire)) return true;
 
     const uintptr_t onSwipe = library.base + kOnSwipeProcessOffset;
     const uintptr_t reset = library.base + kPauseDetectorResetOffset;
@@ -472,7 +474,6 @@ bool installSwipeHook(const LibraryInfo &library) {
     }
 
     gPauseDetectorReset = reinterpret_cast<PauseDetectorResetFn>(reset);
-    installMotionHooks();
 
     void *backup = nullptr;
     const int rc = gHookFunction(reinterpret_cast<void *>(onSwipe),
@@ -502,7 +503,9 @@ void hookWorker() {
             logLine(ANDROID_LOG_INFO, "found %s base=%p end=%p",
                     library.path.c_str(), reinterpret_cast<void *>(library.base),
                     reinterpret_cast<void *>(library.end));
-            installSwipeHook(library);
+            void *handle = dlopen(library.path.c_str(), RTLD_NOW | RTLD_NOLOAD);
+            installSwipeHook(library, handle);
+            if (handle != nullptr) dlclose(handle);
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -517,12 +520,12 @@ void ensureWorkerStarted() {
     std::thread(hookWorker).detach();
 }
 
-void onLibraryLoaded(const char *name, void *) {
+void onLibraryLoaded(const char *name, void *handle) {
     if (!isTargetProcess() || name == nullptr) return;
     if (std::strstr(name, kTargetLibrary) != nullptr) {
-        logLine(ANDROID_LOG_INFO, "LSPosed library callback: %s", name);
+        logLine(ANDROID_LOG_INFO, "LSPosed library callback: %s handle=%p", name, handle);
         const LibraryInfo library = findLauncherLibrary();
-        if (library.base != 0) installSwipeHook(library);
+        if (library.base != 0) installSwipeHook(library, handle);
     }
 }
 
