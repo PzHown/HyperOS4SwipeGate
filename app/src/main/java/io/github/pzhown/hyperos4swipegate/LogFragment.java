@@ -78,7 +78,7 @@ public final class LogFragment extends Fragment {
         Toast.makeText(requireContext(), R.string.log_copied, Toast.LENGTH_SHORT).show();
     }
 
-    private String collectDiagnostics() {
+    public static String collectDiagnostics() {
         StringBuilder out = new StringBuilder();
         out.append("=== HyperOS4 SwipeGate diagnostics ===\n");
         out.append("appVersion=").append(BuildConfig.VERSION_NAME).append('\n');
