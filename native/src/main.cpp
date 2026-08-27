@@ -39,40 +39,30 @@ constexpr int kMaxThresholdDp = 320;
 // convert_offset normalizes pixels by 110dp, therefore Xiaomi's stock sidebar
 // transition boundary is 110dp * 0.8 = 88dp.
 //
-// User configuration is expressed only in dp. Value 0 means "stock/default"
-// and aliases the dynamically resolved 88dp stock boundary. To avoid relying
-// on Android density APIs inside the HYOS native process, custom dp values are
-// converted to launcher pixels relative to Xiaomi's own resolved boundary:
-//     userGatePx = stockBoundaryPx * max(requestedDp, 88) / 88
-// Values 1..87dp cannot make Xiaomi trigger earlier than its own 88dp state
-// boundary, so they intentionally collapse to stock behavior.
+// IMPORTANT: never call BackGestureUtils::convert_offset ourselves. The Rust
+// implementation unwraps launcher state which is not initialized yet when the
+// LSPosed native module is loaded, and an early call aborts com.miui.home with
+// Option::unwrap(None). We only use the reverse-engineered 88dp constant and
+// convert dp to px from Android/Xiaomi density system properties. If density
+// cannot be resolved, custom delaying fails closed to Xiaomi stock behavior.
 constexpr uintptr_t kOnSwipeProcessOffset = 0x816fc4;
-constexpr uintptr_t kConvertOffsetOffset = 0x773814;
 
 constexpr uint8_t kOnSwipeProcessSignature[] = {
         0xff, 0x83, 0x05, 0xd1, 0xea, 0x7b, 0x00, 0xfd,
         0xe9, 0xa3, 0x0f, 0x6d, 0xfd, 0xfb, 0x10, 0xa9,
 };
-constexpr uint8_t kConvertOffsetSignature[] = {
-        0xe9, 0x23, 0xbd, 0x6d, 0xfd, 0x7b, 0x01, 0xa9,
-        0xf4, 0x4f, 0x02, 0xa9, 0xfd, 0x43, 0x00, 0x91,
-        0x08, 0x40, 0x20, 0x1e, 0x00, 0xe4, 0x00, 0x2f,
-};
 
 using OnSwipeProcessFn = void (*)(void *, bool, uint32_t, const void *, float);
-using ConvertOffsetFn = float (*)(float);
 
 HookFunType gHookFunction = nullptr;
 OnSwipeProcessFn gOriginalOnSwipeProcess = nullptr;
-ConvertOffsetFn gConvertOffset = nullptr;
 
 std::atomic<bool> gWorkerStarted{false};
 std::atomic<bool> gHookInstalled{false};
 std::atomic<int> gCachedThresholdDp{kDefaultThresholdDp};
+std::atomic<int> gCachedDensityDpi{-1};  // -1 unresolved, 0 unavailable.
 std::atomic<int64_t> gLastThresholdReadMs{0};
-std::atomic<int64_t> gLastBoundaryReadMs{0};
 std::atomic<int64_t> gLastSwipeLogMs{0};
-std::atomic<uint32_t> gBoundaryBits{0};
 std::atomic<uint64_t> gClampedCount{0};
 std::atomic<uint64_t> gPassthroughCount{0};
 
@@ -162,17 +152,69 @@ bool matchesSignature(uintptr_t address, const uint8_t *signature, size_t size) 
             && std::memcmp(reinterpret_cast<const void *>(address), signature, size) == 0;
 }
 
-uint32_t floatBits(float value) {
-    uint32_t bits = 0;
-    static_assert(sizeof(bits) == sizeof(value));
-    std::memcpy(&bits, &value, sizeof(bits));
-    return bits;
+int parseDensityDpi(const char *text) {
+    if (text == nullptr || *text == '\0') return 0;
+    char *end = nullptr;
+    const long parsed = std::strtol(text, &end, 10);
+    if (end == text) return 0;
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') ++end;
+    if (*end != '\0' || parsed < 120 || parsed > 1000) return 0;
+    return static_cast<int>(parsed);
 }
 
-float bitsFloat(uint32_t bits) {
-    float value = 0.0f;
-    std::memcpy(&value, &bits, sizeof(value));
-    return value;
+int densityFromProperty(const char *name) {
+    char value[PROP_VALUE_MAX]{};
+    if (__system_property_get(name, value) <= 0) return 0;
+    return parseDensityDpi(value);
+}
+
+int densityFromMiuiResolution() {
+    char value[PROP_VALUE_MAX]{};
+    if (__system_property_get("persist.sys.miui_resolution", value) <= 0) return 0;
+    const char *lastComma = std::strrchr(value, ',');
+    if (lastComma == nullptr || *(lastComma + 1) == '\0') return 0;
+    return parseDensityDpi(lastComma + 1);
+}
+
+int readDensityDpi() {
+    const int cached = gCachedDensityDpi.load(std::memory_order_acquire);
+    if (cached >= 0) return cached;
+
+    int densityDpi = densityFromMiuiResolution();
+    const char *source = "persist.sys.miui_resolution";
+    if (densityDpi <= 0) {
+        densityDpi = densityFromProperty("persist.sys.dpi");
+        source = "persist.sys.dpi";
+    }
+    if (densityDpi <= 0) {
+        densityDpi = densityFromProperty("ro.sf.lcd_density");
+        source = "ro.sf.lcd_density";
+    }
+    if (densityDpi <= 0) {
+        densityDpi = densityFromProperty("qemu.sf.lcd_density");
+        source = "qemu.sf.lcd_density";
+    }
+
+    if (densityDpi <= 0) {
+        densityDpi = 0;
+        source = "unavailable";
+        logLine(ANDROID_LOG_ERROR,
+                "DP_GATE density unavailable; custom delay disabled, stock passthrough");
+    } else {
+        logLine(ANDROID_LOG_INFO,
+                "DP_GATE density resolved: %ddpi source=%s pxPerDp=%.3f stock88dp=%.2fpx",
+                densityDpi, source,
+                static_cast<float>(densityDpi) / 160.0f,
+                static_cast<float>(kStockBoundaryDp * densityDpi) / 160.0f);
+    }
+
+    gCachedDensityDpi.store(densityDpi, std::memory_order_release);
+    return densityDpi;
+}
+
+float dpToPx(int dp, int densityDpi) {
+    if (dp <= 0 || densityDpi <= 0) return 0.0f;
+    return static_cast<float>(dp) * static_cast<float>(densityDpi) / 160.0f;
 }
 
 int readThresholdDp() {
@@ -204,62 +246,24 @@ int readThresholdDp() {
     return thresholdDp;
 }
 
-float readStockBoundaryPx() {
-    const int64_t now = monotonicMs();
-    const int64_t last = gLastBoundaryReadMs.load(std::memory_order_relaxed);
-    const float cached = bitsFloat(gBoundaryBits.load(std::memory_order_relaxed));
-    if (cached > 0.0f && now - last < 2000) return cached;
-    if (gConvertOffset == nullptr) return cached;
-
-    // In convert_offset's linear region:
-    // convert_offset(px) = 20 * px / stockScalePx.
-    // The stock state boundary is normalized 0.8, therefore:
-    // boundaryPx = 0.8 * stockScalePx = 16 / convert_offset(1px).
-    const float convertedOnePx = gConvertOffset(1.0f);
-    if (!std::isfinite(convertedOnePx) || convertedOnePx <= 0.0f) return cached;
-
-    const float boundaryPx = 16.0f / convertedOnePx;
-    if (!std::isfinite(boundaryPx) || boundaryPx < 40.0f || boundaryPx > 800.0f) {
-        return cached;
-    }
-
-    const uint32_t oldBits = gBoundaryBits.exchange(floatBits(boundaryPx),
-                                                     std::memory_order_relaxed);
-    gLastBoundaryReadMs.store(now, std::memory_order_relaxed);
-    const float previous = bitsFloat(oldBits);
-    if (std::fabs(previous - boundaryPx) >= 0.5f) {
-        logLine(ANDROID_LOG_INFO,
-                "DP_GATE stock boundary resolved: %.2fpx = %ddp, guard=%.2fpx",
-                boundaryPx, kStockBoundaryDp, std::max(0.0f, boundaryPx - 1.0f));
-    }
-    return boundaryPx;
-}
-
-float userGatePxFromDp(int configuredDp, float stockBoundaryPx) {
-    const int effectiveDp = configuredDp == 0
-            ? kStockBoundaryDp
-            : std::max(configuredDp, kStockBoundaryDp);
-    return stockBoundaryPx * static_cast<float>(effectiveDp)
-            / static_cast<float>(kStockBoundaryDp);
-}
-
 void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
                         const void *point, float horizontalDistancePx) {
     const int configuredDp = readThresholdDp();
-    const float stockBoundaryPx = readStockBoundaryPx();
-    const float stockGuardPx = stockBoundaryPx > 1.0f ? stockBoundaryPx - 1.0f : 0.0f;
-    const float absDx = std::fabs(horizontalDistancePx);
-    const float userGatePx = stockBoundaryPx > 0.0f
-            ? userGatePxFromDp(configuredDp, stockBoundaryPx)
-            : 0.0f;
     const int effectiveDp = configuredDp == 0
             ? kStockBoundaryDp
             : std::max(configuredDp, kStockBoundaryDp);
+    const int densityDpi = effectiveDp > kStockBoundaryDp ? readDensityDpi() : 0;
+    const float stockBoundaryPx = densityDpi > 0 ? dpToPx(kStockBoundaryDp, densityDpi) : 0.0f;
+    const float stockGuardPx = stockBoundaryPx > 1.0f ? stockBoundaryPx - 1.0f : 0.0f;
+    const float userGatePx = densityDpi > 0 ? dpToPx(effectiveDp, densityDpi) : 0.0f;
+    const float absDx = std::fabs(horizontalDistancePx);
 
     // 0dp (and any custom value <= stock 88dp) is true Xiaomi stock behavior:
-    // no clamp at all. Clamping is only needed when the requested gate is later
-    // than Xiaomi's own state transition boundary.
+    // no clamp at all. For >88dp, clamp the distance just below Xiaomi's stock
+    // state boundary until the configured dp gate is reached. If density cannot
+    // be resolved, custom delaying is disabled and the stock value is passed.
     const bool delayBeyondStock = effectiveDp > kStockBoundaryDp
+            && densityDpi > 0
             && stockGuardPx > 0.0f
             && userGatePx > stockBoundaryPx;
     const bool userGateReached = !delayBeyondStock || absDx >= userGatePx;
@@ -280,9 +284,9 @@ void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
     if (now - last >= 120 && gLastSwipeLogMs.compare_exchange_strong(
             last, now, std::memory_order_relaxed)) {
         logLine(ANDROID_LOG_INFO,
-                "DP_GATE rawDx=%.2f effectiveDx=%.2f configuredDp=%d effectiveDp=%d userGatePx=%.2f stockBoundaryPx=%.2f guardPx=%.2f delayBeyondStock=%d gateReached=%d clamped=%d readyFinish=%d side=%u clampedCount=%llu passthroughCount=%llu",
+                "DP_GATE rawDx=%.2f effectiveDx=%.2f configuredDp=%d effectiveDp=%d densityDpi=%d userGatePx=%.2f stockBoundaryPx=%.2f guardPx=%.2f delayBeyondStock=%d gateReached=%d clamped=%d readyFinish=%d side=%u clampedCount=%llu passthroughCount=%llu",
                 horizontalDistancePx, effectiveDistancePx,
-                configuredDp, effectiveDp, userGatePx,
+                configuredDp, effectiveDp, densityDpi, userGatePx,
                 stockBoundaryPx, stockGuardPx,
                 delayBeyondStock ? 1 : 0, userGateReached ? 1 : 0,
                 clamped ? 1 : 0, readyFinish ? 1 : 0, side,
@@ -300,25 +304,9 @@ bool installHook(uintptr_t base) {
     if (base == 0 || gHookFunction == nullptr) return false;
 
     const uintptr_t onSwipe = base + kOnSwipeProcessOffset;
-    const uintptr_t convertOffset = base + kConvertOffsetOffset;
     if (!matchesSignature(onSwipe, kOnSwipeProcessSignature, sizeof(kOnSwipeProcessSignature))) {
         logLine(ANDROID_LOG_ERROR,
                 "DP_GATE on_swipe_process signature mismatch; hook skipped");
-        return false;
-    }
-    if (!matchesSignature(convertOffset, kConvertOffsetSignature,
-                          sizeof(kConvertOffsetSignature))) {
-        logLine(ANDROID_LOG_ERROR,
-                "DP_GATE convert_offset signature mismatch; hook skipped");
-        return false;
-    }
-
-    gConvertOffset = reinterpret_cast<ConvertOffsetFn>(convertOffset);
-    const float boundary = readStockBoundaryPx();
-    if (!(boundary > 0.0f)) {
-        logLine(ANDROID_LOG_ERROR,
-                "DP_GATE failed to resolve stock 88dp boundary; hook skipped");
-        gConvertOffset = nullptr;
         return false;
     }
 
@@ -328,20 +316,21 @@ bool installHook(uintptr_t base) {
     if (rc != 0 || backup == nullptr) {
         logLine(ANDROID_LOG_ERROR,
                 "DP_GATE hook_func failed rc=%d backup=%p", rc, backup);
-        gConvertOffset = nullptr;
         return false;
     }
 
     gOriginalOnSwipeProcess = reinterpret_cast<OnSwipeProcessFn>(backup);
     gHookInstalled.store(true, std::memory_order_release);
+
     const int configuredDp = readThresholdDp();
     const int effectiveDp = configuredDp == 0
             ? kStockBoundaryDp
             : std::max(configuredDp, kStockBoundaryDp);
+    const int densityDpi = effectiveDp > kStockBoundaryDp ? readDensityDpi() : 0;
     logLine(ANDROID_LOG_INFO,
-            "DP_GATE hook installed launcher=8.01.02.5459 base=%p configuredDp=%d effectiveDp=%d stockBoundaryPx=%.2f userGatePx=%.2f",
-            reinterpret_cast<void *>(base), configuredDp, effectiveDp,
-            boundary, userGatePxFromDp(configuredDp, boundary));
+            "DP_GATE hook installed launcher=8.01.02.5459 base=%p configuredDp=%d effectiveDp=%d densityDpi=%d userGatePx=%.2f noRustConvertOffset=1",
+            reinterpret_cast<void *>(base), configuredDp, effectiveDp, densityDpi,
+            densityDpi > 0 ? dpToPx(effectiveDp, densityDpi) : 0.0f);
     return true;
 }
 
