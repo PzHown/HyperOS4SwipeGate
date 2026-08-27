@@ -16,15 +16,18 @@ public final class SettingsFragment extends PreferenceFragment {
 
     @Override
     public void onCreatePreferences(@Nullable Bundle savedInstanceState, @Nullable String rootKey) {
+        // Migrate before inflating the preference screen. SeekBarPreferenceCompat
+        // reads its persisted value during inflation and does not expose a public
+        // setValue(int), so this keeps the first rendered value correct without
+        // relying on reflection or implementation details.
+        SharedPreferences prefs = getPreferenceManager().getSharedPreferences();
+        int stored = migrateLegacyValueIfNeeded(prefs);
+
         setPreferencesFromResource(R.xml.preferences_settings, rootKey);
 
         SeekBarPreferenceCompat threshold = findPreference(ConfigBridge.PREF_KEY_THRESHOLD_DP);
         statusPreference = findPreference("runtime_status");
         if (threshold == null || statusPreference == null) return;
-
-        SharedPreferences prefs = getPreferenceManager().getSharedPreferences();
-        int stored = migrateLegacyValueIfNeeded(prefs);
-        threshold.setValue(stored);
 
         threshold.setOnPreferenceChangeListener((preference, newValue) -> {
             int value = newValue instanceof Number
@@ -66,10 +69,12 @@ public final class SettingsFragment extends PreferenceFragment {
         }
 
         migrated = Math.max(0, Math.min(ConfigBridge.MAX_THRESHOLD_DP, migrated));
+        // Commit synchronously because XML inflation immediately follows and
+        // must observe the migrated value on this same call stack.
         prefs.edit()
                 .putInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, migrated)
                 .putBoolean(PREF_DP_MIGRATED, true)
-                .apply();
+                .commit();
         return migrated;
     }
 
