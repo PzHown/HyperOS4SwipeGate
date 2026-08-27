@@ -4,16 +4,16 @@
 
     <PreferenceCategory android:title="@string/settings_category_gesture">
         <fan.preference.SeekBarPreferenceCompat
-            android:key="trigger_extra_dp"
+            android:key="trigger_threshold_dp"
             android:summary="@string/threshold_summary"
             android:title="@string/threshold_title"
             app:defaultValue="0"
             app:defaultValueTitle="@string/value_default"
             app:format="%s dp"
-            app:maxValue="450"
+            app:maxValue="320"
             app:minValue="0"
             app:showSeekBarValue="true"
-            app:stepValue="5" />
+            app:stepValue="1" />
 
         <Preference
             android:selectable="false"
