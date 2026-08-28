@@ -2,8 +2,11 @@ package io.github.pzhown.hyperos4swipegate;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.ParcelFileDescriptor;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -14,6 +17,7 @@ import io.github.libxposed.service.XposedServiceHelper;
 public final class XposedServiceBridge {
     private static final String TARGET_PACKAGE = "com.miui.home";
     private static final String HYOS_SPAWNER = "/system_ext/bin/hyos_spawner";
+    private static final int MAX_NATIVE_LOG_READ_BYTES = 128 * 1024;
 
     private static final AtomicBoolean INITIALIZED = new AtomicBoolean(false);
     private static volatile XposedService service;
@@ -114,6 +118,44 @@ public final class XposedServiceBridge {
             if (message == null || message.isBlank()) message = t.getClass().getSimpleName();
             serviceError = message;
             return new ConfigBridge.Result(false, safeValue, message);
+        }
+    }
+
+    public static String readNativeRuntimeLog(Context context) {
+        initialize(context);
+        XposedService current = service;
+        if (current == null) {
+            return "LSPosed 服务未连接，暂时无法读取 Native 日志。";
+        }
+
+        try {
+            if ((current.getFrameworkProperties() & XposedService.PROP_CAP_REMOTE) == 0) {
+                return "当前 LSPosed 不支持 Remote Files，无法读取 Native 日志。";
+            }
+            try (ParcelFileDescriptor descriptor =
+                         current.openRemoteFile(ConfigBridge.REMOTE_NATIVE_LOG_FILE);
+                 ParcelFileDescriptor.AutoCloseInputStream input =
+                         new ParcelFileDescriptor.AutoCloseInputStream(descriptor);
+                 ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[4096];
+                int total = 0;
+                while (total < MAX_NATIVE_LOG_READ_BYTES) {
+                    int allowed = Math.min(buffer.length, MAX_NATIVE_LOG_READ_BYTES - total);
+                    int read = input.read(buffer, 0, allowed);
+                    if (read <= 0) break;
+                    output.write(buffer, 0, read);
+                    total += read;
+                }
+                String text = new String(output.toByteArray(), StandardCharsets.UTF_8).trim();
+                if (text.isBlank()) {
+                    return "等待 Native 日志镜像…\n请返回系统桌面执行一次侧滑后点刷新。";
+                }
+                return text;
+            }
+        } catch (Throwable t) {
+            String message = t.getMessage();
+            if (message == null || message.isBlank()) message = t.getClass().getSimpleName();
+            return "Native 日志读取失败：" + message;
         }
     }
 
