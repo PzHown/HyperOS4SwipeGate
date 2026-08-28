@@ -28,6 +28,12 @@ jobs:
       - name: Select build channel
         shell: bash
         run: |
+          VERSION_NAME="$(sed -nE 's/^[[:space:]]*versionName = "([^"]+)".*/\1/p' app/build.gradle.kts | head -n1)"
+          if [ -z "$VERSION_NAME" ]; then
+            echo "::error::Could not read versionName from app/build.gradle.kts"
+            exit 1
+          fi
+
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             BUILD_VARIANT="debug"
             BUILD_TASK="assembleDebug"
@@ -48,11 +54,12 @@ jobs:
             exit 1
           fi
 
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
           echo "BUILD_VARIANT=$BUILD_VARIANT" >> "$GITHUB_ENV"
           echo "BUILD_TASK=$BUILD_TASK" >> "$GITHUB_ENV"
           echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
           echo "CHANNEL=$CHANNEL" >> "$GITHUB_ENV"
-          echo "Selected channel=$CHANNEL variant=$BUILD_VARIANT task=$BUILD_TASK"
+          echo "Selected version=$VERSION_NAME channel=$CHANNEL variant=$BUILD_VARIANT task=$BUILD_TASK"
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -200,7 +207,7 @@ jobs:
             dist/SwipeGate-debug.apk \
             --target "$GITHUB_SHA" \
             --prerelease \
-            --title "SwipeGate debug latest" \
+            --title "SwipeGate v${VERSION_NAME} Debug" \
             --notes "Development Debug build from the dev branch. LSPosed API 102 native_init for HyperOS 4 Launcher 8.0+."
 
       - name: Publish release-latest
@@ -212,5 +219,5 @@ jobs:
           gh release create release-latest \
             dist/SwipeGate-release.apk \
             --target "$GITHUB_SHA" \
-            --title "SwipeGate release latest" \
+            --title "SwipeGate v${VERSION_NAME}" \
             --notes "Signed Release build from the main branch. Tested on RELEASE-8.01.02.5459-260807-08242024-R and RELEASE-8.01.02.5465-260807-08262034-R. Sidebar hold threshold range: 88-300 dp."
