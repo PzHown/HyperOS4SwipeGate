@@ -8,6 +8,7 @@
 
 [![Build APK](https://github.com/PzHown/HyperOS4SwipeGate/actions/workflows/build.yml/badge.svg)](https://github.com/PzHown/HyperOS4SwipeGate/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/PzHown/HyperOS4SwipeGate?include_prereleases&label=release)](https://github.com/PzHown/HyperOS4SwipeGate/releases)
+[![Downloads](https://img.shields.io/github/downloads/PzHown/HyperOS4SwipeGate/total?label=downloads)](https://github.com/PzHown/HyperOS4SwipeGate/releases)
 ![Android 17](https://img.shields.io/badge/Android-17-3DDC84?logo=android&logoColor=white)
 ![LSPosed API 102](https://img.shields.io/badge/LSPosed-API%20102-blue)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
