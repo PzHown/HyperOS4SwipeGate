@@ -28,11 +28,13 @@ jobs:
       - name: Select build channel
         shell: bash
         run: |
+          VERSION_CODE="$(sed -nE 's/^[[:space:]]*versionCode = ([0-9]+).*/\1/p' app/build.gradle.kts | head -n1)"
           VERSION_NAME="$(sed -nE 's/^[[:space:]]*versionName = "([^"]+)".*/\1/p' app/build.gradle.kts | head -n1)"
-          if [ -z "$VERSION_NAME" ]; then
-            echo "::error::Could not read versionName from app/build.gradle.kts"
+          if [ -z "$VERSION_CODE" ] || [ -z "$VERSION_NAME" ]; then
+            echo "::error::Could not read versionCode/versionName from app/build.gradle.kts"
             exit 1
           fi
+          RELEASE_TAG="${VERSION_CODE}-${VERSION_NAME}"
 
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             BUILD_VARIANT="debug"
@@ -54,12 +56,14 @@ jobs:
             exit 1
           fi
 
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
           echo "BUILD_VARIANT=$BUILD_VARIANT" >> "$GITHUB_ENV"
           echo "BUILD_TASK=$BUILD_TASK" >> "$GITHUB_ENV"
           echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
           echo "CHANNEL=$CHANNEL" >> "$GITHUB_ENV"
-          echo "Selected version=$VERSION_NAME channel=$CHANNEL variant=$BUILD_VARIANT task=$BUILD_TASK"
+          echo "Selected versionCode=$VERSION_CODE versionName=$VERSION_NAME tag=$RELEASE_TAG channel=$CHANNEL variant=$BUILD_VARIANT task=$BUILD_TASK"
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -210,13 +214,14 @@ jobs:
             --title "SwipeGate v${VERSION_NAME} Debug" \
             --notes "Development Debug build from the dev branch. LSPosed API 102 native_init for HyperOS 4 Launcher 8.0+."
 
-      - name: Publish release-latest
+      - name: Publish versioned release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete release-latest --yes --cleanup-tag || true
-          gh release create release-latest \
+          gh release delete "$RELEASE_TAG" --yes --cleanup-tag || true
+          gh release create "$RELEASE_TAG" \
             dist/SwipeGate-release.apk \
             --target "$GITHUB_SHA" \
             --title "SwipeGate v${VERSION_NAME}" \
