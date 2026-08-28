@@ -1,6 +1,7 @@
 #include "native_api.h"
 
 #include <android/log.h>
+#include <elf.h>
 #include <fcntl.h>
 #include <link.h>
 #include <sys/system_properties.h>
@@ -20,6 +21,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -35,8 +37,16 @@ constexpr int64_t kHookHealthIntervalMs = 500;
 constexpr int64_t kHealthyLogIntervalMs = 60000;
 constexpr int64_t kRepairCooldownMs = 1500;
 constexpr int64_t kHookIdleWaitMs = 120;
+constexpr int64_t kPatternRescanIntervalMs = 5000;
+constexpr size_t kHookProbeSize = 16;
+constexpr size_t kMaxExecutableRanges = 12;
 
-// Exact reverse engineering target:
+// Reverse-engineering reference only. This offset is deliberately NOT used to
+// locate the hook target anymore. It is kept so diagnostics can show how far a
+// newly resolved target moved from the build that was originally analysed.
+constexpr uintptr_t kReferenceOnSwipeProcessOffset = 0x816fc4;
+
+// Exact build used to derive the first validated pattern:
 // HyperOS 4 System Launcher RELEASE-8.01.02.5459-260807-08242024-R.
 //
 // GestureInputBackHelper::on_swipe_process keeps the real horizontal distance
@@ -50,13 +60,29 @@ constexpr int64_t kHookIdleWaitMs = 120;
 // LSPosed native module is loaded, and an early call aborts com.miui.home with
 // Option::unwrap(None). We only use the reverse-engineered 88dp constant and
 // convert dp to px from Android/Xiaomi density system properties.
-constexpr uintptr_t kOnSwipeProcessOffset = 0x816fc4;
-
-constexpr uint8_t kOnSwipeProcessSignature[] = {
+constexpr uint8_t kOnSwipeProcessPatternV1[] = {
         0xff, 0x83, 0x05, 0xd1, 0xea, 0x7b, 0x00, 0xfd,
         0xe9, 0xa3, 0x0f, 0x6d, 0xfd, 0xfb, 0x10, 0xa9,
 };
-constexpr size_t kHookProbeSize = sizeof(kOnSwipeProcessSignature);
+constexpr uint8_t kOnSwipeProcessMaskV1[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+};
+
+struct PatternSpec {
+    const char *name;
+    const uint8_t *bytes;
+    const uint8_t *mask;
+    size_t size;
+};
+
+constexpr PatternSpec kOnSwipeProcessPatterns[] = {
+        {"8.01.02.5459-v1", kOnSwipeProcessPatternV1, kOnSwipeProcessMaskV1,
+         sizeof(kOnSwipeProcessPatternV1)},
+};
+
+static_assert(sizeof(kOnSwipeProcessPatternV1) == sizeof(kOnSwipeProcessMaskV1));
+static_assert(sizeof(kOnSwipeProcessPatternV1) >= kHookProbeSize);
 
 using OnSwipeProcessFn = void (*)(void *, bool, uint32_t, const void *, float);
 
@@ -74,7 +100,8 @@ std::atomic<int64_t> gLastThresholdReadMs{0};
 std::atomic<int64_t> gLastSwipeLogMs{0};
 std::atomic<int64_t> gLastHealthyLogMs{0};
 std::atomic<int64_t> gLastRepairAttemptMs{0};
-std::atomic<int> gHookHealthState{0}; // 0 unknown, 1 healthy, 2 restored, 3 foreign, 4 repairing.
+std::atomic<int64_t> gLastPatternScanMs{0};
+std::atomic<int> gHookHealthState{0}; // 0 unknown, 1 healthy, 2 restored, 3 foreign/error, 4 repairing.
 std::atomic<uint32_t> gActiveHookCalls{0};
 std::atomic<uint64_t> gRepairCount{0};
 std::atomic<uint64_t> gClampedCount{0};
@@ -82,7 +109,10 @@ std::atomic<uint64_t> gPassthroughCount{0};
 
 std::mutex gHookMutex;
 std::array<uint8_t, kHookProbeSize> gInstalledPatchHead{};
+std::array<uint8_t, kHookProbeSize> gExpectedOriginalHead{};
 bool gInstalledPatchHeadReady = false;
+bool gExpectedOriginalHeadReady = false;
+const char *gActivePatternName = "<none>";
 
 int64_t monotonicMs() {
     timespec ts{};
@@ -144,18 +174,38 @@ void logLine(int priority, const char *format, ...) {
     fileLog(buffer);
 }
 
+struct ExecutableRange {
+    uintptr_t start = 0;
+    size_t size = 0;
+};
+
 struct LibraryInfo {
     uintptr_t base = 0;
     std::string path;
+    std::array<ExecutableRange, kMaxExecutableRanges> executableRanges{};
+    size_t executableRangeCount = 0;
 };
 
 int libraryCallback(dl_phdr_info *info, size_t, void *data) {
     if (info == nullptr || info->dlpi_name == nullptr) return 0;
     const std::string path(info->dlpi_name);
     if (path.find(kTargetLibrary) == std::string::npos) return 0;
+
     auto *result = static_cast<LibraryInfo *>(data);
     result->base = static_cast<uintptr_t>(info->dlpi_addr);
     result->path = path;
+    result->executableRangeCount = 0;
+
+    for (ElfW(Half) i = 0; i < info->dlpi_phnum; ++i) {
+        const ElfW(Phdr) &phdr = info->dlpi_phdr[i];
+        if (phdr.p_type != PT_LOAD || (phdr.p_flags & PF_X) == 0 || phdr.p_memsz == 0) {
+            continue;
+        }
+        if (result->executableRangeCount >= result->executableRanges.size()) break;
+        auto &range = result->executableRanges[result->executableRangeCount++];
+        range.start = result->base + static_cast<uintptr_t>(phdr.p_vaddr);
+        range.size = static_cast<size_t>(phdr.p_memsz);
+    }
     return 1;
 }
 
@@ -176,8 +226,8 @@ bool probeEquals(const std::array<uint8_t, kHookProbeSize> &left,
     return std::memcmp(left.data(), right.data(), left.size()) == 0;
 }
 
-bool probeEqualsOriginal(const std::array<uint8_t, kHookProbeSize> &head) {
-    return std::memcmp(head.data(), kOnSwipeProcessSignature, head.size()) == 0;
+bool probeEqualsExpectedOriginal(const std::array<uint8_t, kHookProbeSize> &head) {
+    return gExpectedOriginalHeadReady && probeEquals(head, gExpectedOriginalHead);
 }
 
 std::string probeHex(const std::array<uint8_t, kHookProbeSize> &head) {
@@ -186,6 +236,57 @@ std::string probeHex(const std::array<uint8_t, kHookProbeSize> &head) {
         std::snprintf(text + i * 2, 3, "%02x", static_cast<unsigned int>(head[i]));
     }
     return std::string(text);
+}
+
+bool patternMatchesAt(uintptr_t address, const PatternSpec &pattern) {
+    if (address == 0 || pattern.bytes == nullptr || pattern.mask == nullptr || pattern.size == 0) {
+        return false;
+    }
+    const auto *data = reinterpret_cast<const uint8_t *>(address);
+    for (size_t i = 0; i < pattern.size; ++i) {
+        if (((data[i] ^ pattern.bytes[i]) & pattern.mask[i]) != 0) return false;
+    }
+    return true;
+}
+
+struct PatternMatch {
+    uintptr_t address = 0;
+    const PatternSpec *pattern = nullptr;
+};
+
+struct TargetResolution {
+    PatternMatch match{};
+    size_t uniqueCandidates = 0;
+};
+
+TargetResolution resolveOnSwipeProcessTarget(const LibraryInfo &library) {
+    std::vector<PatternMatch> matches;
+    matches.reserve(2);
+
+    for (const PatternSpec &pattern : kOnSwipeProcessPatterns) {
+        for (size_t rangeIndex = 0; rangeIndex < library.executableRangeCount; ++rangeIndex) {
+            const ExecutableRange &range = library.executableRanges[rangeIndex];
+            if (range.start == 0 || range.size < pattern.size) continue;
+
+            const uintptr_t alignedStart = (range.start + 3U) & ~static_cast<uintptr_t>(3U);
+            const uintptr_t last = range.start + range.size - pattern.size;
+            for (uintptr_t cursor = alignedStart; cursor <= last; cursor += 4U) {
+                if (!patternMatchesAt(cursor, pattern)) continue;
+
+                const auto duplicate = std::find_if(matches.begin(), matches.end(),
+                        [cursor](const PatternMatch &item) { return item.address == cursor; });
+                if (duplicate == matches.end()) {
+                    matches.push_back({cursor, &pattern});
+                    if (matches.size() > 1) {
+                        return {{}, matches.size()};
+                    }
+                }
+            }
+        }
+    }
+
+    if (matches.size() == 1) return {matches.front(), 1};
+    return {{}, matches.size()};
 }
 
 int parseDensityDpi(const char *text) {
@@ -351,19 +452,22 @@ bool waitForHookIdle() {
     return gActiveHookCalls.load(std::memory_order_acquire) == 0;
 }
 
-bool installFreshHookLocked(uintptr_t base, uintptr_t target, const char *source) {
-    if (gHookFunction == nullptr || base == 0 || target == 0) return false;
+bool installFreshHookLocked(const LibraryInfo &library, uintptr_t target,
+                            const PatternSpec &pattern, const char *source) {
+    if (gHookFunction == nullptr || library.base == 0 || target == 0) return false;
+
+    if (!patternMatchesAt(target, pattern)) {
+        logLine(ANDROID_LOG_ERROR,
+                "HOOK_SCAN pattern changed before hook source=%s pattern=%s target=%p; refusing",
+                source, pattern.name, reinterpret_cast<void *>(target));
+        return false;
+    }
 
     std::array<uint8_t, kHookProbeSize> before{};
     if (!readProbeHead(target, before)) return false;
-    if (!probeEqualsOriginal(before)) {
-        logLine(ANDROID_LOG_ERROR,
-                "HOOK_HEALTH install refused source=%s target=%p head=%s expectedOriginal=%s",
-                source, reinterpret_cast<void *>(target), probeHex(before).c_str(),
-                probeHex(*reinterpret_cast<const std::array<uint8_t, kHookProbeSize> *>(
-                        kOnSwipeProcessSignature)).c_str());
-        return false;
-    }
+    gExpectedOriginalHead = before;
+    gExpectedOriginalHeadReady = true;
+    gActivePatternName = pattern.name;
 
     void *backup = nullptr;
     const int rc = gHookFunction(reinterpret_cast<void *>(target),
@@ -371,13 +475,13 @@ bool installFreshHookLocked(uintptr_t base, uintptr_t target, const char *source
     if (rc != 0 || backup == nullptr) {
         gHookInstalled.store(false, std::memory_order_release);
         logLine(ANDROID_LOG_ERROR,
-                "DP_GATE hook_func failed source=%s rc=%d backup=%p target=%p",
-                source, rc, backup, reinterpret_cast<void *>(target));
+                "DP_GATE hook_func failed source=%s rc=%d backup=%p target=%p pattern=%s",
+                source, rc, backup, reinterpret_cast<void *>(target), pattern.name);
         return false;
     }
 
     std::array<uint8_t, kHookProbeSize> patchedHead{};
-    if (!readProbeHead(target, patchedHead) || probeEqualsOriginal(patchedHead)) {
+    if (!readProbeHead(target, patchedHead) || probeEqualsExpectedOriginal(patchedHead)) {
         gHookInstalled.store(false, std::memory_order_release);
         logLine(ANDROID_LOG_ERROR,
                 "HOOK_HEALTH hook_func returned success but entry is not patched source=%s target=%p",
@@ -389,7 +493,7 @@ bool installFreshHookLocked(uintptr_t base, uintptr_t target, const char *source
                                   std::memory_order_release);
     gInstalledPatchHead = patchedHead;
     gInstalledPatchHeadReady = true;
-    gHookedBase.store(base, std::memory_order_release);
+    gHookedBase.store(library.base, std::memory_order_release);
     gHookedTarget.store(target, std::memory_order_release);
     gHookInstalled.store(true, std::memory_order_release);
     gHookHealthState.store(1, std::memory_order_release);
@@ -400,17 +504,19 @@ bool installFreshHookLocked(uintptr_t base, uintptr_t target, const char *source
             ? kStockBoundaryDp
             : std::max(configuredDp, kStockBoundaryDp);
     const int densityDpi = effectiveDp > kStockBoundaryDp ? readDensityDpi() : 0;
+    const uintptr_t resolvedOffset = target - library.base;
     logLine(ANDROID_LOG_INFO,
-            "DP_GATE hook installed source=%s launcher=8.01.02.5459 base=%p target=%p configuredDp=%d effectiveDp=%d densityDpi=%d userGatePx=%.2f patchHead=%s repairs=%llu unhookRepair=1",
-            source, reinterpret_cast<void *>(base), reinterpret_cast<void *>(target),
-            configuredDp, effectiveDp, densityDpi,
+            "DP_GATE hook installed source=%s pattern=%s base=%p target=%p resolvedOffset=0x%zx referenceOffset=0x%zx configuredDp=%d effectiveDp=%d densityDpi=%d userGatePx=%.2f patchHead=%s repairs=%llu unhookRepair=1",
+            source, pattern.name, reinterpret_cast<void *>(library.base),
+            reinterpret_cast<void *>(target), static_cast<size_t>(resolvedOffset),
+            static_cast<size_t>(kReferenceOnSwipeProcessOffset), configuredDp, effectiveDp, densityDpi,
             densityDpi > 0 ? dpToPx(effectiveDp, densityDpi) : 0.0f,
             probeHex(patchedHead).c_str(),
             static_cast<unsigned long long>(gRepairCount.load(std::memory_order_relaxed)));
     return true;
 }
 
-bool repairRestoredHookLocked(uintptr_t base, uintptr_t target, const char *source,
+bool repairRestoredHookLocked(const LibraryInfo &library, uintptr_t target, const char *source,
                               const std::array<uint8_t, kHookProbeSize> &currentHead) {
     const int64_t now = monotonicMs();
     const int64_t lastAttempt = gLastRepairAttemptMs.load(std::memory_order_relaxed);
@@ -420,9 +526,9 @@ bool repairRestoredHookLocked(uintptr_t base, uintptr_t target, const char *sour
     gHookInstalled.store(false, std::memory_order_release);
 
     logLine(ANDROID_LOG_WARN,
-            "HOOK_HEALTH original bytes restored source=%s base=%p target=%p currentHead=%s oldPatchHead=%s activeCalls=%u; starting unhook+rehook repair",
-            source, reinterpret_cast<void *>(base), reinterpret_cast<void *>(target),
-            probeHex(currentHead).c_str(),
+            "HOOK_HEALTH original bytes restored source=%s base=%p target=%p pattern=%s currentHead=%s oldPatchHead=%s activeCalls=%u; starting unhook+rehook repair",
+            source, reinterpret_cast<void *>(library.base), reinterpret_cast<void *>(target),
+            gActivePatternName, probeHex(currentHead).c_str(),
             gInstalledPatchHeadReady ? probeHex(gInstalledPatchHead).c_str() : "<none>",
             gActiveHookCalls.load(std::memory_order_acquire));
 
@@ -440,10 +546,6 @@ bool repairRestoredHookLocked(uintptr_t base, uintptr_t target, const char *sour
         return false;
     }
 
-    // The entry is already back to Xiaomi's original bytes, but Dobby can still
-    // keep an internal HookEntry for this address. That exact stale registration
-    // is what produces "already been hooked" / rc=1. DobbyDestroy through
-    // LSPosed unhook_func clears that record and any old trampoline first.
     gOriginalOnSwipeProcess.store(nullptr, std::memory_order_release);
     const int unhookRc = gUnhookFunction(reinterpret_cast<void *>(target));
 
@@ -459,16 +561,31 @@ bool repairRestoredHookLocked(uintptr_t base, uintptr_t target, const char *sour
             "HOOK_HEALTH unhook result rc=%d target=%p headAfterUnhook=%s",
             unhookRc, reinterpret_cast<void *>(target), probeHex(afterUnhook).c_str());
 
-    if (!probeEqualsOriginal(afterUnhook)) {
+    if (!probeEqualsExpectedOriginal(afterUnhook)) {
         gHookHealthState.store(3, std::memory_order_release);
         logLine(ANDROID_LOG_ERROR,
-                "HOOK_HEALTH repair aborted: entry became foreign after unhook head=%s",
-                probeHex(afterUnhook).c_str());
+                "HOOK_HEALTH repair aborted: entry became foreign after unhook head=%s expected=%s",
+                probeHex(afterUnhook).c_str(), probeHex(gExpectedOriginalHead).c_str());
+        return false;
+    }
+
+    const PatternSpec *activePattern = nullptr;
+    for (const PatternSpec &pattern : kOnSwipeProcessPatterns) {
+        if (std::strcmp(pattern.name, gActivePatternName) == 0) {
+            activePattern = &pattern;
+            break;
+        }
+    }
+    if (activePattern == nullptr || !patternMatchesAt(target, *activePattern)) {
+        gHookHealthState.store(3, std::memory_order_release);
+        logLine(ANDROID_LOG_ERROR,
+                "HOOK_HEALTH repair aborted: active pattern no longer matches target=%p pattern=%s",
+                reinterpret_cast<void *>(target), gActivePatternName);
         return false;
     }
 
     gInstalledPatchHeadReady = false;
-    if (!installFreshHookLocked(base, target, "repair-after-unhook")) {
+    if (!installFreshHookLocked(library, target, *activePattern, "repair-after-unhook")) {
         gHookHealthState.store(2, std::memory_order_release);
         return false;
     }
@@ -480,61 +597,108 @@ bool repairRestoredHookLocked(uintptr_t base, uintptr_t target, const char *sour
     return true;
 }
 
-bool ensureHookLocked(uintptr_t base, const char *source) {
-    if (base == 0 || gHookFunction == nullptr) return false;
-
-    const uintptr_t target = base + kOnSwipeProcessOffset;
-    std::array<uint8_t, kHookProbeSize> currentHead{};
-    if (!readProbeHead(target, currentHead)) return false;
-
-    const uintptr_t trackedTarget = gHookedTarget.load(std::memory_order_acquire);
-    if (trackedTarget == target && gInstalledPatchHeadReady
-            && probeEquals(currentHead, gInstalledPatchHead)) {
-        gHookInstalled.store(true, std::memory_order_release);
-        gHookHealthState.store(1, std::memory_order_release);
-        const int64_t now = monotonicMs();
-        int64_t last = gLastHealthyLogMs.load(std::memory_order_relaxed);
-        if (now - last >= kHealthyLogIntervalMs
-                && gLastHealthyLogMs.compare_exchange_strong(
-                        last, now, std::memory_order_relaxed)) {
-            logLine(ANDROID_LOG_INFO,
-                    "HOOK_HEALTH healthy source=%s base=%p target=%p configuredDp=%d repairs=%llu",
-                    source, reinterpret_cast<void *>(base), reinterpret_cast<void *>(target),
-                    readThresholdDp(),
-                    static_cast<unsigned long long>(gRepairCount.load(std::memory_order_relaxed)));
-        }
-        return true;
+void resetTrackedHookForRemapLocked(uintptr_t newBase) {
+    const uintptr_t oldBase = gHookedBase.load(std::memory_order_acquire);
+    const uintptr_t oldTarget = gHookedTarget.load(std::memory_order_acquire);
+    if (oldTarget != 0) {
+        logLine(ANDROID_LOG_WARN,
+                "HOOK_HEALTH launcher mapping changed oldBase=%p oldTarget=%p newBase=%p; rescanning executable segments",
+                reinterpret_cast<void *>(oldBase), reinterpret_cast<void *>(oldTarget),
+                reinterpret_cast<void *>(newBase));
     }
-
-    if (probeEqualsOriginal(currentHead)) {
-        if (trackedTarget == target && gInstalledPatchHeadReady) {
-            gHookHealthState.store(2, std::memory_order_release);
-            return repairRestoredHookLocked(base, target, source, currentHead);
-        }
-
-        if (trackedTarget != 0 && trackedTarget != target) {
-            logLine(ANDROID_LOG_WARN,
-                    "HOOK_HEALTH launcher mapping changed source=%s oldTarget=%p newBase=%p newTarget=%p",
-                    source, reinterpret_cast<void *>(trackedTarget), reinterpret_cast<void *>(base),
-                    reinterpret_cast<void *>(target));
-        }
-        return installFreshHookLocked(base, target, source);
-    }
-
-    const int previousState = gHookHealthState.exchange(3, std::memory_order_acq_rel);
-    gHookInstalled.store(false, std::memory_order_release);
-    if (previousState != 3 || trackedTarget != target) {
-        logLine(ANDROID_LOG_ERROR,
-                "HOOK_HEALTH foreign patch detected source=%s base=%p target=%p trackedTarget=%p head=%s; refusing unsafe repair",
-                source, reinterpret_cast<void *>(base), reinterpret_cast<void *>(target),
-                reinterpret_cast<void *>(trackedTarget), probeHex(currentHead).c_str());
-    }
-    return false;
+    gOriginalOnSwipeProcess.store(nullptr, std::memory_order_release);
+    gHookedBase.store(0, std::memory_order_release);
+    gHookedTarget.store(0, std::memory_order_release);
+    gInstalledPatchHeadReady = false;
+    gExpectedOriginalHeadReady = false;
+    gActivePatternName = "<none>";
 }
 
-bool ensureHook(uintptr_t base, const char *source) {
+bool ensureHookLocked(const LibraryInfo &library, const char *source) {
+    if (library.base == 0 || library.executableRangeCount == 0 || gHookFunction == nullptr) {
+        return false;
+    }
+
+    const uintptr_t trackedBase = gHookedBase.load(std::memory_order_acquire);
+    const uintptr_t trackedTarget = gHookedTarget.load(std::memory_order_acquire);
+
+    if (trackedBase == library.base && trackedTarget != 0) {
+        std::array<uint8_t, kHookProbeSize> currentHead{};
+        if (!readProbeHead(trackedTarget, currentHead)) return false;
+
+        if (gInstalledPatchHeadReady && probeEquals(currentHead, gInstalledPatchHead)) {
+            gHookInstalled.store(true, std::memory_order_release);
+            gHookHealthState.store(1, std::memory_order_release);
+            const int64_t now = monotonicMs();
+            int64_t last = gLastHealthyLogMs.load(std::memory_order_relaxed);
+            if (now - last >= kHealthyLogIntervalMs
+                    && gLastHealthyLogMs.compare_exchange_strong(
+                            last, now, std::memory_order_relaxed)) {
+                logLine(ANDROID_LOG_INFO,
+                        "HOOK_HEALTH healthy source=%s base=%p target=%p pattern=%s configuredDp=%d repairs=%llu",
+                        source, reinterpret_cast<void *>(library.base),
+                        reinterpret_cast<void *>(trackedTarget), gActivePatternName,
+                        readThresholdDp(),
+                        static_cast<unsigned long long>(gRepairCount.load(std::memory_order_relaxed)));
+            }
+            return true;
+        }
+
+        if (probeEqualsExpectedOriginal(currentHead)) {
+            gHookHealthState.store(2, std::memory_order_release);
+            return repairRestoredHookLocked(library, trackedTarget, source, currentHead);
+        }
+
+        const int previousState = gHookHealthState.exchange(3, std::memory_order_acq_rel);
+        gHookInstalled.store(false, std::memory_order_release);
+        if (previousState != 3) {
+            logLine(ANDROID_LOG_ERROR,
+                    "HOOK_HEALTH foreign patch detected source=%s base=%p target=%p pattern=%s head=%s; refusing unsafe repair",
+                    source, reinterpret_cast<void *>(library.base),
+                    reinterpret_cast<void *>(trackedTarget), gActivePatternName,
+                    probeHex(currentHead).c_str());
+        }
+        return false;
+    }
+
+    if (trackedBase != 0 || trackedTarget != 0) {
+        resetTrackedHookForRemapLocked(library.base);
+    }
+
+    const int64_t now = monotonicMs();
+    const bool forceScan = std::strcmp(source, "loader-callback") == 0;
+    const int64_t lastScan = gLastPatternScanMs.load(std::memory_order_relaxed);
+    if (!forceScan && now - lastScan < kPatternRescanIntervalMs) return false;
+    gLastPatternScanMs.store(now, std::memory_order_relaxed);
+
+    const TargetResolution resolution = resolveOnSwipeProcessTarget(library);
+    if (resolution.uniqueCandidates != 1 || resolution.match.address == 0
+            || resolution.match.pattern == nullptr) {
+        gHookInstalled.store(false, std::memory_order_release);
+        gHookHealthState.store(3, std::memory_order_release);
+        logLine(ANDROID_LOG_ERROR,
+                "HOOK_SCAN install refused source=%s candidates=%zu base=%p execRanges=%zu referenceOffset=0x%zx; no unique validated target",
+                source, resolution.uniqueCandidates, reinterpret_cast<void *>(library.base),
+                library.executableRangeCount, static_cast<size_t>(kReferenceOnSwipeProcessOffset));
+        return false;
+    }
+
+    const uintptr_t target = resolution.match.address;
+    const uintptr_t resolvedOffset = target - library.base;
+    const intptr_t delta = static_cast<intptr_t>(resolvedOffset)
+            - static_cast<intptr_t>(kReferenceOnSwipeProcessOffset);
+    logLine(ANDROID_LOG_INFO,
+            "HOOK_SCAN resolved source=%s pattern=%s target=%p resolvedOffset=0x%zx referenceOffset=0x%zx delta=%lld execRanges=%zu",
+            source, resolution.match.pattern->name, reinterpret_cast<void *>(target),
+            static_cast<size_t>(resolvedOffset), static_cast<size_t>(kReferenceOnSwipeProcessOffset),
+            static_cast<long long>(delta), library.executableRangeCount);
+
+    return installFreshHookLocked(library, target, *resolution.match.pattern, source);
+}
+
+bool ensureHook(const LibraryInfo &library, const char *source) {
     std::lock_guard<std::mutex> lock(gHookMutex);
-    return ensureHookLocked(base, source);
+    return ensureHookLocked(library, source);
 }
 
 void hookWatchdogWorker() {
@@ -543,7 +707,7 @@ void hookWatchdogWorker() {
         const LibraryInfo library = findLauncherLibrary();
         if (library.base != 0) {
             missingPolls = 0;
-            ensureHook(library.base, "watchdog");
+            ensureHook(library, "watchdog");
         } else {
             ++missingPolls;
             if (missingPolls == 12) {
@@ -569,7 +733,7 @@ void onLibraryLoaded(const char *name, void *) {
     if (std::strstr(name, kTargetLibrary) != nullptr) {
         const LibraryInfo library = findLauncherLibrary();
         if (library.base != 0) {
-            ensureHook(library.base, "loader-callback");
+            ensureHook(library, "loader-callback");
         }
     }
 }
@@ -584,7 +748,7 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     gHookFunction = entries->hook_func;
     gUnhookFunction = entries->unhook_func;
     logLine(ANDROID_LOG_INFO,
-            "DP_GATE native_init accepted api=%u exe=%s process=%s hook_func=%p unhook_func=%p watchdog=%lldms repair=unhook+rehook",
+            "DP_GATE native_init accepted api=%u exe=%s process=%s hook_func=%p unhook_func=%p watchdog=%lldms resolver=masked-pattern-scan repair=unhook+rehook",
             entries->version, readExecutable().c_str(), readProcessName().c_str(),
             reinterpret_cast<void *>(entries->hook_func),
             reinterpret_cast<void *>(entries->unhook_func),
