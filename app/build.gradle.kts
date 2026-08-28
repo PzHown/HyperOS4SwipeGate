@@ -13,8 +13,8 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        versionCode = 19
-        versionName = "0.3.5-hyos-status"
+        versionCode = 20
+        versionName = "0.3.6-ui-refresh"
 
         ndk {
             abiFilters += "arm64-v8a"

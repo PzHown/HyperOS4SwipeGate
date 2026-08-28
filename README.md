@@ -8,6 +8,7 @@
 [![Release](https://img.shields.io/github/v/release/PzHown/HyperOS4SwipeGate?include_prereleases&label=release)](https://github.com/PzHown/HyperOS4SwipeGate/releases)
 ![Android 17](https://img.shields.io/badge/Android-17-3DDC84?logo=android&logoColor=white)
 ![LSPosed API 102](https://img.shields.io/badge/LSPosed-API%20102-blue)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 </div>
 
@@ -44,22 +45,25 @@ SwipeGate 可以提高这项手势的触发距离：**未达到设定距离时�
 2. 在 LSPosed 中启用 **HyperOS4 SwipeGate**，作用域选择 **系统桌面（`com.miui.home`）**。
 3. 重启系统桌面或设备，使模块加载。
 4. 在手机管家中将侧边栏呼出方式设为「侧滑停顿呼出」。
-5. 打开 SwipeGate，在「设置」中调整触发距离。
+5. 打开 SwipeGate，在「主页」中调整触发距离。
 
 配置通过 LSPosed API 102 RemotePreferences 传递，不需要授予 Root 权限。调整后即时生效，无需重启桌面。
 
 ## 触发距离
 
-- `0`：使用原厂 `88 dp`
-- `1–88 dp`：实际仍按原厂 `88 dp`
-- `89–320 dp`：使用设定距离
+可修改范围为 **88–300 dp**：
+
+- `88 dp`：原厂触发距离
+- `89–300 dp`：使用设定距离延后侧边栏触发
 
 数值越大，需要向屏幕内侧滑得越远才会进入侧边栏停顿触发。
+
+旧版本留下的 `0` 仍会被兼容解释为原厂 `88 dp`，但新界面不再提供低于 `88 dp` 的可调值。
 
 ## 排查
 
 **显示「未激活」**  
-确认 LSPosed 已启用模块、作用域包含 `com.miui.home`，然后重启系统桌面。App 的状态来自 LSPosed API 102 对当前运行目标的查询，不再依赖 Root/logcat。
+确认 LSPosed 已启用模块、作用域包含 `com.miui.home`，并确认设备存在 HYOS Runtime，然后重启系统桌面。App 会综合 LSPosed API 102、Launcher UID、作用域和 HYOS Runtime 证据判断状态，不再依赖 Root/logcat。
 
 **显示「LSPosed 未连接」**  
 确认正在使用支持 Modern API 102 的 LSPosed，并重新打开模块 App。
@@ -78,6 +82,17 @@ SwipeGate 可以提高这项手势的触发距离：**未达到设定距离时�
 
 逆向目标、Pattern 扫描、Hook 策略、安全校验与构建说明见 [docs/TECHNICAL.md](docs/TECHNICAL.md)。
 
+## 许可
+
+本项目采用 [MIT License](LICENSE)。
+
 ---
 
 本项目与 Xiaomi / 小米官方无关。
+
+## 鸣谢
+
+- [HyperCeiler](https://github.com/ReChronoRain/HyperCeiler)
+- [Miuix](https://github.com/compose-miuix-ui/miuix)
+- [libxposed](https://github.com/libxposed/api)
+- [LSPosed](https://github.com/LSPosed/LSPosed)

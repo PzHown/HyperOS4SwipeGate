@@ -10,6 +10,8 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -27,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.Composable
@@ -42,8 +45,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -71,7 +77,6 @@ import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Home
 import top.yukonga.miuix.kmp.icon.extended.Info
 import top.yukonga.miuix.kmp.icon.extended.ListView
-import top.yukonga.miuix.kmp.icon.extended.Settings
 import top.yukonga.miuix.kmp.preference.SliderPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.ColorSchemeMode
@@ -84,8 +89,7 @@ private const val PREF_UI_LIQUID_GLASS = "ui_liquid_glass"
 private const val PREF_DP_MIGRATED = "threshold_dp_migrated_v1"
 
 private enum class MainTab(val title: String, val icon: ImageVector) {
-    Overview("概览", MiuixIcons.Home),
-    Settings("设置", MiuixIcons.Settings),
+    Home("主页", MiuixIcons.Home),
     Logs("日志", MiuixIcons.ListView),
     About("关于", MiuixIcons.Info),
 }
@@ -154,7 +158,7 @@ private fun SwipeGateManager() {
                         MainTab.entries.forEachIndexed { index, tab ->
                             LiquidFloatingBottomBarItem(
                                 onClick = { selectedTab = index },
-                                modifier = Modifier.defaultMinSize(minWidth = 64.dp),
+                                modifier = Modifier.defaultMinSize(minWidth = 72.dp),
                             ) {
                                 Icon(imageVector = tab.icon, contentDescription = tab.title)
                                 Text(
@@ -183,8 +187,8 @@ private fun SwipeGateManager() {
         Scaffold(
             topBar = {
                 TopAppBar(
-                    title = if (currentTab == MainTab.Overview) "HyperOS4 SwipeGate" else currentTab.title,
-                    largeTitle = if (currentTab == MainTab.Overview) "HyperOS4 SwipeGate" else currentTab.title,
+                    title = if (currentTab == MainTab.Home) "HyperOS4 SwipeGate" else currentTab.title,
+                    largeTitle = if (currentTab == MainTab.Home) "HyperOS4 SwipeGate" else currentTab.title,
                     subtitle = "",
                 )
             },
@@ -196,10 +200,7 @@ private fun SwipeGateManager() {
                     .then(if (captureForLiquid) Modifier.layerBackdrop(backdrop) else Modifier),
             ) {
                 when (currentTab) {
-                    MainTab.Overview -> OverviewPage(innerPadding)
-                    MainTab.Settings -> SettingsPage(innerPadding)
-                    MainTab.Logs -> LogsPage(innerPadding)
-                    MainTab.About -> AboutPage(
+                    MainTab.Home -> HomePage(
                         contentPadding = innerPadding,
                         floatingBar = floatingBar,
                         liquidGlass = liquidGlass,
@@ -213,6 +214,8 @@ private fun SwipeGateManager() {
                             prefs.edit().putBoolean(PREF_UI_LIQUID_GLASS, it).apply()
                         },
                     )
+                    MainTab.Logs -> LogsPage(innerPadding)
+                    MainTab.About -> AboutPage(innerPadding)
                 }
             }
         }
@@ -243,9 +246,25 @@ private fun StandardBottomBar(
 }
 
 @Composable
-private fun OverviewPage(contentPadding: PaddingValues) {
+private fun HomePage(
+    contentPadding: PaddingValues,
+    floatingBar: Boolean,
+    liquidGlass: Boolean,
+    blurSupported: Boolean,
+    onFloatingBarChanged: (Boolean) -> Unit,
+    onLiquidGlassChanged: (Boolean) -> Unit,
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val prefs = remember { ConfigBridge.localPreferences(context) }
     var snapshot by remember { mutableStateOf(HookStatusSnapshot.loading()) }
+    var thresholdDp by remember {
+        mutableFloatStateOf(
+            loadAndMigrateThresholdDp(context)
+                .coerceIn(ConfigBridge.STOCK_THRESHOLD_DP, ConfigBridge.MAX_THRESHOLD_DP)
+                .toFloat(),
+        )
+    }
+    var applyStatus by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -287,7 +306,7 @@ private fun OverviewPage(contentPadding: PaddingValues) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = pagePadding(contentPadding),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         item {
             Card(
@@ -314,28 +333,93 @@ private fun OverviewPage(contentPadding: PaddingValues) {
             }
         }
 
+        if (snapshot.detail.isNotBlank() && snapshot.state != HookUiState.Active) {
+            item {
+                Card(modifier = Modifier.fillMaxWidth(), cornerRadius = 18.dp) {
+                    Text(
+                        text = snapshot.detail,
+                        modifier = Modifier.padding(horizontal = 22.dp, vertical = 16.dp),
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    )
+                }
+            }
+        }
+
+        item { SmallTitle("手势") }
         item {
             Card(modifier = Modifier.fillMaxWidth(), cornerRadius = 20.dp) {
-                OverviewInfoRow(
-                    "当前门槛",
-                    snapshot.thresholdDp?.let { thresholdLabel(it) } ?: "读取中",
+                val value = thresholdDp.roundToInt()
+                SliderPreference(
+                    value = thresholdDp,
+                    onValueChange = {
+                        thresholdDp = it.roundToInt()
+                            .coerceIn(ConfigBridge.STOCK_THRESHOLD_DP, ConfigBridge.MAX_THRESHOLD_DP)
+                            .toFloat()
+                        applyStatus = ""
+                    },
+                    onValueChangeFinished = {
+                        val applied = thresholdDp.roundToInt()
+                            .coerceIn(ConfigBridge.STOCK_THRESHOLD_DP, ConfigBridge.MAX_THRESHOLD_DP)
+                        prefs.edit().putInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, applied).apply()
+                        ConfigBridge.applyThresholdDpAsync(context, applied) { result ->
+                            applyStatus = when {
+                                !result.success() -> "应用失败：${result.message()}"
+                                result.value() <= ConfigBridge.STOCK_THRESHOLD_DP -> "已应用：88 dp（原厂）"
+                                else -> "已应用：${result.value()} dp"
+                            }
+                        }
+                    },
+                    title = "侧边栏触发距离",
+                    summary = thresholdLabel(value),
+                    valueRange = ConfigBridge.STOCK_THRESHOLD_DP.toFloat()..ConfigBridge.MAX_THRESHOLD_DP.toFloat(),
+                    steps = ConfigBridge.MAX_THRESHOLD_DP - ConfigBridge.STOCK_THRESHOLD_DP - 1,
+                    showKeyPoints = false,
                 )
+                Text(
+                    text = "可调范围 88–300 dp。超过 88 dp 后才会延后侧边栏，返回手势保持系统原样。",
+                    modifier = Modifier.padding(start = 24.dp, end = 24.dp, bottom = if (applyStatus.isBlank()) 18.dp else 6.dp),
+                    fontSize = 13.sp,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                )
+                if (applyStatus.isNotBlank()) {
+                    Text(
+                        text = applyStatus,
+                        modifier = Modifier.padding(start = 24.dp, end = 24.dp, bottom = 18.dp),
+                        fontSize = 13.sp,
+                        color = if (applyStatus.startsWith("应用失败")) MiuixTheme.colorScheme.error
+                        else MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    )
+                }
+            }
+        }
+
+        item { SmallTitle("环境") }
+        item {
+            Card(modifier = Modifier.fillMaxWidth(), cornerRadius = 20.dp) {
                 OverviewInfoRow(
                     "Launcher",
                     snapshot.launcherVersion.ifBlank { "读取中" },
                 )
+                OverviewInfoRow("配置通道", "LSPosed API 102 · 无 Root")
             }
         }
 
-        if (snapshot.detail.isNotBlank() && snapshot.state != HookUiState.Active) {
-            item {
-                SmallTitle("状态说明")
-                Card(modifier = Modifier.fillMaxWidth(), cornerRadius = 20.dp) {
-                    Text(
-                        text = snapshot.detail,
-                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
-                    )
-                }
+        item { SmallTitle("界面") }
+        item {
+            Card(modifier = Modifier.fillMaxWidth(), cornerRadius = 20.dp) {
+                SwitchPreference(
+                    checked = floatingBar,
+                    onCheckedChange = onFloatingBarChanged,
+                    title = "悬浮底栏",
+                    summary = "使用悬浮式底部导航",
+                )
+                SwitchPreference(
+                    checked = liquidGlass && blurSupported,
+                    onCheckedChange = onLiquidGlassChanged,
+                    title = "液态玻璃",
+                    summary = if (blurSupported) "启用模糊与折射效果" else "当前设备不支持",
+                    enabled = floatingBar && blurSupported,
+                )
             }
         }
     }
@@ -379,7 +463,7 @@ private fun collectHookStatusSnapshot(context: Context): HookStatusSnapshot {
             HookUiState.Inactive,
             launcherVersion,
             threshold,
-            "系统桌面正在运行，但 LSPosed 尚未报告本模块已加载。请检查作用域后重启系统桌面。",
+            "未检测到 Launcher/HYOS 激活证据，请检查 LSPosed 作用域和 HYOS Runtime。",
         )
     }
 
@@ -408,69 +492,6 @@ private fun collectHookStatusSnapshot(context: Context): HookStatusSnapshot {
             threshold,
             "",
         )
-    }
-}
-
-@Composable
-private fun SettingsPage(contentPadding: PaddingValues) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val prefs = remember { ConfigBridge.localPreferences(context) }
-    var thresholdDp by remember { mutableFloatStateOf(loadAndMigrateThresholdDp(context).toFloat()) }
-    var applyStatus by remember { mutableStateOf("") }
-
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = pagePadding(contentPadding),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        item { SmallTitle("手势") }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                val value = thresholdDp.roundToInt()
-                SliderPreference(
-                    value = thresholdDp,
-                    onValueChange = {
-                        thresholdDp = it.roundToInt().toFloat()
-                        applyStatus = ""
-                    },
-                    onValueChangeFinished = {
-                        val applied = thresholdDp.roundToInt().coerceIn(0, ConfigBridge.MAX_THRESHOLD_DP)
-                        prefs.edit().putInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, applied).apply()
-                        ConfigBridge.applyThresholdDpAsync(context, applied) { result ->
-                            applyStatus = when {
-                                !result.success() -> "应用失败：${result.message()}"
-                                result.value() == 0 -> "已应用：默认（88 dp）"
-                                result.value() <= ConfigBridge.STOCK_THRESHOLD_DP -> "已应用：88 dp（系统下限）"
-                                else -> "已应用：${result.value()} dp"
-                            }
-                        }
-                    },
-                    title = "侧边栏触发距离",
-                    summary = thresholdLabel(value),
-                    valueRange = 0f..ConfigBridge.MAX_THRESHOLD_DP.toFloat(),
-                    steps = ConfigBridge.MAX_THRESHOLD_DP - 1,
-                    showKeyPoints = false,
-                )
-                if (applyStatus.isNotBlank()) {
-                    Text(
-                        text = applyStatus,
-                        modifier = Modifier.padding(start = 24.dp, end = 24.dp, bottom = 16.dp),
-                        color = if (applyStatus.startsWith("应用失败")) MiuixTheme.colorScheme.error
-                        else MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                    )
-                }
-            }
-        }
-
-        item { SmallTitle("说明") }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    "超过 88 dp 后才会延后侧边栏，返回手势不变。配置通过 LSPosed API 102 传递，不需要 Root。",
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
-                )
-            }
-        }
     }
 }
 
@@ -544,68 +565,60 @@ private fun LogsPage(contentPadding: PaddingValues) {
 }
 
 @Composable
-private fun AboutPage(
-    contentPadding: PaddingValues,
-    floatingBar: Boolean,
-    liquidGlass: Boolean,
-    blurSupported: Boolean,
-    onFloatingBarChanged: (Boolean) -> Unit,
-    onLiquidGlassChanged: (Boolean) -> Unit,
-) {
+private fun AboutPage(contentPadding: PaddingValues) {
     val context = androidx.compose.ui.platform.LocalContext.current
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = pagePadding(contentPadding),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        item { SmallTitle("界面") }
         item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                SwitchPreference(
-                    checked = floatingBar,
-                    onCheckedChange = onFloatingBarChanged,
-                    title = "悬浮底栏",
-                    summary = "底部导航改为悬浮样式",
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 12.dp, bottom = 14.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.swipegate_logo),
+                    contentDescription = "HyperOS4 SwipeGate Logo",
+                    modifier = Modifier.size(132.dp),
+                    contentScale = ContentScale.Fit,
                 )
-                SwitchPreference(
-                    checked = liquidGlass && blurSupported,
-                    onCheckedChange = onLiquidGlassChanged,
-                    title = "液态玻璃",
-                    summary = if (blurSupported) "启用模糊与折射效果" else "当前设备不支持",
-                    enabled = floatingBar && blurSupported,
+                Spacer(modifier = Modifier.height(14.dp))
+                Text(
+                    text = "HyperOS4 SwipeGate",
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                    fontSize = 14.sp,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = "延后 HyperOS 4 侧滑停顿触发，不改变返回手势。",
+                    modifier = Modifier.padding(horizontal = 24.dp),
+                    fontSize = 14.sp,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    textAlign = TextAlign.Center,
                 )
             }
         }
 
-        item { SmallTitle("模块") }
+        item { SmallTitle("项目") }
         item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 20.dp),
-                ) {
-                    Text("HyperOS4 SwipeGate")
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
-                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                    )
-                    Spacer(modifier = Modifier.height(14.dp))
-                    Text("控制 HyperOS 4 侧滑停顿触发距离")
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        "Launcher 8.0+ · 已测试 RELEASE-8.01.02.5459",
-                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                    )
-                }
-            }
-        }
-
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Button(
+            Card(modifier = Modifier.fillMaxWidth(), cornerRadius = 20.dp) {
+                AboutInfoRow("版本", "${BuildConfig.VERSION_NAME} · ${BuildConfig.VERSION_CODE}")
+                AboutInfoRow("兼容", "HyperOS 4 · Launcher 8.0+ · arm64-v8a")
+                AboutInfoRow("框架", "LSPosed Modern API 102 · native_init")
+                AboutLinkRow(
+                    title = "GitHub 项目",
+                    summary = "PzHown/HyperOS4SwipeGate",
                     onClick = {
                         context.startActivity(
                             Intent(
@@ -614,14 +627,81 @@ private fun AboutPage(
                             ),
                         )
                     },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                ) {
-                    Text("GitHub 项目")
-                }
+                )
             }
         }
+
+        item { SmallTitle("开发") }
+        item {
+            Card(modifier = Modifier.fillMaxWidth(), cornerRadius = 20.dp) {
+                AboutInfoRow("作者", "PzHown")
+                AboutInfoRow("Hook", "Dynamic Pattern Scan · fail-closed")
+                AboutInfoRow("构建", "Android 17 · 16 KB ELF/APK aligned")
+            }
+        }
+
+        item {
+            Text(
+                text = "HyperOS4 SwipeGate",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 12.dp, bottom = 4.dp),
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AboutInfoRow(label: String, value: String) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 13.dp),
+    ) {
+        Text(label, fontSize = 16.sp)
+        Spacer(modifier = Modifier.height(3.dp))
+        Text(
+            text = value,
+            fontSize = 13.sp,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun AboutLinkRow(
+    title: String,
+    summary: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 24.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontSize = 16.sp)
+            Spacer(modifier = Modifier.height(3.dp))
+            Text(
+                text = summary,
+                fontSize = 13.sp,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Text(
+            text = "›",
+            fontSize = 28.sp,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        )
     }
 }
 
@@ -633,8 +713,7 @@ private fun pagePadding(contentPadding: PaddingValues): PaddingValues = PaddingV
 )
 
 private fun thresholdLabel(value: Int): String = when {
-    value == 0 -> "默认（88 dp）"
-    value <= ConfigBridge.STOCK_THRESHOLD_DP -> "$value dp（实际 88 dp）"
+    value <= ConfigBridge.STOCK_THRESHOLD_DP -> "88 dp（原厂）"
     else -> "$value dp"
 }
 
@@ -642,25 +721,27 @@ private fun loadAndMigrateThresholdDp(context: Context): Int {
     val prefs = ConfigBridge.localPreferences(context)
     if (prefs.getBoolean(PREF_DP_MIGRATED, false)) {
         return prefs.getInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, ConfigBridge.DEFAULT_THRESHOLD_DP)
-            .coerceIn(0, ConfigBridge.MAX_THRESHOLD_DP)
+            .let { if (it <= 0) ConfigBridge.STOCK_THRESHOLD_DP else it }
+            .coerceIn(ConfigBridge.STOCK_THRESHOLD_DP, ConfigBridge.MAX_THRESHOLD_DP)
     }
 
     var migrated = prefs.getInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, ConfigBridge.DEFAULT_THRESHOLD_DP)
     when {
         prefs.contains(ConfigBridge.LEGACY_PREF_KEY_THRESHOLD_PX) -> {
             val legacyPx = prefs.getInt(ConfigBridge.LEGACY_PREF_KEY_THRESHOLD_PX, 0)
-            migrated = if (legacyPx <= 0) 0 else {
+            migrated = if (legacyPx <= 0) ConfigBridge.STOCK_THRESHOLD_DP else {
                 val density = context.resources.displayMetrics.density
-                if (density > 0f) (legacyPx / density).roundToInt() else ConfigBridge.DEFAULT_THRESHOLD_DP
+                if (density > 0f) (legacyPx / density).roundToInt() else ConfigBridge.STOCK_THRESHOLD_DP
             }
         }
         prefs.contains(ConfigBridge.LEGACY_PREF_KEY_EXTRA_DP) -> {
             val extraDp = prefs.getInt(ConfigBridge.LEGACY_PREF_KEY_EXTRA_DP, 0)
-            migrated = if (extraDp <= 0) 0 else ConfigBridge.STOCK_THRESHOLD_DP + extraDp
+            migrated = ConfigBridge.STOCK_THRESHOLD_DP + extraDp.coerceAtLeast(0)
         }
+        migrated <= 0 -> migrated = ConfigBridge.STOCK_THRESHOLD_DP
     }
 
-    migrated = migrated.coerceIn(0, ConfigBridge.MAX_THRESHOLD_DP)
+    migrated = migrated.coerceIn(ConfigBridge.STOCK_THRESHOLD_DP, ConfigBridge.MAX_THRESHOLD_DP)
     prefs.edit()
         .putInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, migrated)
         .putBoolean(PREF_DP_MIGRATED, true)

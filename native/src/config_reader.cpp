@@ -12,7 +12,7 @@ namespace {
 
 constexpr const char *kThresholdDpProperty = "persist.hyperos4swipegate.threshold_dp";
 constexpr const char *kConfigFileName = "hyperos4swipegate_config";
-constexpr int kMaxThresholdDp = 320;
+constexpr int kMaxThresholdDp = 300;
 constexpr int kAndroidUserOffset = 100000;
 
 bool readThresholdFile(const char *path, int *outValue) {

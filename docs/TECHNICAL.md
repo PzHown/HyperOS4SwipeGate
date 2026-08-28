@@ -135,17 +135,17 @@ persist.hyperos4swipegate.threshold_dp
 
 只作为升级迁移 fallback，不再是新配置的写入通道。其他系统属性（包括 density）不会被修改。
 
-范围：
+App 当前提供的可修改范围：
 
 ```text
-0..320 dp
+88..300 dp
 ```
 
 其中：
 
-- `0` 表示原厂默认，即 `88 dp`
-- `1–88 dp` 的有效值仍为 `88 dp`
-- `89–320 dp` 才会延后原厂侧边栏触发
+- `88 dp` 为原厂边界
+- `89–300 dp` 才会延后原厂侧边栏触发
+- 旧版本保存的 `0` 继续兼容为原厂 `88 dp` alias，但新界面不再提供 `0–87 dp`
 
 native 端约每 250 ms 刷新一次阈值，因此修改后不需要重启 Launcher。
 
@@ -153,15 +153,17 @@ native 端约每 250 ms 刷新一次阈值，因此修改后不需要重启 Laun
 
 模块 App 不再通过 `su -c pidof/logcat/getprop` 判断状态。
 
-当前使用 XposedService API 102 `getRunningTargets()` 查询正在运行的模块目标，并匹配：
+当前状态证据按以下顺序综合判断：
 
-```text
-com.miui.home
-```
+1. XposedService API 102 已连接
+2. `getRunningTargets()` 直接命中 `com.miui.home`
+3. 或命中与 Launcher 相同 UID 的 target
+4. 或识别到 `hyos_spawner` target
+5. 对部分不暴露 native-only child 的 HYOS Runtime，使用 `com.miui.home` 已在 scope 且 `/system_ext/bin/hyos_spawner` 存在作为兼容激活证据
 
-因此首页的「已激活 / 未激活」表示 **LSPosed 是否已经把当前模块 generation 加载进 Launcher 进程**。这解决了以前 Hook 实际生效、但 App 因无法读取 root logcat 而显示「状态未知」的问题。
+因此首页的「已激活 / 未激活」用于表示 LSPosed/HYOS 是否具备模块激活证据，不再依赖 Root 日志。
 
-需要注意：`getRunningTargets()` 不能替代 native Pattern 健康检查。native Hook 是否成功安装、是否遇到 Pattern 冲突，仍以 LSPosed/native 日志中的 `HOOK_SCAN` / `HOOK_HEALTH` 为准。App 不会为了读取这些日志再次申请 Root。
+需要注意：这些激活证据不能替代 native Pattern 健康检查。native Hook 是否成功安装、是否遇到 Pattern 冲突，仍以 LSPosed/native 日志中的 `HOOK_SCAN` / `HOOK_HEALTH` 为准。App 不会为了读取这些日志再次申请 Root。
 
 ## Hook 策略
 
@@ -235,7 +237,7 @@ install refused
 foreign
 ```
 
-App 的「日志」页现在提供无 Root 的 LSPosed service / target / RemotePreferences 诊断。更详细的 native Hook 日志请直接在 LSPosed 日志中查看。
+App 的「日志」页现在提供无 Root 的 LSPosed service / target / RemotePreferences / HYOS Runtime 诊断。更详细的 native Hook 日志请直接在 LSPosed 日志中查看。
 
 ## 构建
 
