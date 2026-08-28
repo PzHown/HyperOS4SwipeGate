@@ -10,6 +10,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,6 +28,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -45,11 +47,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.preference.PreferenceManager
 import io.github.pzhown.hyperos4swipegate.ui.liquid.LiquidFloatingBottomBar
 import io.github.pzhown.hyperos4swipegate.ui.liquid.LiquidFloatingBottomBarItem
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Button
@@ -89,7 +90,7 @@ private enum class MainTab(val title: String, val icon: ImageVector) {
     About("关于", MiuixIcons.Info),
 }
 
-private enum class HookUiState { Loading, Active, Repairing, Conflict, Error, Inactive, Unknown }
+private enum class HookUiState { Loading, Active, Repairing, Error, Inactive, Unknown }
 
 private data class HookStatusSnapshot(
     val state: HookUiState,
@@ -106,6 +107,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        loadAndMigrateThresholdDp(this)
+        XposedServiceBridge.initialize(this)
         setContent { SwipeGateManager() }
     }
 }
@@ -113,7 +116,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun SwipeGateManager() {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val prefs = remember { PreferenceManager.getDefaultSharedPreferences(context) }
+    val prefs = remember { ConfigBridge.localPreferences(context) }
     val themeController = remember { ThemeController(ColorSchemeMode.System) }
     var selectedTab by remember { mutableIntStateOf(0) }
     var floatingBar by remember { mutableStateOf(prefs.getBoolean(PREF_UI_FLOATING_BAR, true)) }
@@ -136,6 +139,8 @@ private fun SwipeGateManager() {
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .padding(
+                                start = 16.dp,
+                                end = 16.dp,
                                 bottom = 12.dp + WindowInsets.navigationBars
                                     .asPaddingValues()
                                     .calculateBottomPadding(),
@@ -149,7 +154,7 @@ private fun SwipeGateManager() {
                         MainTab.entries.forEachIndexed { index, tab ->
                             LiquidFloatingBottomBarItem(
                                 onClick = { selectedTab = index },
-                                modifier = Modifier.defaultMinSize(minWidth = 76.dp),
+                                modifier = Modifier.defaultMinSize(minWidth = 64.dp),
                             ) {
                                 Icon(imageVector = tab.icon, contentDescription = tab.title)
                                 Text(
@@ -226,110 +231,108 @@ private fun StandardBottomBar(
         showDivider = true,
         mode = NavigationBarDisplayMode.IconAndText,
     ) {
-        StandardBottomItems(selectedTab, onSelected)
-    }
-}
-
-@Composable
-private fun RowScope.StandardBottomItems(selectedTab: Int, onSelected: (Int) -> Unit) {
-    MainTab.entries.forEachIndexed { index, tab ->
-        NavigationBarItem(
-            selected = selectedTab == index,
-            onClick = { onSelected(index) },
-            icon = tab.icon,
-            label = tab.title,
-        )
+        MainTab.entries.forEachIndexed { index, tab ->
+            NavigationBarItem(
+                selected = selectedTab == index,
+                onClick = { onSelected(index) },
+                icon = tab.icon,
+                label = tab.title,
+            )
+        }
     }
 }
 
 @Composable
 private fun OverviewPage(contentPadding: PaddingValues) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     var snapshot by remember { mutableStateOf(HookStatusSnapshot.loading()) }
+
     LaunchedEffect(Unit) {
-        snapshot = withContext(Dispatchers.IO) { collectHookStatusSnapshot() }
+        while (true) {
+            snapshot = withContext(Dispatchers.IO) { collectHookStatusSnapshot(context) }
+            delay(1500)
+        }
     }
 
     val dark = isSystemInDarkTheme()
     val statusBackground = when (snapshot.state) {
         HookUiState.Active -> if (dark) Color(0xFF183D28) else Color(0xFFD9F7E2)
         HookUiState.Repairing -> if (dark) Color(0xFF4B3B12) else Color(0xFFFFF1BF)
-        HookUiState.Conflict, HookUiState.Error -> if (dark) Color(0xFF4A2424) else Color(0xFFFFE0E0)
+        HookUiState.Error -> if (dark) Color(0xFF4A2424) else Color(0xFFFFE0E0)
         else -> MiuixTheme.colorScheme.surfaceContainer
     }
     val statusContent = when (snapshot.state) {
         HookUiState.Active -> if (dark) Color(0xFFB9F6CA) else Color(0xFF102E1A)
         HookUiState.Repairing -> if (dark) Color(0xFFFFE08A) else Color(0xFF4B3700)
-        HookUiState.Conflict, HookUiState.Error -> if (dark) Color(0xFFFFB4AB) else Color(0xFF5A1010)
+        HookUiState.Error -> if (dark) Color(0xFFFFB4AB) else Color(0xFF5A1010)
         else -> MiuixTheme.colorScheme.onSurfaceContainer
     }
     val primaryLabel = when (snapshot.state) {
         HookUiState.Active -> "已激活"
-        HookUiState.Repairing -> "正在修复"
-        HookUiState.Conflict, HookUiState.Error -> "异常"
+        HookUiState.Repairing -> "正在更新"
+        HookUiState.Error -> "异常"
         HookUiState.Inactive -> "未激活"
         HookUiState.Unknown -> "状态未知"
         HookUiState.Loading -> "检测中"
     }
-    val hookLabel = when (snapshot.state) {
-        HookUiState.Active -> "正常"
-        HookUiState.Repairing -> "修复中"
-        HookUiState.Conflict -> "冲突"
-        HookUiState.Error -> "失败"
-        HookUiState.Inactive -> "未加载"
-        HookUiState.Unknown -> "未知"
-        HookUiState.Loading -> "检测中"
+    val moduleLabel = when (snapshot.state) {
+        HookUiState.Active -> "模块已加载"
+        HookUiState.Repairing -> "模块更新中"
+        HookUiState.Error -> "模块异常"
+        HookUiState.Inactive -> "模块未加载"
+        HookUiState.Unknown -> "LSPosed 未连接"
+        HookUiState.Loading -> "正在检测"
     }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(
-            start = 20.dp,
-            top = contentPadding.calculateTopPadding() + 4.dp,
-            end = 20.dp,
-            bottom = contentPadding.calculateBottomPadding() + 18.dp,
-        ),
+        contentPadding = pagePadding(contentPadding),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         item {
             Card(
+                modifier = Modifier.fillMaxWidth(),
                 cornerRadius = 20.dp,
                 colors = CardDefaults.defaultColors(color = statusBackground, contentColor = statusContent),
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 22.dp),
+                        .padding(horizontal = 24.dp, vertical = 20.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(primaryLabel, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("Hook $hookLabel", fontSize = 17.sp)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(moduleLabel, fontSize = 16.sp)
                     }
                     if (snapshot.state == HookUiState.Active) {
-                        Text("✓", fontSize = 60.sp, fontWeight = FontWeight.Bold)
+                        Text("✓", fontSize = 46.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
         }
 
         item {
-            Card(cornerRadius = 20.dp) {
+            Card(modifier = Modifier.fillMaxWidth(), cornerRadius = 20.dp) {
                 OverviewInfoRow(
                     "当前门槛",
-                    snapshot.thresholdDp?.let { if (it == 0) "默认（88 dp）" else "$it dp" } ?: "读取中",
+                    snapshot.thresholdDp?.let { thresholdLabel(it) } ?: "读取中",
                 )
-                OverviewInfoRow("Launcher", snapshot.launcherVersion.ifBlank { "RELEASE-8.01.02.5459" })
+                OverviewInfoRow(
+                    "Launcher",
+                    snapshot.launcherVersion.ifBlank { "读取中" },
+                )
             }
         }
 
-        if (snapshot.state in listOf(HookUiState.Conflict, HookUiState.Error, HookUiState.Unknown)) {
+        if (snapshot.detail.isNotBlank() && snapshot.state != HookUiState.Active) {
             item {
                 SmallTitle("状态说明")
-                Card(cornerRadius = 20.dp) {
+                Card(modifier = Modifier.fillMaxWidth(), cornerRadius = 20.dp) {
                     Text(
-                        text = snapshot.detail.ifBlank { "请查看日志了解详情。" },
+                        text = snapshot.detail,
                         modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
                     )
                 }
@@ -343,101 +346,86 @@ private fun OverviewInfoRow(label: String, value: String) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 24.dp, vertical = 14.dp),
+            .padding(horizontal = 24.dp, vertical = 13.dp),
     ) {
-        Text(label, fontSize = 18.sp)
+        Text(label, fontSize = 17.sp)
         Spacer(modifier = Modifier.height(3.dp))
-        Text(value, fontSize = 15.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+        Text(
+            value,
+            fontSize = 14.sp,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
-private fun collectHookStatusSnapshot(): HookStatusSnapshot {
-    val script = """
-        PID=$(pidof com.miui.home 2>/dev/null | awk '{print $1}')
-        echo "PID=${'$'}PID"
-        echo "THRESHOLD=$(getprop persist.hyperos4swipegate.threshold_dp)"
-        VERSION=$(dumpsys package com.miui.home 2>/dev/null | sed -n 's/^[[:space:]]*versionName=//p' | head -n 1)
-        echo "LAUNCHER_VERSION=${'$'}VERSION"
-        echo "__HOOK_LOG__"
-        logcat -d -v raw -s HyperOS4SwipeGateNative:* 2>/dev/null | tail -n 160
-    """.trimIndent()
+private fun collectHookStatusSnapshot(context: Context): HookStatusSnapshot {
+    val serviceSnapshot = XposedServiceBridge.snapshot(context)
+    val launcherVersion = DiagnosticsCollector.readLauncherVersion(context)
+    val threshold = serviceSnapshot.thresholdDp()
 
-    return try {
-        val process = ProcessBuilder("su", "-c", script).redirectErrorStream(true).start()
-        val lines = process.inputStream.bufferedReader().use { it.readLines() }
-        process.waitFor(6, TimeUnit.SECONDS)
+    if (!serviceSnapshot.serviceConnected()) {
+        return HookStatusSnapshot(
+            HookUiState.Unknown,
+            launcherVersion,
+            threshold,
+            serviceSnapshot.error().ifBlank { "LSPosed 服务未连接。" },
+        )
+    }
 
-        var pid = ""
-        var launcherVersion = ""
-        var thresholdDp: Int? = null
-        var state = HookUiState.Unknown
-        var detail = ""
-        var inLog = false
+    if (!serviceSnapshot.launcherLoaded()) {
+        return HookStatusSnapshot(
+            HookUiState.Inactive,
+            launcherVersion,
+            threshold,
+            "系统桌面正在运行，但 LSPosed 尚未报告本模块已加载。请检查作用域后重启系统桌面。",
+        )
+    }
 
-        for (line in lines) {
-            when {
-                line.startsWith("PID=") -> pid = line.substringAfter("PID=").trim()
-                line.startsWith("THRESHOLD=") -> thresholdDp = line.substringAfter("THRESHOLD=").trim().toIntOrNull()
-                line.startsWith("LAUNCHER_VERSION=") -> launcherVersion = line.substringAfter("LAUNCHER_VERSION=").trim()
-                line == "__HOOK_LOG__" -> inLog = true
-                inLog -> when {
-                    line.contains("foreign patch detected", ignoreCase = true) ||
-                        line.contains("entry became foreign", ignoreCase = true) -> {
-                        state = HookUiState.Conflict
-                        detail = "Hook 与其他模块冲突。"
-                    }
-                    line.contains("starting unhook+rehook repair", ignoreCase = true) -> {
-                        state = HookUiState.Repairing
-                        detail = "Hook 正在恢复。"
-                    }
-                    line.contains("repaired successfully", ignoreCase = true) ||
-                        line.contains("DP_GATE hook installed", ignoreCase = true) ||
-                        line.contains("HOOK_HEALTH healthy", ignoreCase = true) -> {
-                        state = HookUiState.Active
-                        detail = "Hook 工作正常。"
-                    }
-                    line.contains("hook_func failed", ignoreCase = true) ||
-                        line.contains("repair failed", ignoreCase = true) ||
-                        line.contains("repair unavailable", ignoreCase = true) ||
-                        line.contains("repair aborted", ignoreCase = true) -> {
-                        state = HookUiState.Error
-                        detail = "Hook 未正常工作，请查看日志。"
-                    }
-                }
-            }
-        }
-
-        if (pid.isBlank()) {
-            state = HookUiState.Inactive
-            detail = "系统桌面未运行。"
-        }
-
-        HookStatusSnapshot(state, launcherVersion, thresholdDp, detail)
-    } catch (e: Exception) {
-        HookStatusSnapshot(HookUiState.Unknown, detail = "状态读取失败。")
+    return when (serviceSnapshot.targetState()) {
+        "RELOADING" -> HookStatusSnapshot(
+            HookUiState.Repairing,
+            launcherVersion,
+            threshold,
+            "LSPosed 正在更新模块代码。",
+        )
+        "FAILED" -> HookStatusSnapshot(
+            HookUiState.Error,
+            launcherVersion,
+            threshold,
+            "LSPosed 报告目标进程的模块更新失败。",
+        )
+        "STALE" -> HookStatusSnapshot(
+            HookUiState.Active,
+            launcherVersion,
+            threshold,
+            "系统桌面仍加载上一版本模块，重启系统桌面后可更新。",
+        )
+        else -> HookStatusSnapshot(
+            HookUiState.Active,
+            launcherVersion,
+            threshold,
+            "",
+        )
     }
 }
 
 @Composable
 private fun SettingsPage(contentPadding: PaddingValues) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val prefs = remember { PreferenceManager.getDefaultSharedPreferences(context) }
+    val prefs = remember { ConfigBridge.localPreferences(context) }
     var thresholdDp by remember { mutableFloatStateOf(loadAndMigrateThresholdDp(context).toFloat()) }
     var applyStatus by remember { mutableStateOf("") }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(
-            start = 20.dp,
-            top = contentPadding.calculateTopPadding() + 4.dp,
-            end = 20.dp,
-            bottom = contentPadding.calculateBottomPadding() + 18.dp,
-        ),
+        contentPadding = pagePadding(contentPadding),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item { SmallTitle("手势") }
         item {
-            Card {
+            Card(modifier = Modifier.fillMaxWidth()) {
                 val value = thresholdDp.roundToInt()
                 SliderPreference(
                     value = thresholdDp,
@@ -458,7 +446,7 @@ private fun SettingsPage(contentPadding: PaddingValues) {
                         }
                     },
                     title = "侧边栏触发距离",
-                    summary = if (value == 0) "默认（88 dp）" else "$value dp",
+                    summary = thresholdLabel(value),
                     valueRange = 0f..ConfigBridge.MAX_THRESHOLD_DP.toFloat(),
                     steps = ConfigBridge.MAX_THRESHOLD_DP - 1,
                     showKeyPoints = false,
@@ -476,9 +464,9 @@ private fun SettingsPage(contentPadding: PaddingValues) {
 
         item { SmallTitle("说明") }
         item {
-            Card {
+            Card(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    "超过 88 dp 后才会延后侧边栏，返回手势不变。",
+                    "超过 88 dp 后才会延后侧边栏，返回手势不变。配置通过 LSPosed API 102 传递，不需要 Root。",
                     modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
                 )
             }
@@ -490,13 +478,13 @@ private fun SettingsPage(contentPadding: PaddingValues) {
 private fun LogsPage(contentPadding: PaddingValues) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
-    var logs by remember { mutableStateOf("读取日志…") }
+    var logs by remember { mutableStateOf("读取诊断…") }
     var loading by remember { mutableStateOf(true) }
 
     fun refresh() {
         loading = true
         scope.launch {
-            logs = withContext(Dispatchers.IO) { LogFragment.collectDiagnostics() }
+            logs = withContext(Dispatchers.IO) { DiagnosticsCollector.collect(context) }
             loading = false
         }
     }
@@ -505,43 +493,50 @@ private fun LogsPage(contentPadding: PaddingValues) {
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(
-            start = 20.dp,
-            top = contentPadding.calculateTopPadding() + 4.dp,
-            end = 20.dp,
-            bottom = contentPadding.calculateBottomPadding() + 18.dp,
-        ),
+        contentPadding = pagePadding(contentPadding),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item {
-            Card {
+            Card(modifier = Modifier.fillMaxWidth()) {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Button(onClick = { refresh() }, enabled = !loading, modifier = Modifier.weight(1f)) {
+                    Button(
+                        onClick = { refresh() },
+                        enabled = !loading,
+                        modifier = Modifier.weight(1f),
+                    ) {
                         Text(if (loading) "读取中" else "刷新")
                     }
                     Button(
                         onClick = {
                             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(ClipData.newPlainText("HyperOS4 SwipeGate logs", logs))
-                            Toast.makeText(context, "日志已复制", Toast.LENGTH_SHORT).show()
+                            clipboard.setPrimaryClip(ClipData.newPlainText("HyperOS4 SwipeGate diagnostics", logs))
+                            Toast.makeText(context, "诊断已复制", Toast.LENGTH_SHORT).show()
                         },
                         enabled = logs.isNotBlank() && !loading,
                         modifier = Modifier.weight(1f),
-                    ) { Text("复制") }
+                    ) {
+                        Text("复制")
+                    }
                 }
             }
         }
         item { SmallTitle("诊断") }
         item {
-            Card {
+            Card(modifier = Modifier.fillMaxWidth()) {
                 Text(
                     text = logs,
-                    modifier = Modifier.padding(18.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(18.dp),
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
+                    softWrap = false,
                 )
             }
         }
@@ -561,17 +556,12 @@ private fun AboutPage(
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(
-            start = 20.dp,
-            top = contentPadding.calculateTopPadding() + 4.dp,
-            end = 20.dp,
-            bottom = contentPadding.calculateBottomPadding() + 18.dp,
-        ),
+        contentPadding = pagePadding(contentPadding),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item { SmallTitle("界面") }
         item {
-            Card {
+            Card(modifier = Modifier.fillMaxWidth()) {
                 SwitchPreference(
                     checked = floatingBar,
                     onCheckedChange = onFloatingBarChanged,
@@ -582,11 +572,7 @@ private fun AboutPage(
                     checked = liquidGlass && blurSupported,
                     onCheckedChange = onLiquidGlassChanged,
                     title = "液态玻璃",
-                    summary = if (blurSupported) {
-                        "启用模糊与折射效果"
-                    } else {
-                        "当前设备不支持"
-                    },
+                    summary = if (blurSupported) "启用模糊与折射效果" else "当前设备不支持",
                     enabled = floatingBar && blurSupported,
                 )
             }
@@ -594,8 +580,12 @@ private fun AboutPage(
 
         item { SmallTitle("模块") }
         item {
-            Card {
-                Column(modifier = Modifier.padding(horizontal = 24.dp, vertical = 20.dp)) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 20.dp),
+                ) {
                     Text("HyperOS4 SwipeGate")
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
@@ -605,26 +595,51 @@ private fun AboutPage(
                     Spacer(modifier = Modifier.height(14.dp))
                     Text("控制 HyperOS 4 侧滑停顿触发距离")
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text("适配 Launcher RELEASE-8.01.02.5459", color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                    Text(
+                        "Launcher 8.0+ · 已测试 RELEASE-8.01.02.5459",
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    )
                 }
             }
         }
 
         item {
-            Card {
+            Card(modifier = Modifier.fillMaxWidth()) {
                 Button(
                     onClick = {
-                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/PzHown/HyperOS4SwipeGate")))
+                        context.startActivity(
+                            Intent(
+                                Intent.ACTION_VIEW,
+                                Uri.parse("https://github.com/PzHown/HyperOS4SwipeGate"),
+                            ),
+                        )
                     },
-                    modifier = Modifier.padding(16.dp).fillMaxWidth(),
-                ) { Text("GitHub 项目") }
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                ) {
+                    Text("GitHub 项目")
+                }
             }
         }
     }
 }
 
+private fun pagePadding(contentPadding: PaddingValues): PaddingValues = PaddingValues(
+    start = 20.dp,
+    top = contentPadding.calculateTopPadding() + 4.dp,
+    end = 20.dp,
+    bottom = contentPadding.calculateBottomPadding() + 18.dp,
+)
+
+private fun thresholdLabel(value: Int): String = when {
+    value == 0 -> "默认（88 dp）"
+    value <= ConfigBridge.STOCK_THRESHOLD_DP -> "$value dp（实际 88 dp）"
+    else -> "$value dp"
+}
+
 private fun loadAndMigrateThresholdDp(context: Context): Int {
-    val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+    val prefs = ConfigBridge.localPreferences(context)
     if (prefs.getBoolean(PREF_DP_MIGRATED, false)) {
         return prefs.getInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, ConfigBridge.DEFAULT_THRESHOLD_DP)
             .coerceIn(0, ConfigBridge.MAX_THRESHOLD_DP)
