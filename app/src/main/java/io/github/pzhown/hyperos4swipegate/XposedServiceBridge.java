@@ -3,6 +3,7 @@ package io.github.pzhown.hyperos4swipegate;
 import android.content.Context;
 import android.content.SharedPreferences;
 
+import java.io.File;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -11,10 +12,14 @@ import io.github.libxposed.service.XposedService;
 import io.github.libxposed.service.XposedServiceHelper;
 
 public final class XposedServiceBridge {
+    private static final String TARGET_PACKAGE = "com.miui.home";
+    private static final String HYOS_SPAWNER = "/system_ext/bin/hyos_spawner";
+
     private static final AtomicBoolean INITIALIZED = new AtomicBoolean(false);
     private static volatile XposedService service;
     private static volatile Context appContext;
     private static volatile String serviceError = "";
+    private static volatile String runtimeEvidence = "not checked";
 
     private XposedServiceBridge() {}
 
@@ -47,6 +52,7 @@ public final class XposedServiceBridge {
                 if (service == deadService) {
                     service = null;
                     serviceError = "LSPosed 服务已断开";
+                    runtimeEvidence = "service disconnected";
                 }
             }
         });
@@ -119,6 +125,7 @@ public final class XposedServiceBridge {
 
         XposedService current = service;
         if (current == null) {
+            runtimeEvidence = "serviceConnected=false";
             return new Snapshot(false, 0, "", "", false, "", 0,
                     localThreshold, false, serviceError);
         }
@@ -141,20 +148,78 @@ public final class XposedServiceBridge {
                 }
             }
 
-            boolean launcherLoaded = false;
-            String targetState = "";
-            int targetPid = 0;
+            final int launcherUid = resolveLauncherUid(context);
+            final boolean hyosSpawnerPresent = new File(HYOS_SPAWNER).exists();
+            final boolean launcherInScope = current.getScope().contains(TARGET_PACKAGE);
+
+            HookedTarget matchedTarget = null;
+            String matchMode = "none";
+            StringBuilder targetDump = new StringBuilder();
+
             if (api >= XposedService.API_102) {
                 List<HookedTarget> targets = current.getRunningTargets();
+
                 for (HookedTarget target : targets) {
-                    if ("com.miui.home".equals(target.getProcessName())) {
-                        launcherLoaded = true;
-                        targetState = target.getState().name();
-                        targetPid = target.getPid();
+                    if (targetDump.length() > 0) targetDump.append(';');
+                    targetDump.append(target.getProcessName())
+                            .append(" uid=").append(target.getUid())
+                            .append(" pid=").append(target.getPid())
+                            .append(" state=").append(target.getState().name());
+
+                    if (TARGET_PACKAGE.equals(target.getProcessName())) {
+                        matchedTarget = target;
+                        matchMode = "process-name";
                         break;
                     }
                 }
+
+                if (matchedTarget == null && launcherUid >= 0) {
+                    for (HookedTarget target : targets) {
+                        if (target.getUid() == launcherUid) {
+                            matchedTarget = target;
+                            matchMode = "launcher-uid";
+                            break;
+                        }
+                    }
+                }
+
+                if (matchedTarget == null) {
+                    for (HookedTarget target : targets) {
+                        String processName = target.getProcessName();
+                        if (processName != null && processName.contains("hyos_spawner")) {
+                            matchedTarget = target;
+                            matchMode = "hyos-process";
+                            break;
+                        }
+                    }
+                }
             }
+
+            boolean directRuntimeTarget = matchedTarget != null;
+
+            // Some HYOS-enabled LSPosed builds do not expose a native-only child as a Java-style
+            // running target. In that case do not report a hard false negative merely because
+            // processName != com.miui.home. Scope + the Xiaomi HYOS runtime is treated as module
+            // activation evidence, while native Pattern/HOOK_HEALTH remains a separate health check.
+            boolean hyosActivationFallback = !directRuntimeTarget
+                    && api >= XposedService.API_102
+                    && launcherInScope
+                    && hyosSpawnerPresent;
+
+            boolean launcherLoaded = directRuntimeTarget || hyosActivationFallback;
+            String targetState = directRuntimeTarget
+                    ? matchedTarget.getState().name()
+                    : (hyosActivationFallback ? "UP_TO_DATE" : "");
+            int targetPid = directRuntimeTarget ? matchedTarget.getPid() : 0;
+
+            runtimeEvidence = "hyosSpawnerPresent=" + hyosSpawnerPresent
+                    + " launcherUid=" + launcherUid
+                    + " launcherInScope=" + launcherInScope
+                    + " matchMode=" + matchMode
+                    + " activation=" + (directRuntimeTarget
+                    ? "running-target"
+                    : (hyosActivationFallback ? "scope+hyos-fallback" : "none"))
+                    + " targets=[" + targetDump + "]";
 
             serviceError = "";
             return new Snapshot(true, api, frameworkName, frameworkVersion,
@@ -163,8 +228,21 @@ public final class XposedServiceBridge {
             String message = t.getMessage();
             if (message == null || message.isBlank()) message = t.getClass().getSimpleName();
             serviceError = message;
+            runtimeEvidence = "status check failed: " + message;
             return new Snapshot(true, 0, "", "", false, "", 0,
                     localThreshold, false, message);
+        }
+    }
+
+    public static String runtimeEvidence() {
+        return runtimeEvidence;
+    }
+
+    private static int resolveLauncherUid(Context context) {
+        try {
+            return context.getPackageManager().getApplicationInfo(TARGET_PACKAGE, 0).uid;
+        } catch (Throwable ignored) {
+            return -1;
         }
     }
 }
