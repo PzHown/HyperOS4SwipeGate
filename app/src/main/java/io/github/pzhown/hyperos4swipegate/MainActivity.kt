@@ -5,7 +5,6 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -181,12 +180,7 @@ private fun SwipeGateManager() {
                 TopAppBar(
                     title = if (currentTab == MainTab.Overview) "HyperOS4 SwipeGate" else currentTab.title,
                     largeTitle = if (currentTab == MainTab.Overview) "HyperOS4 SwipeGate" else currentTab.title,
-                    subtitle = when (currentTab) {
-                        MainTab.Overview -> ""
-                        MainTab.Settings -> "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
-                        MainTab.Logs -> "Native Hook 运行诊断"
-                        MainTab.About -> "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
-                    },
+                    subtitle = "",
                 )
             },
             bottomBar = bottomBar,
@@ -279,7 +273,7 @@ private fun OverviewPage(contentPadding: PaddingValues) {
     val hookLabel = when (snapshot.state) {
         HookUiState.Active -> "正常"
         HookUiState.Repairing -> "修复中"
-        HookUiState.Conflict -> "检测到冲突"
+        HookUiState.Conflict -> "冲突"
         HookUiState.Error -> "失败"
         HookUiState.Inactive -> "未加载"
         HookUiState.Unknown -> "未知"
@@ -310,10 +304,8 @@ private fun OverviewPage(contentPadding: PaddingValues) {
                 ) {
                     Column {
                         Text(primaryLabel, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text("${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})", fontSize = 16.sp)
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text("Hook $hookLabel · API 102", fontSize = 19.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Hook $hookLabel", fontSize = 17.sp)
                     }
                     if (snapshot.state == HookUiState.Active) {
                         Text("✓", fontSize = 60.sp, fontWeight = FontWeight.Bold)
@@ -324,14 +316,11 @@ private fun OverviewPage(contentPadding: PaddingValues) {
 
         item {
             Card(cornerRadius = 20.dp) {
-                OverviewInfoRow("Hook 状态", hookLabel)
                 OverviewInfoRow(
                     "当前门槛",
                     snapshot.thresholdDp?.let { if (it == 0) "默认（88 dp）" else "$it dp" } ?: "读取中",
                 )
                 OverviewInfoRow("Launcher", snapshot.launcherVersion.ifBlank { "RELEASE-8.01.02.5459" })
-                OverviewInfoRow("系统版本", "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
-                OverviewInfoRow("设备", "${Build.MANUFACTURER} ${Build.MODEL}")
             }
         }
 
@@ -340,7 +329,7 @@ private fun OverviewPage(contentPadding: PaddingValues) {
                 SmallTitle("状态说明")
                 Card(cornerRadius = 20.dp) {
                     Text(
-                        text = snapshot.detail.ifBlank { "请打开日志页查看 Native Hook 详细状态。" },
+                        text = snapshot.detail.ifBlank { "请查看日志了解详情。" },
                         modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
                     )
                 }
@@ -395,24 +384,24 @@ private fun collectHookStatusSnapshot(): HookStatusSnapshot {
                     line.contains("foreign patch detected", ignoreCase = true) ||
                         line.contains("entry became foreign", ignoreCase = true) -> {
                         state = HookUiState.Conflict
-                        detail = "目标函数入口被其他补丁修改，模块已停止覆盖以避免冲突。"
+                        detail = "Hook 与其他模块冲突。"
                     }
                     line.contains("starting unhook+rehook repair", ignoreCase = true) -> {
                         state = HookUiState.Repairing
-                        detail = "检测到 Hook 被恢复，正在重新安装。"
+                        detail = "Hook 正在恢复。"
                     }
                     line.contains("repaired successfully", ignoreCase = true) ||
                         line.contains("DP_GATE hook installed", ignoreCase = true) ||
                         line.contains("HOOK_HEALTH healthy", ignoreCase = true) -> {
                         state = HookUiState.Active
-                        detail = "Native Hook 工作正常。"
+                        detail = "Hook 工作正常。"
                     }
                     line.contains("hook_func failed", ignoreCase = true) ||
                         line.contains("repair failed", ignoreCase = true) ||
                         line.contains("repair unavailable", ignoreCase = true) ||
                         line.contains("repair aborted", ignoreCase = true) -> {
                         state = HookUiState.Error
-                        detail = "Native Hook 当前未正常工作，请查看日志页。"
+                        detail = "Hook 未正常工作，请查看日志。"
                     }
                 }
             }
@@ -420,12 +409,12 @@ private fun collectHookStatusSnapshot(): HookStatusSnapshot {
 
         if (pid.isBlank()) {
             state = HookUiState.Inactive
-            detail = "系统桌面进程当前未运行。"
+            detail = "系统桌面未运行。"
         }
 
         HookStatusSnapshot(state, launcherVersion, thresholdDp, detail)
     } catch (e: Exception) {
-        HookStatusSnapshot(HookUiState.Unknown, detail = "状态读取失败：${e.javaClass.simpleName}")
+        HookStatusSnapshot(HookUiState.Unknown, detail = "状态读取失败。")
     }
 }
 
@@ -463,13 +452,13 @@ private fun SettingsPage(contentPadding: PaddingValues) {
                             applyStatus = when {
                                 !result.success() -> "应用失败：${result.message()}"
                                 result.value() == 0 -> "已应用：默认（88 dp）"
-                                result.value() <= ConfigBridge.STOCK_THRESHOLD_DP -> "已应用：${result.value()} dp（等同原厂 88 dp）"
+                                result.value() <= ConfigBridge.STOCK_THRESHOLD_DP -> "已应用：88 dp（系统下限）"
                                 else -> "已应用：${result.value()} dp"
                             }
                         }
                     },
                     title = "侧边栏触发距离",
-                    summary = if (value == 0) "默认 · 原厂边界 88 dp" else "当前 $value dp · 原厂边界 88 dp",
+                    summary = if (value == 0) "默认（88 dp）" else "$value dp",
                     valueRange = 0f..ConfigBridge.MAX_THRESHOLD_DP.toFloat(),
                     steps = ConfigBridge.MAX_THRESHOLD_DP - 1,
                     showKeyPoints = false,
@@ -488,13 +477,10 @@ private fun SettingsPage(contentPadding: PaddingValues) {
         item { SmallTitle("说明") }
         item {
             Card {
-                Column(modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp)) {
-                    Text("普通边缘滑动仍由系统执行返回。")
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("0 为默认；设置大于 88 dp 后，只有达到设定距离才允许原厂侧边栏状态机跨过 88 dp 边界。")
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("距离修改即时写入系统属性。")
-                }
+                Text(
+                    "超过 88 dp 后才会延后侧边栏，返回手势不变。",
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
+                )
             }
         }
     }
@@ -527,7 +513,6 @@ private fun LogsPage(contentPadding: PaddingValues) {
         ),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        item { SmallTitle("操作") }
         item {
             Card {
                 Row(
@@ -591,16 +576,16 @@ private fun AboutPage(
                     checked = floatingBar,
                     onCheckedChange = onFloatingBarChanged,
                     title = "悬浮底栏",
-                    summary = "使用 LSPosed-IT / KernelSU 同源 Miuix 悬浮导航",
+                    summary = "底部导航改为悬浮样式",
                 )
                 SwitchPreference(
                     checked = liquidGlass && blurSupported,
                     onCheckedChange = onLiquidGlassChanged,
                     title = "液态玻璃",
                     summary = if (blurSupported) {
-                        "启用折射、实时模糊、高光与选中胶囊液态效果"
+                        "启用模糊与折射效果"
                     } else {
-                        "当前设备不支持 RuntimeShader，已自动回退"
+                        "当前设备不支持"
                     },
                     enabled = floatingBar && blurSupported,
                 )
@@ -618,11 +603,9 @@ private fun AboutPage(
                         color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                     )
                     Spacer(modifier = Modifier.height(14.dp))
-                    Text("HyperOS 4 Rust Launcher 侧滑暂停门槛控制模块")
+                    Text("控制 HyperOS 4 侧滑停顿触发距离")
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text("已验证 Launcher：RELEASE-8.01.02.5459", color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text("LSPosed API 102 · Android 17 · Compose Miuix 0.9.3", color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                    Text("适配 Launcher RELEASE-8.01.02.5459", color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
                 }
             }
         }
@@ -634,7 +617,7 @@ private fun AboutPage(
                         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/PzHown/HyperOS4SwipeGate")))
                     },
                     modifier = Modifier.padding(16.dp).fillMaxWidth(),
-                ) { Text("打开 GitHub 项目") }
+                ) { Text("GitHub 项目") }
             }
         }
     }
