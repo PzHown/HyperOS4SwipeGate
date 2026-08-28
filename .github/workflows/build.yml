@@ -104,4 +104,4 @@ jobs:
             --target "$GITHUB_SHA" \
             --prerelease \
             --title "HyperOS4SwipeGate debug latest" \
-            --notes "LSPosed API 102 native_init build for HyperOS 4 Launcher 8.0+. Tested on RELEASE-8.01.02.5459-260807-08242024-R. Dynamic native Pattern scan resolves the gesture hook target without relying on a fixed offset. Sidebar hold threshold range: 88-300 dp; 88 dp keeps the Xiaomi stock boundary."
+            --notes "LSPosed API 102 native_init build for HyperOS 4 Launcher 8.0+. Tested on RELEASE-8.01.02.5459-260807-08242024-R and RELEASE-8.01.02.5465-260807-08262034-R. Dynamic native Pattern scan resolves the gesture hook target without relying on a fixed offset. Sidebar hold threshold range: 88-300 dp; 88 dp keeps the Xiaomi stock boundary."

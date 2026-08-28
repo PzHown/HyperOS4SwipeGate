@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="app/src/main/res/drawable-nodpi/swipegate_logo.webp" width="144" alt="HyperOS4 SwipeGate Logo" />
+
 # HyperOS4 SwipeGate
 
 **延后 HyperOS 4 侧滑停顿触发，不改变返回手势。**
@@ -30,7 +32,7 @@ SwipeGate 可以提高这项手势的触发距离：**未达到设定距离时�
 | --- | --- |
 | 系统 | HyperOS 4 |
 | 系统桌面 | Launcher 8.0+ |
-| 已测试版本 | `RELEASE-8.01.02.5459-260807-08242024-R` |
+| 已测试版本 | `RELEASE-8.01.02.5459-260807-08242024-R`<br>`RELEASE-8.01.02.5465-260807-08262034-R` |
 | Android | Android 17 / API 37 |
 | 架构 | arm64-v8a |
 | LSPosed | Modern API 102 |

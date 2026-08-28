@@ -8,6 +8,7 @@
 
 - HyperOS 4 System Launcher 8.0+
 - 已测试版本：`RELEASE-8.01.02.5459-260807-08242024-R`
+- 已测试版本：`RELEASE-8.01.02.5465-260807-08262034-R`
 - 包名：`com.miui.home`
 - 进程入口：`/system_ext/bin/hyos_spawner`
 - native 库：`libapp_launcher.so`
@@ -20,7 +21,7 @@
 
 逆向 `GestureInputBackHelper::on_swipe_process` 后可以确认，Launcher 会将真实横向距离传入 `BackGestureUtils::convert_offset(distance)`，再基于归一化结果判断侧边栏停顿状态。
 
-已测试版本中：
+当前已测试版本中：
 
 ```text
 110 dp × 0.8 = 88 dp
@@ -38,7 +39,7 @@ SwipeGate 不主动调用 `BackGestureUtils::convert_offset`。该 Rust 实现�
 GestureInputBackHelper::on_swipe_process
 ```
 
-已测试版本中该函数曾位于：
+最初逆向的 `RELEASE-8.01.02.5459-260807-08242024-R` 中该函数曾位于：
 
 ```text
 libapp_launcher.so + 0x816fc4
@@ -79,7 +80,7 @@ libapp_launcher.so loaded
 FF 83 05 D1 EA 7B 00 FD E9 A3 0F 6D FD FB 10 A9
 ```
 
-当前 V1 Pattern 的 16 字节均为有效匹配位。扫描器本身已经支持 mask，但在没有第二个 Launcher build 做交叉验证前，不主动放宽 V1 的 immediate 字段，以免错误命中其他 Rust 函数。
+当前 V1 Pattern 的 16 字节均为有效匹配位，并已在当前两个已测试 Launcher build 上验证可用。扫描器本身已经支持 mask，但在没有出现实际 codegen 差异前仍保持精确匹配，避免为了扩大版本范围降低唯一性校验强度。
 
 后续验证新的 Launcher 8.0+ 版本时，如果只是 offset 变化，不需要增加 Pattern；只有函数机器码发生变化时才需要新增经过验证的 Pattern。
 
@@ -259,7 +260,10 @@ GitHub Actions 还会检查：
 
 ## 适配与验证其他 Launcher 8.0+ 版本
 
-Launcher 8.0+ 是目标兼容范围，但当前只有 `RELEASE-8.01.02.5459-260807-08242024-R` 完成明确测试。
+Launcher 8.0+ 是目标兼容范围，目前已明确测试：
+
+- `RELEASE-8.01.02.5459-260807-08242024-R`
+- `RELEASE-8.01.02.5465-260807-08262034-R`
 
 测试其他版本时先观察 LSPosed native 日志：
 
