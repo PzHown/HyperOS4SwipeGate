@@ -5,11 +5,13 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,16 +37,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.preference.PreferenceManager
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.FloatingNavigationBar
 import top.yukonga.miuix.kmp.basic.FloatingNavigationBarItem
 import top.yukonga.miuix.kmp.basic.NavigationBar
@@ -55,11 +62,14 @@ import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.LayerBackdrop
+import top.yukonga.miuix.kmp.blur.blur
+import top.yukonga.miuix.kmp.blur.drawBackdrop
 import top.yukonga.miuix.kmp.blur.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.blur.layerBackdrop
+import top.yukonga.miuix.kmp.blur.noiseDither
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
-import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Home
 import top.yukonga.miuix.kmp.icon.extended.Info
 import top.yukonga.miuix.kmp.icon.extended.ListView
 import top.yukonga.miuix.kmp.icon.extended.Settings
@@ -75,9 +85,31 @@ private const val PREF_UI_LIQUID_GLASS = "ui_liquid_glass"
 private const val PREF_DP_MIGRATED = "threshold_dp_migrated_v1"
 
 private enum class MainTab(val title: String, val icon: ImageVector) {
+    Overview("概览", MiuixIcons.Home),
     Settings("设置", MiuixIcons.Settings),
     Logs("日志", MiuixIcons.ListView),
     About("关于", MiuixIcons.Info),
+}
+
+private enum class HookUiState {
+    Loading,
+    Active,
+    Repairing,
+    Conflict,
+    Error,
+    Inactive,
+    Unknown,
+}
+
+private data class HookStatusSnapshot(
+    val state: HookUiState,
+    val launcherVersion: String = "",
+    val thresholdDp: Int? = null,
+    val detail: String = "",
+) {
+    companion object {
+        fun loading() = HookStatusSnapshot(HookUiState.Loading)
+    }
 }
 
 class MainActivity : ComponentActivity() {
@@ -109,12 +141,19 @@ private fun SwipeGateManager() {
         Scaffold(
             topBar = {
                 TopAppBar(
-                    title = currentTab.title,
-                    largeTitle = currentTab.title,
+                    title = when (currentTab) {
+                        MainTab.Overview -> "HyperOS4 SwipeGate"
+                        else -> currentTab.title
+                    },
+                    largeTitle = when (currentTab) {
+                        MainTab.Overview -> "HyperOS4 SwipeGate"
+                        else -> currentTab.title
+                    },
                     subtitle = when (currentTab) {
+                        MainTab.Overview -> ""
                         MainTab.Settings -> "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
                         MainTab.Logs -> "Native Hook 运行诊断"
-                        MainTab.About -> "HyperOS4 SwipeGate"
+                        MainTab.About -> "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
                     },
                 )
             },
@@ -142,6 +181,7 @@ private fun SwipeGateManager() {
                     .layerBackdrop(backdrop),
             ) {
                 when (currentTab) {
+                    MainTab.Overview -> OverviewPage(innerPadding)
                     MainTab.Settings -> SettingsPage(innerPadding)
                     MainTab.Logs -> LogsPage(innerPadding)
                     MainTab.About -> AboutPage(
@@ -165,24 +205,38 @@ private fun SwipeGateManager() {
 }
 
 @Composable
+private fun realGlassModifier(
+    backdrop: LayerBackdrop,
+    shape: Shape,
+    enabled: Boolean,
+): Modifier {
+    if (!enabled) return Modifier
+    val density = LocalDensity.current
+    val blurPx = with(density) { 18.dp.toPx() }
+    val glassTint = MiuixTheme.colorScheme.surfaceContainer.copy(alpha = 0.20f)
+    return Modifier.drawBackdrop(
+        backdrop = backdrop,
+        shape = { shape },
+        effects = {
+            blur(blurPx, blurPx)
+            noiseDither(0.004f)
+        },
+        onDrawSurface = {
+            drawRect(glassTint)
+        },
+    )
+}
+
+@Composable
 private fun StandardBottomBar(
     selectedTab: Int,
     onSelected: (Int) -> Unit,
     backdrop: LayerBackdrop,
     liquidGlass: Boolean,
 ) {
-    val modifier = if (liquidGlass) {
-        Modifier.textureBlur(backdrop = backdrop, shape = RectangleShape)
-    } else {
-        Modifier
-    }
     NavigationBar(
-        modifier = modifier,
-        color = if (liquidGlass) {
-            MiuixTheme.colorScheme.surface.copy(alpha = 0.78f)
-        } else {
-            MiuixTheme.colorScheme.surface
-        },
+        modifier = realGlassModifier(backdrop, RectangleShape, liquidGlass),
+        color = if (liquidGlass) Color.Transparent else MiuixTheme.colorScheme.surface,
         showDivider = !liquidGlass,
         mode = NavigationBarDisplayMode.IconAndText,
     ) {
@@ -210,20 +264,11 @@ private fun FloatingBottomBar(
     liquidGlass: Boolean,
 ) {
     val shape = RoundedCornerShape(40.dp)
-    val modifier = if (liquidGlass) {
-        Modifier.textureBlur(backdrop = backdrop, shape = shape)
-    } else {
-        Modifier
-    }
     FloatingNavigationBar(
-        modifier = modifier,
-        color = if (liquidGlass) {
-            MiuixTheme.colorScheme.surfaceContainer.copy(alpha = 0.68f)
-        } else {
-            MiuixTheme.colorScheme.surfaceContainer
-        },
+        modifier = realGlassModifier(backdrop, shape, liquidGlass),
+        color = if (liquidGlass) Color.Transparent else MiuixTheme.colorScheme.surfaceContainer,
         cornerRadius = 40.dp,
-        horizontalOutSidePadding = 44.dp,
+        horizontalOutSidePadding = 38.dp,
         shadowElevation = 8.dp,
         showDivider = false,
         defaultWindowInsetsPadding = true,
@@ -236,6 +281,208 @@ private fun FloatingBottomBar(
                 label = tab.title,
             )
         }
+    }
+}
+
+@Composable
+private fun OverviewPage(contentPadding: PaddingValues) {
+    var snapshot by remember { mutableStateOf(HookStatusSnapshot.loading()) }
+
+    LaunchedEffect(Unit) {
+        snapshot = withContext(Dispatchers.IO) { collectHookStatusSnapshot() }
+    }
+
+    val dark = isSystemInDarkTheme()
+    val statusBackground = when (snapshot.state) {
+        HookUiState.Active -> if (dark) Color(0xFF183D28) else Color(0xFFD9F7E2)
+        HookUiState.Repairing -> if (dark) Color(0xFF4B3B12) else Color(0xFFFFF1BF)
+        HookUiState.Conflict, HookUiState.Error -> if (dark) Color(0xFF4A2424) else Color(0xFFFFE0E0)
+        else -> MiuixTheme.colorScheme.surfaceContainer
+    }
+    val statusContent = when (snapshot.state) {
+        HookUiState.Active -> if (dark) Color(0xFFB9F6CA) else Color(0xFF102E1A)
+        HookUiState.Repairing -> if (dark) Color(0xFFFFE08A) else Color(0xFF4B3700)
+        HookUiState.Conflict, HookUiState.Error -> if (dark) Color(0xFFFFB4AB) else Color(0xFF5A1010)
+        else -> MiuixTheme.colorScheme.onSurfaceContainer
+    }
+    val primaryLabel = when (snapshot.state) {
+        HookUiState.Active -> "已激活"
+        HookUiState.Repairing -> "正在修复"
+        HookUiState.Conflict, HookUiState.Error -> "异常"
+        HookUiState.Inactive -> "未激活"
+        HookUiState.Unknown -> "状态未知"
+        HookUiState.Loading -> "检测中"
+    }
+    val hookLabel = when (snapshot.state) {
+        HookUiState.Active -> "正常"
+        HookUiState.Repairing -> "修复中"
+        HookUiState.Conflict -> "检测到冲突"
+        HookUiState.Error -> "失败"
+        HookUiState.Inactive -> "未加载"
+        HookUiState.Unknown -> "未知"
+        HookUiState.Loading -> "检测中"
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(
+            start = 20.dp,
+            top = contentPadding.calculateTopPadding() + 4.dp,
+            end = 20.dp,
+            bottom = contentPadding.calculateBottomPadding() + 18.dp,
+        ),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item {
+            Card(
+                cornerRadius = 20.dp,
+                colors = CardDefaults.defaultColors(
+                    color = statusBackground,
+                    contentColor = statusContent,
+                ),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 22.dp),
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(primaryLabel, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text("${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})", fontSize = 16.sp)
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text("API 102", fontSize = 20.sp)
+                    }
+                    if (snapshot.state == HookUiState.Active) {
+                        Text("✓", fontSize = 64.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(cornerRadius = 20.dp) {
+                OverviewInfoRow("Hook 状态", hookLabel)
+                OverviewInfoRow(
+                    "当前门槛",
+                    snapshot.thresholdDp?.let { if (it == 0) "默认（88 dp）" else "$it dp" } ?: "读取中",
+                )
+                OverviewInfoRow(
+                    "Launcher",
+                    snapshot.launcherVersion.ifBlank { "RELEASE-8.01.02.5459" },
+                )
+                OverviewInfoRow("系统版本", "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+                OverviewInfoRow("设备", "${Build.MANUFACTURER} ${Build.MODEL}")
+                OverviewInfoRow("系统架构", Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown")
+            }
+        }
+
+        if (snapshot.state == HookUiState.Conflict || snapshot.state == HookUiState.Error || snapshot.state == HookUiState.Unknown) {
+            item {
+                SmallTitle("状态说明")
+                Card(cornerRadius = 20.dp) {
+                    Text(
+                        text = snapshot.detail.ifBlank { "请打开日志页查看 Native Hook 详细状态。" },
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OverviewInfoRow(label: String, value: String) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 14.dp),
+    ) {
+        Text(label, fontSize = 18.sp)
+        Spacer(modifier = Modifier.height(3.dp))
+        Text(
+            value,
+            fontSize = 15.sp,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        )
+    }
+}
+
+private fun collectHookStatusSnapshot(): HookStatusSnapshot {
+    val script = """
+        PID=$(pidof com.miui.home 2>/dev/null | awk '{print $1}')
+        echo "PID=${'$'}PID"
+        echo "THRESHOLD=$(getprop persist.hyperos4swipegate.threshold_dp)"
+        VERSION=$(dumpsys package com.miui.home 2>/dev/null | sed -n 's/^[[:space:]]*versionName=//p' | head -n 1)
+        echo "LAUNCHER_VERSION=${'$'}VERSION"
+        echo "__HOOK_LOG__"
+        logcat -d -v raw -s HyperOS4SwipeGateNative:* 2>/dev/null | tail -n 160
+    """.trimIndent()
+
+    return try {
+        val process = ProcessBuilder("su", "-c", script)
+            .redirectErrorStream(true)
+            .start()
+        val lines = process.inputStream.bufferedReader().use { it.readLines() }
+        process.waitFor(6, TimeUnit.SECONDS)
+
+        var pid = ""
+        var launcherVersion = ""
+        var thresholdDp: Int? = null
+        var state = HookUiState.Unknown
+        var detail = ""
+        var inLog = false
+
+        for (line in lines) {
+            when {
+                line.startsWith("PID=") -> pid = line.substringAfter("PID=").trim()
+                line.startsWith("THRESHOLD=") -> thresholdDp = line.substringAfter("THRESHOLD=").trim().toIntOrNull()
+                line.startsWith("LAUNCHER_VERSION=") -> launcherVersion = line.substringAfter("LAUNCHER_VERSION=").trim()
+                line == "__HOOK_LOG__" -> inLog = true
+                inLog -> {
+                    when {
+                        line.contains("foreign patch detected", ignoreCase = true) -> {
+                            state = HookUiState.Conflict
+                            detail = "目标函数入口被其他补丁修改，模块已停止覆盖以避免冲突。"
+                        }
+                        line.contains("starting unhook+rehook repair", ignoreCase = true) -> {
+                            state = HookUiState.Repairing
+                            detail = "检测到 Hook 被恢复，正在重新安装。"
+                        }
+                        line.contains("repaired successfully", ignoreCase = true) ||
+                            line.contains("DP_GATE hook installed", ignoreCase = true) ||
+                            line.contains("HOOK_HEALTH healthy", ignoreCase = true) -> {
+                            state = HookUiState.Active
+                            detail = "Native Hook 工作正常。"
+                        }
+                        line.contains("hook_func failed", ignoreCase = true) ||
+                            line.contains("repair failed", ignoreCase = true) ||
+                            line.contains("repair unavailable", ignoreCase = true) ||
+                            line.contains("repair aborted", ignoreCase = true) -> {
+                            state = HookUiState.Error
+                            detail = "Native Hook 当前未正常工作，请查看日志页。"
+                        }
+                    }
+                }
+            }
+        }
+
+        if (pid.isBlank()) {
+            state = HookUiState.Inactive
+            detail = "系统桌面进程当前未运行。"
+        }
+
+        HookStatusSnapshot(
+            state = state,
+            launcherVersion = launcherVersion,
+            thresholdDp = thresholdDp,
+            detail = detail,
+        )
+    } catch (e: Exception) {
+        HookStatusSnapshot(
+            state = HookUiState.Unknown,
+            detail = "状态读取失败：${e.javaClass.simpleName}",
+        )
     }
 }
 
@@ -414,14 +661,14 @@ private fun AboutPage(
                     checked = floatingBar,
                     onCheckedChange = onFloatingBarChanged,
                     title = "悬浮底栏",
-                    summary = "使用 Miuix FloatingNavigationBar",
+                    summary = "使用 Miuix 悬浮式底部导航",
                 )
                 SwitchPreference(
                     checked = liquidGlass && blurSupported,
                     onCheckedChange = onLiquidGlassChanged,
                     title = "液态玻璃",
                     summary = if (blurSupported) {
-                        "为悬浮底栏启用 Miuix 模糊与半透明效果"
+                        "使用 Miuix Backdrop 实时模糊底栏后方内容"
                     } else {
                         "当前设备不支持 RuntimeShader，已自动回退"
                     },
