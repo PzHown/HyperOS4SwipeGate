@@ -4,28 +4,29 @@
 
 ## 目标环境
 
-当前实现针对以下环境：
+目标兼容范围：
 
-- HyperOS 4 System Launcher `RELEASE-8.01.02.5459-260807-08242024-R`
+- HyperOS 4 System Launcher 8.0+
+- 已测试版本：`RELEASE-8.01.02.5459-260807-08242024-R`
 - 包名：`com.miui.home`
 - 进程入口：`/system_ext/bin/hyos_spawner`
 - native 库：`libapp_launcher.so`
 - 架构：arm64-v8a
 - LSPosed Modern API 102 `native_init`
 
-模块只在目标进程与目标代码特征同时匹配时安装 Hook。
+模块不会根据 Launcher `versionName` 做硬编码拒绝。当前 Hook offset、原厂边界与入口签名均由上述已测试版本逆向得到；在其他 Launcher 8.0+ 版本上，只有目标布局与代码特征仍然兼容时才会安装 Hook，否则保持原厂行为。
 
 ## 原厂 88 dp 边界
 
 逆向 `GestureInputBackHelper::on_swipe_process` 后可以确认，Launcher 会将真实横向距离传入 `BackGestureUtils::convert_offset(distance)`，再基于归一化结果判断侧边栏停顿状态。
 
-当前版本中：
+已测试版本中：
 
 ```text
 110 dp × 0.8 = 88 dp
 ```
 
-因此 `88 dp` 是该 Launcher 版本的原厂侧边栏转换边界。
+因此 `88 dp` 是当前已验证 Launcher 版本的原厂侧边栏转换边界。
 
 SwipeGate 不主动调用 `BackGestureUtils::convert_offset`。该 Rust 实现在 Launcher 状态尚未初始化时可能触发 `Option::unwrap(None)`，因此模块只使用逆向得到的原厂边界常量，并自行完成 dp → px 换算。
 
@@ -38,7 +39,7 @@ GestureInputBackHelper::on_swipe_process
 libapp_launcher.so + 0x816fc4
 ```
 
-安装前会检查目标函数入口的 16 字节指令签名。入口与当前适配版本不一致时拒绝安装，避免在未知 Launcher 上继续写入 Hook。
+安装前会检查目标函数入口的 16 字节指令签名。目标位置的指令特征不匹配时拒绝安装，避免在布局已经变化的 Launcher 上继续写入 Hook。
 
 ## 距离门槛
 
@@ -147,17 +148,17 @@ GitHub Actions 还会检查：
 - 16 KB ELF LOAD 对齐
 - APK 16 KB zip alignment
 
-## 适配新 Launcher
+## 适配与验证其他 Launcher 8.0+ 版本
 
-不要仅修改 offset 后直接发布。
+Launcher 8.0+ 是目标兼容范围，但当前只有 `RELEASE-8.01.02.5459-260807-08242024-R` 完成明确测试。
 
-至少需要重新确认：
+验证其他版本时至少需要确认：
 
 1. `on_swipe_process` 的真实语义和参数布局没有变化
 2. 原厂侧边栏边界仍然等价于当前逻辑
-3. 新目标函数入口签名
+3. Hook offset 与目标函数入口签名仍然匹配
 4. arm64 调用约定与 trampoline 正常
 5. 返回手势在门槛前后的动画和可逆状态没有回归
 6. Hook 被恢复、冲突以及签名不匹配时均能 fail closed
 
-当前策略优先保证未知版本维持原厂行为，而不是扩大未经验证的兼容范围。
+当前策略优先保证未验证版本在不兼容时维持原厂行为，而不是强行安装 Hook。
