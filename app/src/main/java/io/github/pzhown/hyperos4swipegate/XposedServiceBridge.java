@@ -37,6 +37,7 @@ public final class XposedServiceBridge {
     ) {}
 
     public static void initialize(Context context) {
+        DiagnosticsStreamBridge.initialize(context);
         appContext = context.getApplicationContext();
         if (!INITIALIZED.compareAndSet(false, true)) return;
         XposedServiceHelper.registerListener(new XposedServiceHelper.OnServiceListener() {
@@ -44,7 +45,7 @@ public final class XposedServiceBridge {
             public void onServiceBind(XposedService boundService) {
                 service = boundService;
                 serviceError = "";
-                migrateLocalThresholdIfNeeded(boundService);
+                syncRemoteState(boundService);
             }
 
             @Override
@@ -58,20 +59,63 @@ public final class XposedServiceBridge {
         });
     }
 
-    private static void migrateLocalThresholdIfNeeded(XposedService current) {
+    private static void syncRemoteState(XposedService current) {
         Context context = appContext;
         if (context == null) return;
         try {
             if (current.getApiVersion() < XposedService.API_102) return;
             if ((current.getFrameworkProperties() & XposedService.PROP_CAP_REMOTE) == 0) return;
+            SharedPreferences local = ConfigBridge.localPreferences(context);
             SharedPreferences remote = current.getRemotePreferences(ConfigBridge.REMOTE_PREF_GROUP);
-            if (remote.contains(ConfigBridge.REMOTE_PREF_KEY_THRESHOLD_DP)) return;
-            int localValue = ConfigBridge.localPreferences(context)
-                    .getInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, ConfigBridge.DEFAULT_THRESHOLD_DP);
-            localValue = Math.max(0, Math.min(ConfigBridge.MAX_THRESHOLD_DP, localValue));
-            remote.edit()
-                    .putInt(ConfigBridge.REMOTE_PREF_KEY_THRESHOLD_DP, localValue)
-                    .commit();
+            SharedPreferences.Editor editor = remote.edit();
+            boolean changed = false;
+
+            if (!remote.contains(ConfigBridge.REMOTE_PREF_KEY_THRESHOLD_DP)) {
+                int localValue = local.getInt(
+                        ConfigBridge.PREF_KEY_THRESHOLD_DP,
+                        ConfigBridge.DEFAULT_THRESHOLD_DP);
+                localValue = Math.max(0, Math.min(ConfigBridge.MAX_THRESHOLD_DP, localValue));
+                editor.putInt(ConfigBridge.REMOTE_PREF_KEY_THRESHOLD_DP, localValue);
+                changed = true;
+            }
+
+            int storedLogLevel = local.getInt(
+                    ConfigBridge.PREF_KEY_LOG_LEVEL,
+                    ConfigBridge.DEFAULT_LOG_LEVEL);
+            int localLogLevel = ConfigBridge.sanitizeLogLevel(storedLogLevel);
+            if (storedLogLevel != localLogLevel) {
+                local.edit()
+                        .putInt(ConfigBridge.PREF_KEY_LOG_LEVEL, localLogLevel)
+                        .apply();
+            }
+            if (remote.getInt(
+                    ConfigBridge.REMOTE_PREF_KEY_LOG_LEVEL,
+                    ConfigBridge.DEFAULT_LOG_LEVEL) != localLogLevel) {
+                editor.putInt(ConfigBridge.REMOTE_PREF_KEY_LOG_LEVEL, localLogLevel);
+                changed = true;
+            }
+
+            int diagnosticsPort = DiagnosticsStreamBridge.port();
+            String diagnosticsToken = DiagnosticsStreamBridge.token();
+            if (diagnosticsPort > 0 && !diagnosticsToken.isBlank()) {
+                if (remote.getInt(ConfigBridge.REMOTE_PREF_KEY_DIAGNOSTICS_PORT, 0)
+                        != diagnosticsPort) {
+                    editor.putInt(ConfigBridge.REMOTE_PREF_KEY_DIAGNOSTICS_PORT, diagnosticsPort);
+                    changed = true;
+                }
+                String remoteToken = remote.getString(
+                        ConfigBridge.REMOTE_PREF_KEY_DIAGNOSTICS_TOKEN, "");
+                if (!diagnosticsToken.equals(remoteToken)) {
+                    editor.putString(
+                            ConfigBridge.REMOTE_PREF_KEY_DIAGNOSTICS_TOKEN,
+                            diagnosticsToken);
+                    changed = true;
+                }
+            }
+
+            if (changed && !editor.commit()) {
+                serviceError = "远程状态同步失败";
+            }
         } catch (Throwable t) {
             String message = t.getMessage();
             serviceError = message == null || message.isBlank()
@@ -115,6 +159,56 @@ public final class XposedServiceBridge {
             serviceError = message;
             return new ConfigBridge.Result(false, safeValue, message);
         }
+    }
+
+    public static ConfigBridge.Result applyLogLevel(Context context, int logLevel) {
+        initialize(context);
+        int safeValue = ConfigBridge.sanitizeLogLevel(logLevel);
+        ConfigBridge.localPreferences(context)
+                .edit()
+                .putInt(ConfigBridge.PREF_KEY_LOG_LEVEL, safeValue)
+                .apply();
+        DiagnosticsStreamBridge.clearLog();
+
+        XposedService current = service;
+        if (current == null) {
+            return new ConfigBridge.Result(false, safeValue, "LSPosed 服务未连接");
+        }
+
+        try {
+            if (current.getApiVersion() < XposedService.API_102) {
+                return new ConfigBridge.Result(false, safeValue, "需要 LSPosed API 102");
+            }
+            if ((current.getFrameworkProperties() & XposedService.PROP_CAP_REMOTE) == 0) {
+                return new ConfigBridge.Result(false, safeValue, "当前框架不支持 RemotePreferences");
+            }
+            SharedPreferences remote = current.getRemotePreferences(ConfigBridge.REMOTE_PREF_GROUP);
+            boolean committed = remote.edit()
+                    .putInt(ConfigBridge.REMOTE_PREF_KEY_LOG_LEVEL, safeValue)
+                    .commit();
+            if (!committed) {
+                return new ConfigBridge.Result(false, safeValue, "日志设置写入失败");
+            }
+            serviceError = "";
+            return new ConfigBridge.Result(true, safeValue, "ok");
+        } catch (Throwable t) {
+            String message = t.getMessage();
+            if (message == null || message.isBlank()) message = t.getClass().getSimpleName();
+            serviceError = message;
+            return new ConfigBridge.Result(false, safeValue, message);
+        }
+    }
+
+    public static String readNativeRuntimeLog(Context context) {
+        initialize(context);
+        int logLevel = ConfigBridge.sanitizeLogLevel(
+                ConfigBridge.localPreferences(context).getInt(
+                        ConfigBridge.PREF_KEY_LOG_LEVEL,
+                        ConfigBridge.DEFAULT_LOG_LEVEL));
+        if (logLevel <= ConfigBridge.LOG_LEVEL_OFF) {
+            return "日志记录已关闭。";
+        }
+        return DiagnosticsStreamBridge.currentLog();
     }
 
     public static Snapshot snapshot(Context context) {
