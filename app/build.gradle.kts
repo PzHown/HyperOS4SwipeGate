@@ -13,8 +13,8 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        versionCode = 17
-        versionName = "0.3.3-statusglass"
+        versionCode = 18
+        versionName = "0.3.4-rootless"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -56,17 +56,9 @@ android {
 
 dependencies {
     implementation("androidx.core:core:1.19.0")
-    implementation("androidx.fragment:fragment:1.8.9")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
-    // Keep legacy View fragments compiling during the manager migration.
-    implementation("fan.miuix:appcompat:1.0.13.0")
-    implementation("fan.miuix:basewidget:1.0.13.0")
-    implementation("fan.miuix:preference:1.0.13.0")
-    implementation("fan.miuix:springback:1.0.13.0")
-
-    // Match the LSPosed-IT / KernelSU Miuix manager stack.
     implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.3")
     implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.3")
     implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.3")
