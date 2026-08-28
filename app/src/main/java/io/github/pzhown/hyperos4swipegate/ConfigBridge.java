@@ -22,6 +22,8 @@ public final class ConfigBridge {
     public static final int LOG_LEVEL_COMPACT = 1;
     public static final int LOG_LEVEL_DETAILED = 2;
     public static final int DEFAULT_LOG_LEVEL = LOG_LEVEL_OFF;
+    // 0.4.0 release gate: keep compact/detailed code available but force persistence off.
+    public static final boolean LOG_RECORDING_OPTIONS_ENABLED = false;
 
     public static final String REMOTE_PREF_GROUP = "swipegate";
     public static final String REMOTE_PREF_KEY_THRESHOLD_DP = "threshold_dp";
@@ -52,6 +54,11 @@ public final class ConfigBridge {
         return app.getSharedPreferences(app.getPackageName() + "_preferences", Context.MODE_PRIVATE);
     }
 
+    public static int sanitizeLogLevel(int logLevel) {
+        if (!LOG_RECORDING_OPTIONS_ENABLED) return LOG_LEVEL_OFF;
+        return Math.max(LOG_LEVEL_OFF, Math.min(LOG_LEVEL_DETAILED, logLevel));
+    }
+
     public static void applyThresholdDpAsync(Context context, int thresholdDp, Callback callback) {
         Context app = context.getApplicationContext();
         int safeValue = Math.max(STOCK_THRESHOLD_DP, Math.min(MAX_THRESHOLD_DP, thresholdDp));
@@ -63,7 +70,7 @@ public final class ConfigBridge {
 
     public static void applyLogLevelAsync(Context context, int logLevel, Callback callback) {
         Context app = context.getApplicationContext();
-        int safeValue = Math.max(LOG_LEVEL_OFF, Math.min(LOG_LEVEL_DETAILED, logLevel));
+        int safeValue = sanitizeLogLevel(logLevel);
         EXECUTOR.execute(() -> {
             Result result = XposedServiceBridge.applyLogLevel(app, safeValue);
             MAIN.post(() -> callback.onResult(result));
