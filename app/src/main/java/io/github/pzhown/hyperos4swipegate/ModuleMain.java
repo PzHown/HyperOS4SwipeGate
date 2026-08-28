@@ -165,10 +165,23 @@ public final class ModuleMain extends XposedModule {
                     if (length != lastMirroredLength
                             || modified != lastMirroredModified
                             || !path.equals(lastMirroredPath)) {
-                        sendNativeLog(source);
-                        lastMirroredLength = length;
-                        lastMirroredModified = modified;
-                        lastMirroredPath = path;
+                        try {
+                            sendNativeLog(source);
+                        } catch (Throwable t) {
+                            String message = t.getClass().getSimpleName() + ": "
+                                    + (t.getMessage() == null ? "" : t.getMessage());
+                            if (!message.equals(lastMirrorError)) {
+                                lastMirrorError = message;
+                                log(android.util.Log.WARN, "HyperOS4SwipeGateJava",
+                                        "Native log stream failed: " + message);
+                            }
+                        } finally {
+                            // Do not reconnect to a stale app endpoint every second. A log change
+                            // or a newly published endpoint will make the snapshot eligible again.
+                            lastMirroredLength = length;
+                            lastMirroredModified = modified;
+                            lastMirroredPath = path;
+                        }
                     }
                 }
                 Thread.sleep(LOG_MIRROR_INTERVAL_MS);
@@ -181,7 +194,7 @@ public final class ModuleMain extends XposedModule {
                 if (!message.equals(lastMirrorError)) {
                     lastMirrorError = message;
                     log(android.util.Log.WARN, "HyperOS4SwipeGateJava",
-                            "Native log stream failed: " + message);
+                            "Native log worker failed: " + message);
                 }
                 try {
                     Thread.sleep(LOG_MIRROR_INTERVAL_MS);
