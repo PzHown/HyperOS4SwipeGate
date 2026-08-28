@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!--
+      The original 512x512 SVG artwork is mapped into Android's centered
+      72dp adaptive-icon visible area (18..90 inside the 108dp layer).
+      This compensates for adaptive-icon overscan so HyperOS shows the same
+      composition/proportions as the standalone reference icon.
+    -->
+    <path android:pathData="M0,0H108V108H0Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="70.6641"
+                android:startY="74.7422"
+                android:endX="33.2578"
+                android:endY="33.3984">
+                <item android:offset="0" android:color="#FF8BFFF5" />
+                <item android:offset="1" android:color="#FF00AEE5" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <path
+        android:pathData="M64.5808,18H106.3125V90H64.5808C64.5808,90 48.375,75.9327 48.375,54.6051C48.375,33.2774 64.5808,18 64.5808,18Z"
+        android:fillAlpha="0.64">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="77.3438"
+                android:startY="75.9375"
+                android:endX="59.1328"
+                android:endY="26.5078">
+                <item android:offset="0" android:color="#FF000000" />
+                <item android:offset="1" android:color="#FF666666" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>
