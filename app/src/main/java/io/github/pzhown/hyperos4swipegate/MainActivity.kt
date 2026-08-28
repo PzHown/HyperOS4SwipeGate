@@ -697,13 +697,18 @@ private fun DiagnosticsPage(
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
-    var logs by remember { mutableStateOf("读取诊断…") }
+    var diagnostics by remember { mutableStateOf("读取诊断…") }
+    var nativeLogs by remember { mutableStateOf("读取 Native 日志…") }
     var loading by remember { mutableStateOf(true) }
 
     fun refresh() {
         loading = true
         scope.launch {
-            logs = withContext(Dispatchers.IO) { DiagnosticsCollector.collect(context) }
+            val result = withContext(Dispatchers.IO) {
+                DiagnosticsCollector.collect(context) to XposedServiceBridge.readNativeRuntimeLog(context)
+            }
+            diagnostics = result.first
+            nativeLogs = result.second
             loading = false
         }
     }
@@ -733,30 +738,19 @@ private fun DiagnosticsPage(
                 Button(
                     onClick = {
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        clipboard.setPrimaryClip(ClipData.newPlainText("SwipeGate diagnostics", logs))
+                        val payload = buildString {
+                            append(diagnostics)
+                            append("\n\n=== Native runtime log ===\n")
+                            append(nativeLogs)
+                        }
+                        clipboard.setPrimaryClip(ClipData.newPlainText("SwipeGate diagnostics", payload))
                         Toast.makeText(context, "诊断已复制", Toast.LENGTH_SHORT).show()
                     },
-                    enabled = logs.isNotBlank() && !loading,
+                    enabled = diagnostics.isNotBlank() && !loading,
                     modifier = Modifier.weight(1f),
                 ) {
                     Text("复制诊断")
                 }
-            }
-        }
-
-        item { SmallTitle("运行日志") }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    text = logs,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .padding(18.dp),
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    softWrap = false,
-                )
             }
         }
 
@@ -768,6 +762,38 @@ private fun DiagnosticsPage(
                 OverviewInfoRow("Hook", "Dynamic Pattern Scan · fail-closed")
                 OverviewInfoRow("构建", "Android 17 · arm64-v8a · 16 KB aligned")
                 OverviewInfoRow("配置", "LSPosed API 102 · 无 Root")
+            }
+        }
+
+        item { SmallTitle("Native 日志") }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = nativeLogs,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                    softWrap = true,
+                )
+            }
+        }
+
+        item { SmallTitle("诊断信息") }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = diagnostics,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                    softWrap = true,
+                )
             }
         }
     }
