@@ -111,16 +111,22 @@ public final class LogFragment extends Fragment {
                 + "PID=$(pidof com.miui.home 2>/dev/null | awk '{print $1}')\n"
                 + "echo \"launcherPid=${PID:-<none>}\"\n"
                 + "echo\n"
-                + "echo '[module mapping in launcher]'\n"
-                + "if [ -n \"$PID\" ] && [ -r \"/proc/$PID/maps\" ]; then grep -F 'libhyperos4swipegate.so' \"/proc/$PID/maps\" || echo '<module so not mapped>'; else echo '<launcher maps unavailable>'; fi\n"
+                + "echo '[launcher mapping evidence]'\n"
+                + "if [ -n \"$PID\" ] && [ -r \"/proc/$PID/maps\" ]; then "
+                + "grep -E 'libapp_launcher\\.so|libhyperos4swipegate\\.so|hyperos4swipegate|memfd' \"/proc/$PID/maps\" | tail -n 80 || true; "
+                + "if ! grep -q -F 'libhyperos4swipegate.so' \"/proc/$PID/maps\"; then echo '<module filename not visible in maps; HyperOS Runtime may use anonymous/memfd mapping>'; fi; "
+                + "else echo '<launcher maps unavailable>'; fi\n"
                 + "echo\n"
                 + "echo '[native file logs]'\n"
                 + "FOUND=0\n"
-                + "for f in /data/user_de/0/com.miui.home/cache/hyperos4swipegate_native.log /data/user/0/com.miui.home/cache/hyperos4swipegate_native.log /data/data/com.miui.home/cache/hyperos4swipegate_native.log; do if [ -r \"$f\" ]; then FOUND=1; echo \"--- $f ---\"; tail -n 240 \"$f\"; fi; done\n"
+                + "for f in /data/user_de/0/com.miui.home/cache/hyperos4swipegate_native.log /data/user/0/com.miui.home/cache/hyperos4swipegate_native.log /data/data/com.miui.home/cache/hyperos4swipegate_native.log; do if [ -r \"$f\" ]; then FOUND=1; echo \"--- $f ---\"; tail -n 320 \"$f\"; fi; done\n"
                 + "if [ \"$FOUND\" = 0 ]; then echo '<no native log file found>'; fi\n"
                 + "echo\n"
                 + "echo '[logcat HyperOS4SwipeGateNative]'\n"
-                + "logcat -d -v threadtime -s HyperOS4SwipeGateNative:* 2>/dev/null | tail -n 240\n";
+                + "logcat -d -v threadtime -s HyperOS4SwipeGateNative:* 2>/dev/null | tail -n 320\n"
+                + "echo\n"
+                + "echo '[recent LSPosed/Dobby native hook engine]'\n"
+                + "logcat -d -v threadtime 2>/dev/null | grep -E 'HyperOS4SwipeGateNative|Dobby.*(already been hooked|DobbyHook)|LSPosed.*hyperos4swipegate' | tail -n 360\n";
 
         try {
             Process process = new ProcessBuilder("su", "-c", script)
