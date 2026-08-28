@@ -1,7 +1,7 @@
 package io.github.pzhown.hyperos4swipegate;
 
 import android.content.SharedPreferences;
-import android.os.UserHandle;
+import android.os.Process;
 
 import androidx.annotation.NonNull;
 
@@ -20,6 +20,7 @@ import io.github.libxposed.api.XposedModuleInterface;
  */
 public final class ModuleMain extends XposedModule {
     private static final String TARGET_PROCESS = "com.miui.home";
+    private static final int ANDROID_USER_OFFSET = 100000;
 
     private SharedPreferences remotePreferences;
     private SharedPreferences.OnSharedPreferenceChangeListener preferenceListener;
@@ -32,7 +33,7 @@ public final class ModuleMain extends XposedModule {
         // HyperOS 4 Launcher is a hyos_spawner/Rust process. Do not depend on
         // onPackageLoaded being delivered: initialize as soon as the module
         // generation itself is attached to com.miui.home.
-        final int userId = UserHandle.myUserId();
+        final int userId = Process.myUid() / ANDROID_USER_OFFSET;
         addConfigFile("/data/user_de/" + userId + "/com.miui.home");
         addConfigFile("/data/user/" + userId + "/com.miui.home");
         if (userId == 0) addConfigFile("/data/data/com.miui.home");
