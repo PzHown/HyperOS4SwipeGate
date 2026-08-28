@@ -813,22 +813,25 @@ private fun SettingsPage(
     val context = androidx.compose.ui.platform.LocalContext.current
     val prefs = remember { ConfigBridge.localPreferences(context) }
     var launcherIconHidden by remember { mutableStateOf(isLauncherIconHidden(context)) }
-    var logLevel by remember {
-        mutableIntStateOf(
-            prefs.getInt(ConfigBridge.PREF_KEY_LOG_LEVEL, ConfigBridge.DEFAULT_LOG_LEVEL)
-                .coerceIn(ConfigBridge.LOG_LEVEL_OFF, ConfigBridge.LOG_LEVEL_DETAILED),
-        )
-    }
+    var logLevel by remember { mutableIntStateOf(ConfigBridge.LOG_LEVEL_OFF) }
     var showLogLevelDialog by remember { mutableStateOf(false) }
 
     fun applyLogLevel(level: Int) {
-        val safeLevel = level.coerceIn(ConfigBridge.LOG_LEVEL_OFF, ConfigBridge.LOG_LEVEL_DETAILED)
+        val safeLevel = ConfigBridge.sanitizeLogLevel(level)
         logLevel = safeLevel
         showLogLevelDialog = false
         ConfigBridge.applyLogLevelAsync(context, safeLevel) { result ->
             if (!result.success()) {
                 Toast.makeText(context, "日志设置同步失败：${result.message()}", Toast.LENGTH_SHORT).show()
             }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (prefs.getInt(ConfigBridge.PREF_KEY_LOG_LEVEL, ConfigBridge.DEFAULT_LOG_LEVEL) !=
+            ConfigBridge.LOG_LEVEL_OFF
+        ) {
+            applyLogLevel(ConfigBridge.LOG_LEVEL_OFF)
         }
     }
 
@@ -890,7 +893,7 @@ private fun SettingsPage(
             Card(modifier = Modifier.fillMaxWidth()) {
                 ArrowPreference(
                     title = "日志记录",
-                    summary = "${logLevelLabel(logLevel)} · 最大 512 KB",
+                    summary = "关闭 · 精简/详细暂未开放",
                     onClick = { showLogLevelDialog = true },
                 )
             }
@@ -966,7 +969,7 @@ private fun SettingsPage(
 
     OverlayDialog(
         title = "日志记录",
-        summary = "默认关闭，仅排查问题时建议开启",
+        summary = "精简与详细暂未开放",
         show = showLogLevelDialog,
         onDismissRequest = { showLogLevelDialog = false },
     ) {
@@ -979,15 +982,17 @@ private fun SettingsPage(
             )
             LogLevelOption(
                 title = "精简",
-                summary = "记录加载、Hook、配置变化与异常",
-                selected = logLevel == ConfigBridge.LOG_LEVEL_COMPACT,
-                onClick = { applyLogLevel(ConfigBridge.LOG_LEVEL_COMPACT) },
+                summary = "记录加载、Hook、配置变化与异常 · 暂未开放",
+                selected = false,
+                enabled = false,
+                onClick = {},
             )
             LogLevelOption(
                 title = "详细",
-                summary = "额外记录侧滑过程与周期健康状态",
-                selected = logLevel == ConfigBridge.LOG_LEVEL_DETAILED,
-                onClick = { applyLogLevel(ConfigBridge.LOG_LEVEL_DETAILED) },
+                summary = "额外记录侧滑过程与周期健康状态 · 暂未开放",
+                selected = false,
+                enabled = false,
+                onClick = {},
             )
         }
     }
@@ -998,26 +1003,33 @@ private fun LogLevelOption(
     title: String,
     summary: String,
     selected: Boolean,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
+    val titleColor = if (enabled) Color.Unspecified else MiuixTheme.colorScheme.onSurfaceVariantSummary
+    val summaryColor = if (enabled) {
+        MiuixTheme.colorScheme.onSurfaceVariantSummary
+    } else {
+        MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.55f)
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(title, fontSize = 16.sp)
+            Text(title, fontSize = 16.sp, color = titleColor)
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 summary,
                 fontSize = 13.sp,
-                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                color = summaryColor,
             )
         }
-        if (selected) {
+        if (selected && enabled) {
             Text(
                 "✓",
                 fontSize = 18.sp,
