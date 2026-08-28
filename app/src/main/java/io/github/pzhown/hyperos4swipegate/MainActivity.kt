@@ -811,7 +811,26 @@ private fun SettingsPage(
     onLiquidGlassChanged: (Boolean) -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val prefs = remember { ConfigBridge.localPreferences(context) }
     var launcherIconHidden by remember { mutableStateOf(isLauncherIconHidden(context)) }
+    var logLevel by remember {
+        mutableIntStateOf(
+            prefs.getInt(ConfigBridge.PREF_KEY_LOG_LEVEL, ConfigBridge.DEFAULT_LOG_LEVEL)
+                .coerceIn(ConfigBridge.LOG_LEVEL_OFF, ConfigBridge.LOG_LEVEL_DETAILED),
+        )
+    }
+    var showLogLevelDialog by remember { mutableStateOf(false) }
+
+    fun applyLogLevel(level: Int) {
+        val safeLevel = level.coerceIn(ConfigBridge.LOG_LEVEL_OFF, ConfigBridge.LOG_LEVEL_DETAILED)
+        logLevel = safeLevel
+        showLogLevelDialog = false
+        ConfigBridge.applyLogLevelAsync(context, safeLevel) { result ->
+            if (!result.success()) {
+                Toast.makeText(context, "日志设置同步失败：${result.message()}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     LazyColumn(
         state = listState,
@@ -862,6 +881,17 @@ private fun SettingsPage(
                         else -> "启用模糊与折射效果"
                     },
                     enabled = floatingBar && blurSupported,
+                )
+            }
+        }
+
+        item { SmallTitle("日志") }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                ArrowPreference(
+                    title = "日志记录",
+                    summary = "${logLevelLabel(logLevel)} · 最大 512 KB",
+                    onClick = { showLogLevelDialog = true },
                 )
             }
         }
@@ -933,6 +963,75 @@ private fun SettingsPage(
             }
         }
     }
+
+    OverlayDialog(
+        title = "日志记录",
+        summary = "默认关闭，仅排查问题时建议开启",
+        show = showLogLevelDialog,
+        onDismissRequest = { showLogLevelDialog = false },
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            LogLevelOption(
+                title = "关闭",
+                summary = "不保存运行日志（默认）",
+                selected = logLevel == ConfigBridge.LOG_LEVEL_OFF,
+                onClick = { applyLogLevel(ConfigBridge.LOG_LEVEL_OFF) },
+            )
+            LogLevelOption(
+                title = "精简",
+                summary = "记录加载、Hook、配置变化与异常",
+                selected = logLevel == ConfigBridge.LOG_LEVEL_COMPACT,
+                onClick = { applyLogLevel(ConfigBridge.LOG_LEVEL_COMPACT) },
+            )
+            LogLevelOption(
+                title = "详细",
+                summary = "额外记录侧滑过程与周期健康状态",
+                selected = logLevel == ConfigBridge.LOG_LEVEL_DETAILED,
+                onClick = { applyLogLevel(ConfigBridge.LOG_LEVEL_DETAILED) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun LogLevelOption(
+    title: String,
+    summary: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontSize = 16.sp)
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                summary,
+                fontSize = 13.sp,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+        }
+        if (selected) {
+            Text(
+                "✓",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = MiuixTheme.colorScheme.primary,
+            )
+        }
+    }
+}
+
+private fun logLevelLabel(level: Int): String = when (level) {
+    ConfigBridge.LOG_LEVEL_COMPACT -> "精简"
+    ConfigBridge.LOG_LEVEL_DETAILED -> "详细"
+    else -> "关闭"
 }
 
 private fun isLauncherIconHidden(context: Context): Boolean {
