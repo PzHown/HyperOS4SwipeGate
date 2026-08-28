@@ -2,11 +2,8 @@ package io.github.pzhown.hyperos4swipegate;
 
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.os.ParcelFileDescriptor;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -17,7 +14,6 @@ import io.github.libxposed.service.XposedServiceHelper;
 public final class XposedServiceBridge {
     private static final String TARGET_PACKAGE = "com.miui.home";
     private static final String HYOS_SPAWNER = "/system_ext/bin/hyos_spawner";
-    private static final int MAX_NATIVE_LOG_READ_BYTES = 128 * 1024;
 
     private static final AtomicBoolean INITIALIZED = new AtomicBoolean(false);
     private static volatile XposedService service;
@@ -41,6 +37,7 @@ public final class XposedServiceBridge {
     ) {}
 
     public static void initialize(Context context) {
+        DiagnosticsStreamBridge.initialize(context);
         appContext = context.getApplicationContext();
         if (!INITIALIZED.compareAndSet(false, true)) return;
         XposedServiceHelper.registerListener(new XposedServiceHelper.OnServiceListener() {
@@ -48,7 +45,7 @@ public final class XposedServiceBridge {
             public void onServiceBind(XposedService boundService) {
                 service = boundService;
                 serviceError = "";
-                migrateLocalThresholdIfNeeded(boundService);
+                syncRemoteState(boundService);
             }
 
             @Override
@@ -62,20 +59,45 @@ public final class XposedServiceBridge {
         });
     }
 
-    private static void migrateLocalThresholdIfNeeded(XposedService current) {
+    private static void syncRemoteState(XposedService current) {
         Context context = appContext;
         if (context == null) return;
         try {
             if (current.getApiVersion() < XposedService.API_102) return;
             if ((current.getFrameworkProperties() & XposedService.PROP_CAP_REMOTE) == 0) return;
             SharedPreferences remote = current.getRemotePreferences(ConfigBridge.REMOTE_PREF_GROUP);
-            if (remote.contains(ConfigBridge.REMOTE_PREF_KEY_THRESHOLD_DP)) return;
-            int localValue = ConfigBridge.localPreferences(context)
-                    .getInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, ConfigBridge.DEFAULT_THRESHOLD_DP);
-            localValue = Math.max(0, Math.min(ConfigBridge.MAX_THRESHOLD_DP, localValue));
-            remote.edit()
-                    .putInt(ConfigBridge.REMOTE_PREF_KEY_THRESHOLD_DP, localValue)
-                    .commit();
+            SharedPreferences.Editor editor = remote.edit();
+            boolean changed = false;
+
+            if (!remote.contains(ConfigBridge.REMOTE_PREF_KEY_THRESHOLD_DP)) {
+                int localValue = ConfigBridge.localPreferences(context)
+                        .getInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, ConfigBridge.DEFAULT_THRESHOLD_DP);
+                localValue = Math.max(0, Math.min(ConfigBridge.MAX_THRESHOLD_DP, localValue));
+                editor.putInt(ConfigBridge.REMOTE_PREF_KEY_THRESHOLD_DP, localValue);
+                changed = true;
+            }
+
+            int diagnosticsPort = DiagnosticsStreamBridge.port();
+            String diagnosticsToken = DiagnosticsStreamBridge.token();
+            if (diagnosticsPort > 0 && !diagnosticsToken.isBlank()) {
+                if (remote.getInt(ConfigBridge.REMOTE_PREF_KEY_DIAGNOSTICS_PORT, 0)
+                        != diagnosticsPort) {
+                    editor.putInt(ConfigBridge.REMOTE_PREF_KEY_DIAGNOSTICS_PORT, diagnosticsPort);
+                    changed = true;
+                }
+                String remoteToken = remote.getString(
+                        ConfigBridge.REMOTE_PREF_KEY_DIAGNOSTICS_TOKEN, "");
+                if (!diagnosticsToken.equals(remoteToken)) {
+                    editor.putString(
+                            ConfigBridge.REMOTE_PREF_KEY_DIAGNOSTICS_TOKEN,
+                            diagnosticsToken);
+                    changed = true;
+                }
+            }
+
+            if (changed && !editor.commit()) {
+                serviceError = "远程状态同步失败";
+            }
         } catch (Throwable t) {
             String message = t.getMessage();
             serviceError = message == null || message.isBlank()
@@ -123,40 +145,7 @@ public final class XposedServiceBridge {
 
     public static String readNativeRuntimeLog(Context context) {
         initialize(context);
-        XposedService current = service;
-        if (current == null) {
-            return "LSPosed 服务未连接，暂时无法读取 Native 日志。";
-        }
-
-        try {
-            if ((current.getFrameworkProperties() & XposedService.PROP_CAP_REMOTE) == 0) {
-                return "当前 LSPosed 不支持 Remote Files，无法读取 Native 日志。";
-            }
-            try (ParcelFileDescriptor descriptor =
-                         current.openRemoteFile(ConfigBridge.REMOTE_NATIVE_LOG_FILE);
-                 ParcelFileDescriptor.AutoCloseInputStream input =
-                         new ParcelFileDescriptor.AutoCloseInputStream(descriptor);
-                 ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-                byte[] buffer = new byte[4096];
-                int total = 0;
-                while (total < MAX_NATIVE_LOG_READ_BYTES) {
-                    int allowed = Math.min(buffer.length, MAX_NATIVE_LOG_READ_BYTES - total);
-                    int read = input.read(buffer, 0, allowed);
-                    if (read <= 0) break;
-                    output.write(buffer, 0, read);
-                    total += read;
-                }
-                String text = new String(output.toByteArray(), StandardCharsets.UTF_8).trim();
-                if (text.isBlank()) {
-                    return "等待 Native 日志镜像…\n请返回系统桌面执行一次侧滑后点刷新。";
-                }
-                return text;
-            }
-        } catch (Throwable t) {
-            String message = t.getMessage();
-            if (message == null || message.isBlank()) message = t.getClass().getSimpleName();
-            return "Native 日志读取失败：" + message;
-        }
+        return DiagnosticsStreamBridge.currentLog();
     }
 
     public static Snapshot snapshot(Context context) {
