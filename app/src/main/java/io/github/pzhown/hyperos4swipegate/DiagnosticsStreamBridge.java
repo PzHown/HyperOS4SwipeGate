@@ -60,6 +60,11 @@ public final class DiagnosticsStreamBridge {
         return token;
     }
 
+    public static void clearLog() {
+        latestLog = "";
+        lastError = "";
+    }
+
     public static String currentLog() {
         String current = latestLog;
         if (!current.isBlank()) return current;
