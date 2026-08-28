@@ -238,6 +238,15 @@ public final class XposedServiceBridge {
         return runtimeEvidence;
     }
 
+    static XposedService currentService(Context context) {
+        initialize(context);
+        return service;
+    }
+
+    static String currentServiceError() {
+        return serviceError;
+    }
+
     private static int resolveLauncherUid(Context context) {
         try {
             return context.getPackageManager().getApplicationInfo(TARGET_PACKAGE, 0).uid;
