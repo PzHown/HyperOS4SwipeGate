@@ -187,7 +187,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SwipeGate-${{ github.ref_name }}
+          name: SwipeGate-${{ github.run_number }}
           path: dist/SwipeGate-*.apk
 
       - name: Publish debug-latest
