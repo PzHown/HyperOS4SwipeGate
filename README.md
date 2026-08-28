@@ -36,10 +36,13 @@ SwipeGate 可以提高这项手势的触发距离：**未达到设定距离时�
 | 已测试版本 | `RELEASE-8.01.02.5459-260807-08242024-R`<br>`RELEASE-8.01.02.5465-260807-08262034-R` |
 | Android | Android 17 / API 37 |
 | 架构 | arm64-v8a |
-| LSPosed | Modern API 102 |
+| LSPosed | Modern API 102 · versionCode ≥ 7846 |
+| Zygisk Next | 1.5.0+（HyOS Runtime） |
 | 作用域 | `com.miui.home` |
 | Root | 不需要 |
 
+> LSPosed versionCode ≥ 7846 与 Zygisk Next 1.5.0+ 两项要求缺一不可。主页会以无 Root 方式检测 LSPosed 版本和实际 HyOSRuntime 能力。
+>
 > Launcher 8.0+ 为目标兼容范围。模块不会依赖固定 Hook offset，而是扫描 Launcher native 可执行代码并寻找已验证的唯一代码特征。仅地址变化通常无需重新适配；如果目标函数本身的代码特征发生变化，则会停止安装 Hook 并保持原厂行为。
 
 ## 安装与使用
