@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -49,6 +50,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -69,6 +72,7 @@ import top.yukonga.miuix.kmp.basic.NavigationBarItem
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.blur.layerBackdrop
@@ -77,6 +81,7 @@ import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Home
 import top.yukonga.miuix.kmp.icon.extended.Info
 import top.yukonga.miuix.kmp.icon.extended.ListView
+import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.preference.SliderPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.ColorSchemeMode
@@ -187,8 +192,8 @@ private fun SwipeGateManager() {
         Scaffold(
             topBar = {
                 TopAppBar(
-                    title = if (currentTab == MainTab.Home) "HyperOS4 SwipeGate" else currentTab.title,
-                    largeTitle = if (currentTab == MainTab.Home) "HyperOS4 SwipeGate" else currentTab.title,
+                    title = if (currentTab == MainTab.Home) "SwipeGate" else currentTab.title,
+                    largeTitle = if (currentTab == MainTab.Home) "SwipeGate" else currentTab.title,
                     subtitle = "",
                 )
             },
@@ -200,7 +205,9 @@ private fun SwipeGateManager() {
                     .then(if (captureForLiquid) Modifier.layerBackdrop(backdrop) else Modifier),
             ) {
                 when (currentTab) {
-                    MainTab.Home -> HomePage(
+                    MainTab.Home -> HomePage(contentPadding = innerPadding)
+                    MainTab.Logs -> LogsPage(innerPadding)
+                    MainTab.About -> AboutPage(
                         contentPadding = innerPadding,
                         floatingBar = floatingBar,
                         liquidGlass = liquidGlass,
@@ -214,8 +221,6 @@ private fun SwipeGateManager() {
                             prefs.edit().putBoolean(PREF_UI_LIQUID_GLASS, it).apply()
                         },
                     )
-                    MainTab.Logs -> LogsPage(innerPadding)
-                    MainTab.About -> AboutPage(innerPadding)
                 }
             }
         }
@@ -246,14 +251,7 @@ private fun StandardBottomBar(
 }
 
 @Composable
-private fun HomePage(
-    contentPadding: PaddingValues,
-    floatingBar: Boolean,
-    liquidGlass: Boolean,
-    blurSupported: Boolean,
-    onFloatingBarChanged: (Boolean) -> Unit,
-    onLiquidGlassChanged: (Boolean) -> Unit,
-) {
+private fun HomePage(contentPadding: PaddingValues) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val prefs = remember { ConfigBridge.localPreferences(context) }
     var snapshot by remember { mutableStateOf(HookStatusSnapshot.loading()) }
@@ -265,6 +263,22 @@ private fun HomePage(
         )
     }
     var applyStatus by remember { mutableStateOf("") }
+    var showThresholdInput by remember { mutableStateOf(false) }
+    var thresholdInput by remember { mutableStateOf(TextFieldValue(thresholdDp.roundToInt().toString())) }
+    var thresholdInputError by remember { mutableStateOf("") }
+
+    fun applyThreshold(appliedValue: Int) {
+        val applied = appliedValue.coerceIn(ConfigBridge.STOCK_THRESHOLD_DP, ConfigBridge.MAX_THRESHOLD_DP)
+        thresholdDp = applied.toFloat()
+        prefs.edit().putInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, applied).apply()
+        ConfigBridge.applyThresholdDpAsync(context, applied) { result ->
+            applyStatus = when {
+                !result.success() -> "应用失败：${result.message()}"
+                result.value() <= ConfigBridge.STOCK_THRESHOLD_DP -> "已应用：88 dp（原厂）"
+                else -> "已应用：${result.value()} dp"
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -358,19 +372,24 @@ private fun HomePage(
                         applyStatus = ""
                     },
                     onValueChangeFinished = {
-                        val applied = thresholdDp.roundToInt()
-                            .coerceIn(ConfigBridge.STOCK_THRESHOLD_DP, ConfigBridge.MAX_THRESHOLD_DP)
-                        prefs.edit().putInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, applied).apply()
-                        ConfigBridge.applyThresholdDpAsync(context, applied) { result ->
-                            applyStatus = when {
-                                !result.success() -> "应用失败：${result.message()}"
-                                result.value() <= ConfigBridge.STOCK_THRESHOLD_DP -> "已应用：88 dp（原厂）"
-                                else -> "已应用：${result.value()} dp"
-                            }
-                        }
+                        applyThreshold(thresholdDp.roundToInt())
                     },
                     title = "侧边栏触发距离",
-                    summary = thresholdLabel(value),
+                    summary = "拖动调节，点击右侧数值可手动输入",
+                    endActions = {
+                        Text(
+                            text = thresholdLabel(value),
+                            modifier = Modifier
+                                .clickable {
+                                    thresholdInput = TextFieldValue(value.toString())
+                                    thresholdInputError = ""
+                                    showThresholdInput = true
+                                }
+                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                            fontSize = 14.sp,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantActions,
+                        )
+                    },
                     valueRange = ConfigBridge.STOCK_THRESHOLD_DP.toFloat()..ConfigBridge.MAX_THRESHOLD_DP.toFloat(),
                     steps = ConfigBridge.MAX_THRESHOLD_DP - ConfigBridge.STOCK_THRESHOLD_DP - 1,
                     showKeyPoints = false,
@@ -403,23 +422,61 @@ private fun HomePage(
                 OverviewInfoRow("配置通道", "LSPosed API 102 · 无 Root")
             }
         }
+    }
 
-        item { SmallTitle("界面") }
-        item {
-            Card(modifier = Modifier.fillMaxWidth(), cornerRadius = 20.dp) {
-                SwitchPreference(
-                    checked = floatingBar,
-                    onCheckedChange = onFloatingBarChanged,
-                    title = "悬浮底栏",
-                    summary = "使用悬浮式底部导航",
-                )
-                SwitchPreference(
-                    checked = liquidGlass && blurSupported,
-                    onCheckedChange = onLiquidGlassChanged,
-                    title = "液态玻璃",
-                    summary = if (blurSupported) "启用模糊与折射效果" else "当前设备不支持",
-                    enabled = floatingBar && blurSupported,
-                )
+    OverlayDialog(
+        title = "侧边栏触发距离",
+        summary = "请输入 88–300 dp",
+        show = showThresholdInput,
+        onDismissRequest = { showThresholdInput = false },
+    ) {
+        TextField(
+            value = thresholdInput,
+            onValueChange = { newValue ->
+                val digits = newValue.text.filter { it.isDigit() }.take(3)
+                thresholdInput = TextFieldValue(digits)
+                thresholdInputError = ""
+            },
+            modifier = Modifier.fillMaxWidth(),
+            label = "dp",
+            useLabelAsPlaceholder = true,
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        )
+        if (thresholdInputError.isNotBlank()) {
+            Text(
+                text = thresholdInputError,
+                modifier = Modifier.padding(top = 8.dp),
+                fontSize = 13.sp,
+                color = MiuixTheme.colorScheme.error,
+            )
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Button(
+                onClick = { showThresholdInput = false },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("取消")
+            }
+            Button(
+                onClick = {
+                    val entered = thresholdInput.text.toIntOrNull()
+                    if (entered == null || entered !in ConfigBridge.STOCK_THRESHOLD_DP..ConfigBridge.MAX_THRESHOLD_DP) {
+                        thresholdInputError = "请输入 88–300 之间的整数"
+                    } else {
+                        showThresholdInput = false
+                        applyStatus = ""
+                        applyThreshold(entered)
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("确定")
             }
         }
     }
@@ -535,7 +592,7 @@ private fun LogsPage(contentPadding: PaddingValues) {
                     Button(
                         onClick = {
                             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(ClipData.newPlainText("HyperOS4 SwipeGate diagnostics", logs))
+                            clipboard.setPrimaryClip(ClipData.newPlainText("SwipeGate diagnostics", logs))
                             Toast.makeText(context, "诊断已复制", Toast.LENGTH_SHORT).show()
                         },
                         enabled = logs.isNotBlank() && !loading,
@@ -565,7 +622,14 @@ private fun LogsPage(contentPadding: PaddingValues) {
 }
 
 @Composable
-private fun AboutPage(contentPadding: PaddingValues) {
+private fun AboutPage(
+    contentPadding: PaddingValues,
+    floatingBar: Boolean,
+    liquidGlass: Boolean,
+    blurSupported: Boolean,
+    onFloatingBarChanged: (Boolean) -> Unit,
+    onLiquidGlassChanged: (Boolean) -> Unit,
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
 
     LazyColumn(
@@ -582,13 +646,13 @@ private fun AboutPage(contentPadding: PaddingValues) {
             ) {
                 Image(
                     painter = painterResource(R.drawable.swipegate_logo),
-                    contentDescription = "HyperOS4 SwipeGate Logo",
+                    contentDescription = "SwipeGate Logo",
                     modifier = Modifier.size(132.dp),
                     contentScale = ContentScale.Fit,
                 )
                 Spacer(modifier = Modifier.height(14.dp))
                 Text(
-                    text = "HyperOS4 SwipeGate",
+                    text = "SwipeGate",
                     fontSize = 24.sp,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
@@ -606,6 +670,25 @@ private fun AboutPage(contentPadding: PaddingValues) {
                     fontSize = 14.sp,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                     textAlign = TextAlign.Center,
+                )
+            }
+        }
+
+        item { SmallTitle("界面") }
+        item {
+            Card(modifier = Modifier.fillMaxWidth(), cornerRadius = 20.dp) {
+                SwitchPreference(
+                    checked = floatingBar,
+                    onCheckedChange = onFloatingBarChanged,
+                    title = "悬浮底栏",
+                    summary = "使用悬浮式底部导航",
+                )
+                SwitchPreference(
+                    checked = liquidGlass && blurSupported,
+                    onCheckedChange = onLiquidGlassChanged,
+                    title = "液态玻璃",
+                    summary = if (blurSupported) "启用模糊与折射效果" else "当前设备不支持",
+                    enabled = floatingBar && blurSupported,
                 )
             }
         }
@@ -642,7 +725,7 @@ private fun AboutPage(contentPadding: PaddingValues) {
 
         item {
             Text(
-                text = "HyperOS4 SwipeGate",
+                text = "SwipeGate",
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 12.dp, bottom = 4.dp),
