@@ -32,7 +32,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
@@ -107,64 +106,59 @@ private fun SwipeGateManager() {
         }
         val currentTab = MainTab.entries[selectedTab]
 
-        Box(modifier = Modifier.fillMaxSize()) {
-            Scaffold(
-                topBar = {
-                    TopAppBar(
-                        title = currentTab.title,
-                        largeTitle = currentTab.title,
-                    )
-                },
-                bottomBar = {
-                    if (!floatingBar) {
-                        StandardBottomBar(
-                            selectedTab = selectedTab,
-                            onSelected = { selectedTab = it },
-                            backdrop = backdrop,
-                            liquidGlass = liquidGlass && blurSupported,
-                        )
-                    }
-                },
-            ) { innerPadding ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .layerBackdrop(backdrop),
-                ) {
-                    when (currentTab) {
-                        MainTab.Settings -> SettingsPage(
-                            contentPadding = innerPadding,
-                            floatingBar = floatingBar,
-                        )
-                        MainTab.Logs -> LogsPage(innerPadding, floatingBar)
-                        MainTab.About -> AboutPage(
-                            contentPadding = innerPadding,
-                            floatingBar = floatingBar,
-                            liquidGlass = liquidGlass,
-                            blurSupported = blurSupported,
-                            onFloatingBarChanged = {
-                                floatingBar = it
-                                prefs.edit().putBoolean(PREF_UI_FLOATING_BAR, it).apply()
-                            },
-                            onLiquidGlassChanged = {
-                                liquidGlass = it
-                                prefs.edit().putBoolean(PREF_UI_LIQUID_GLASS, it).apply()
-                            },
-                        )
-                    }
-                }
-            }
-
-            if (floatingBar) {
-                FloatingBottomBar(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth(),
-                    selectedTab = selectedTab,
-                    onSelected = { selectedTab = it },
-                    backdrop = backdrop,
-                    liquidGlass = liquidGlass && blurSupported,
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = currentTab.title,
+                    largeTitle = currentTab.title,
+                    subtitle = when (currentTab) {
+                        MainTab.Settings -> "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+                        MainTab.Logs -> "Native Hook 运行诊断"
+                        MainTab.About -> "HyperOS4 SwipeGate"
+                    },
                 )
+            },
+            bottomBar = {
+                if (floatingBar) {
+                    FloatingBottomBar(
+                        selectedTab = selectedTab,
+                        onSelected = { selectedTab = it },
+                        backdrop = backdrop,
+                        liquidGlass = liquidGlass && blurSupported,
+                    )
+                } else {
+                    StandardBottomBar(
+                        selectedTab = selectedTab,
+                        onSelected = { selectedTab = it },
+                        backdrop = backdrop,
+                        liquidGlass = liquidGlass && blurSupported,
+                    )
+                }
+            },
+        ) { innerPadding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .layerBackdrop(backdrop),
+            ) {
+                when (currentTab) {
+                    MainTab.Settings -> SettingsPage(innerPadding)
+                    MainTab.Logs -> LogsPage(innerPadding)
+                    MainTab.About -> AboutPage(
+                        contentPadding = innerPadding,
+                        floatingBar = floatingBar,
+                        liquidGlass = liquidGlass,
+                        blurSupported = blurSupported,
+                        onFloatingBarChanged = {
+                            floatingBar = it
+                            prefs.edit().putBoolean(PREF_UI_FLOATING_BAR, it).apply()
+                        },
+                        onLiquidGlassChanged = {
+                            liquidGlass = it
+                            prefs.edit().putBoolean(PREF_UI_LIQUID_GLASS, it).apply()
+                        },
+                    )
+                }
             }
         }
     }
@@ -185,7 +179,7 @@ private fun StandardBottomBar(
     NavigationBar(
         modifier = modifier,
         color = if (liquidGlass) {
-            MiuixTheme.colorScheme.surface.copy(alpha = 0.72f)
+            MiuixTheme.colorScheme.surface.copy(alpha = 0.78f)
         } else {
             MiuixTheme.colorScheme.surface
         },
@@ -210,49 +204,43 @@ private fun RowScope.StandardBottomItems(selectedTab: Int, onSelected: (Int) -> 
 
 @Composable
 private fun FloatingBottomBar(
-    modifier: Modifier,
     selectedTab: Int,
     onSelected: (Int) -> Unit,
     backdrop: LayerBackdrop,
     liquidGlass: Boolean,
 ) {
-    // FloatingNavigationBar applies its own modifier to the internal Row, not
-    // the outer container. Keep Box alignment here so the whole bar is really
-    // anchored to the bottom of the screen.
-    Box(modifier = modifier) {
-        val shape = RoundedCornerShape(36.dp)
-        val barModifier = if (liquidGlass) {
-            Modifier.textureBlur(backdrop = backdrop, shape = shape)
+    val shape = RoundedCornerShape(40.dp)
+    val modifier = if (liquidGlass) {
+        Modifier.textureBlur(backdrop = backdrop, shape = shape)
+    } else {
+        Modifier
+    }
+    FloatingNavigationBar(
+        modifier = modifier,
+        color = if (liquidGlass) {
+            MiuixTheme.colorScheme.surfaceContainer.copy(alpha = 0.68f)
         } else {
-            Modifier
-        }
-        FloatingNavigationBar(
-            modifier = barModifier,
-            color = if (liquidGlass) {
-                MiuixTheme.colorScheme.surfaceContainer.copy(alpha = 0.58f)
-            } else {
-                MiuixTheme.colorScheme.surfaceContainer
-            },
-            cornerRadius = 36.dp,
-            showDivider = false,
-        ) {
-            MainTab.entries.forEachIndexed { index, tab ->
-                FloatingNavigationBarItem(
-                    selected = selectedTab == index,
-                    onClick = { onSelected(index) },
-                    icon = tab.icon,
-                    label = tab.title,
-                )
-            }
+            MiuixTheme.colorScheme.surfaceContainer
+        },
+        cornerRadius = 40.dp,
+        horizontalOutSidePadding = 44.dp,
+        shadowElevation = 8.dp,
+        showDivider = false,
+        defaultWindowInsetsPadding = true,
+    ) {
+        MainTab.entries.forEachIndexed { index, tab ->
+            FloatingNavigationBarItem(
+                selected = selectedTab == index,
+                onClick = { onSelected(index) },
+                icon = tab.icon,
+                label = tab.title,
+            )
         }
     }
 }
 
 @Composable
-private fun SettingsPage(
-    contentPadding: PaddingValues,
-    floatingBar: Boolean,
-) {
+private fun SettingsPage(contentPadding: PaddingValues) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val prefs = remember { PreferenceManager.getDefaultSharedPreferences(context) }
     var thresholdDp by remember { mutableFloatStateOf(loadAndMigrateThresholdDp(context).toFloat()) }
@@ -261,73 +249,77 @@ private fun SettingsPage(
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
+            start = 20.dp,
             top = contentPadding.calculateTopPadding() + 4.dp,
-            bottom = contentPadding.calculateBottomPadding() + if (floatingBar) 104.dp else 16.dp,
+            end = 20.dp,
+            bottom = contentPadding.calculateBottomPadding() + 18.dp,
         ),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item { SmallTitle("手势") }
         item {
-            val value = thresholdDp.roundToInt()
-            SliderPreference(
-                value = thresholdDp,
-                onValueChange = {
-                    thresholdDp = it.roundToInt().toFloat()
-                    applyStatus = ""
-                },
-                onValueChangeFinished = {
-                    val applied = thresholdDp.roundToInt().coerceIn(0, ConfigBridge.MAX_THRESHOLD_DP)
-                    prefs.edit().putInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, applied).apply()
-                    ConfigBridge.applyThresholdDpAsync(context, applied) { result ->
-                        applyStatus = when {
-                            !result.success() -> "应用失败：${result.message()}"
-                            result.value() == 0 -> "已应用：默认（88 dp）"
-                            result.value() <= ConfigBridge.STOCK_THRESHOLD_DP ->
-                                "已应用：${result.value()} dp（等同原厂 88 dp）"
-                            else -> "已应用：${result.value()} dp"
-                        }
-                    }
-                },
-                title = "侧边栏触发距离",
-                summary = if (value == 0) {
-                    "默认 · 原厂 88 dp"
-                } else {
-                    "当前 $value dp · 原厂边界 88 dp"
-                },
-                valueRange = 0f..ConfigBridge.MAX_THRESHOLD_DP.toFloat(),
-                steps = ConfigBridge.MAX_THRESHOLD_DP - 1,
-                showKeyPoints = false,
-            )
-        }
-        if (applyStatus.isNotBlank()) {
-            item {
-                Text(
-                    text = applyStatus,
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
-                    color = if (applyStatus.startsWith("应用失败")) {
-                        MiuixTheme.colorScheme.error
-                    } else {
-                        MiuixTheme.colorScheme.onSurfaceVariantSummary
+            Card {
+                val value = thresholdDp.roundToInt()
+                SliderPreference(
+                    value = thresholdDp,
+                    onValueChange = {
+                        thresholdDp = it.roundToInt().toFloat()
+                        applyStatus = ""
                     },
+                    onValueChangeFinished = {
+                        val applied = thresholdDp.roundToInt().coerceIn(0, ConfigBridge.MAX_THRESHOLD_DP)
+                        prefs.edit().putInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, applied).apply()
+                        ConfigBridge.applyThresholdDpAsync(context, applied) { result ->
+                            applyStatus = when {
+                                !result.success() -> "应用失败：${result.message()}"
+                                result.value() == 0 -> "已应用：默认（88 dp）"
+                                result.value() <= ConfigBridge.STOCK_THRESHOLD_DP ->
+                                    "已应用：${result.value()} dp（等同原厂 88 dp）"
+                                else -> "已应用：${result.value()} dp"
+                            }
+                        }
+                    },
+                    title = "侧边栏触发距离",
+                    summary = if (value == 0) {
+                        "默认 · 原厂边界 88 dp"
+                    } else {
+                        "当前 $value dp · 原厂边界 88 dp"
+                    },
+                    valueRange = 0f..ConfigBridge.MAX_THRESHOLD_DP.toFloat(),
+                    steps = ConfigBridge.MAX_THRESHOLD_DP - 1,
+                    showKeyPoints = false,
                 )
+                if (applyStatus.isNotBlank()) {
+                    Text(
+                        text = applyStatus,
+                        modifier = Modifier.padding(start = 24.dp, end = 24.dp, bottom = 16.dp),
+                        color = if (applyStatus.startsWith("应用失败")) {
+                            MiuixTheme.colorScheme.error
+                        } else {
+                            MiuixTheme.colorScheme.onSurfaceVariantSummary
+                        },
+                    )
+                }
             }
         }
 
         item { SmallTitle("说明") }
         item {
-            Column(modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)) {
-                Text("普通边缘滑动仍由系统执行返回。")
-                Spacer(modifier = Modifier.height(6.dp))
-                Text("0 为默认；自定义值大于 88 dp 时，侧边栏只会在达到设定距离后进入原厂预备状态。")
-                Spacer(modifier = Modifier.height(6.dp))
-                Text("修改距离即时写入系统属性，不需要重启桌面。")
+            Card {
+                Column(modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp)) {
+                    Text("普通边缘滑动仍由系统执行返回。")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("0 为默认；设置大于 88 dp 后，只有达到设定距离才允许原厂侧边栏状态机跨过 88 dp 边界。")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("距离修改即时写入系统属性；Native Hook 自愈无需重启桌面。")
+                }
             }
         }
     }
 }
 
 @Composable
-private fun LogsPage(contentPadding: PaddingValues, floatingBar: Boolean) {
+private fun LogsPage(contentPadding: PaddingValues) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     var logs by remember { mutableStateOf("读取日志…") }
@@ -346,34 +338,41 @@ private fun LogsPage(contentPadding: PaddingValues, floatingBar: Boolean) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
-            start = 12.dp,
-            top = contentPadding.calculateTopPadding() + 8.dp,
-            end = 12.dp,
-            bottom = contentPadding.calculateBottomPadding() + if (floatingBar) 104.dp else 16.dp,
+            start = 20.dp,
+            top = contentPadding.calculateTopPadding() + 4.dp,
+            end = 20.dp,
+            bottom = contentPadding.calculateBottomPadding() + 18.dp,
         ),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        item { SmallTitle("操作") }
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Button(
-                    onClick = { refresh() },
-                    enabled = !loading,
-                    modifier = Modifier.weight(1f),
-                ) { Text(if (loading) "读取中" else "刷新") }
-                Button(
-                    onClick = {
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        clipboard.setPrimaryClip(ClipData.newPlainText("HyperOS4 SwipeGate logs", logs))
-                        Toast.makeText(context, "日志已复制", Toast.LENGTH_SHORT).show()
-                    },
-                    enabled = logs.isNotBlank() && !loading,
-                    modifier = Modifier.weight(1f),
-                ) { Text("复制") }
+            Card {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Button(
+                        onClick = { refresh() },
+                        enabled = !loading,
+                        modifier = Modifier.weight(1f),
+                    ) { Text(if (loading) "读取中" else "刷新") }
+                    Button(
+                        onClick = {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText("HyperOS4 SwipeGate logs", logs))
+                            Toast.makeText(context, "日志已复制", Toast.LENGTH_SHORT).show()
+                        },
+                        enabled = logs.isNotBlank() && !loading,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("复制") }
+                }
             }
         }
+
+        item { SmallTitle("诊断") }
         item {
             Card {
                 Text(
@@ -401,59 +400,75 @@ private fun AboutPage(
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
+            start = 20.dp,
             top = contentPadding.calculateTopPadding() + 4.dp,
-            bottom = contentPadding.calculateBottomPadding() + if (floatingBar) 104.dp else 16.dp,
+            end = 20.dp,
+            bottom = contentPadding.calculateBottomPadding() + 18.dp,
         ),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item { SmallTitle("界面") }
         item {
-            SwitchPreference(
-                checked = floatingBar,
-                onCheckedChange = onFloatingBarChanged,
-                title = "悬浮底栏",
-                summary = "使用 Miuix FloatingNavigationBar",
-            )
-        }
-        item {
-            SwitchPreference(
-                checked = liquidGlass && blurSupported,
-                onCheckedChange = onLiquidGlassChanged,
-                title = "液态玻璃",
-                summary = if (blurSupported) {
-                    "为底栏启用 Miuix 模糊与半透明效果"
-                } else {
-                    "当前设备不支持 RuntimeShader，已自动回退"
-                },
-                enabled = blurSupported,
-            )
+            Card {
+                SwitchPreference(
+                    checked = floatingBar,
+                    onCheckedChange = onFloatingBarChanged,
+                    title = "悬浮底栏",
+                    summary = "使用 Miuix FloatingNavigationBar",
+                )
+                SwitchPreference(
+                    checked = liquidGlass && blurSupported,
+                    onCheckedChange = onLiquidGlassChanged,
+                    title = "液态玻璃",
+                    summary = if (blurSupported) {
+                        "为悬浮底栏启用 Miuix 模糊与半透明效果"
+                    } else {
+                        "当前设备不支持 RuntimeShader，已自动回退"
+                    },
+                    enabled = blurSupported,
+                )
+            }
         }
 
         item { SmallTitle("模块") }
         item {
-            Column(modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)) {
-                Text("HyperOS4 SwipeGate")
-                Spacer(modifier = Modifier.height(6.dp))
-                Text("${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
-                Spacer(modifier = Modifier.height(10.dp))
-                Text("HyperOS 4 Rust Launcher 侧滑暂停门槛控制模块。")
-                Spacer(modifier = Modifier.height(6.dp))
-                Text("当前已验证：RELEASE-8.01.02.5459 · LSPosed API 102 · Android 17")
-                Spacer(modifier = Modifier.height(6.dp))
-                Text("界面：Compose Miuix 0.9.3")
+            Card {
+                Column(modifier = Modifier.padding(horizontal = 24.dp, vertical = 20.dp)) {
+                    Text("HyperOS4 SwipeGate")
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    )
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Text("HyperOS 4 Rust Launcher 侧滑暂停门槛控制模块")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "已验证 Launcher：RELEASE-8.01.02.5459",
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "LSPosed API 102 · Android 17 · Compose Miuix 0.9.3",
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    )
+                }
             }
         }
+
         item {
-            Button(
-                onClick = {
-                    context.startActivity(
-                        Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/PzHown/HyperOS4SwipeGate"))
-                    )
-                },
-                modifier = Modifier
-                    .padding(horizontal = 20.dp, vertical = 8.dp)
-                    .fillMaxWidth(),
-            ) { Text("打开 GitHub 项目") }
+            Card {
+                Button(
+                    onClick = {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/PzHown/HyperOS4SwipeGate"))
+                        )
+                    },
+                    modifier = Modifier
+                        .padding(16.dp)
+                        .fillMaxWidth(),
+                ) { Text("打开 GitHub 项目") }
+            }
         }
     }
 }
