@@ -46,11 +46,45 @@ jobs:
       - name: Prepare persistent signing keystore
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
           if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
-            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/hyperos4swipegate-release.jks"
+            python3 - <<'PY'
+          import base64
+          import binascii
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          raw = os.environ.get("ANDROID_KEYSTORE_BASE64", "").strip()
+          if raw.startswith("ANDROID_KEYSTORE_BASE64="):
+              raw = raw.split("=", 1)[1]
+          if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+              raw = raw[1:-1]
+          raw = re.sub(r"\s+", "", raw)
+
+          try:
+              data = base64.b64decode(raw, validate=True)
+          except (binascii.Error, ValueError):
+              print("::error::ANDROID_KEYSTORE_BASE64 is not valid Base64. Paste the Base64 value only; the workflow also accepts an ANDROID_KEYSTORE_BASE64= prefix and line breaks.")
+              sys.exit(1)
+
+          if not data.startswith(bytes.fromhex("FEEDFEED")):
+              print("::error::Decoded ANDROID_KEYSTORE_BASE64 is not the expected JKS keystore.")
+              sys.exit(1)
+
+          output = Path(os.environ["RUNNER_TEMP"]) / "hyperos4swipegate-release.jks"
+          output.write_bytes(data)
+          print(f"Persistent Android signing key decoded ({len(data)} bytes).")
+          PY
+            keytool -list \
+              -keystore "$RUNNER_TEMP/hyperos4swipegate-release.jks" \
+              -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+              -alias "$ANDROID_KEY_ALIAS" >/dev/null
             echo "CI_SIGNING_ENABLED=1" >> "$GITHUB_ENV"
-            echo "Persistent Android signing key loaded."
+            echo "Persistent Android signing key validated."
           else
             echo "CI_SIGNING_ENABLED=0" >> "$GITHUB_ENV"
             echo "No persistent signing secret configured; falling back to the Gradle debug key."
