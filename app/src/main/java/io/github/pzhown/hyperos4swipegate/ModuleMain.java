@@ -1,7 +1,6 @@
 package io.github.pzhown.hyperos4swipegate;
 
 import android.content.SharedPreferences;
-import android.content.pm.ApplicationInfo;
 
 import androidx.annotation.NonNull;
 
@@ -15,27 +14,26 @@ import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
 
 /**
- * Modern libxposed Java entry used only as a configuration bridge.
- *
- * The actual gesture hook remains in native_init. The module app writes
- * libxposed RemotePreferences without root; this entry receives those changes
- * inside com.miui.home and mirrors the current threshold into launcher-owned
- * cache files that the native hook can read directly.
+ * Modern libxposed Java entry used only as a rootless configuration bridge.
+ * The actual gesture hook remains in native_init.
  */
 public final class ModuleMain extends XposedModule {
-    private static final String TARGET_PACKAGE = "com.miui.home";
+    private static final String TARGET_PROCESS = "com.miui.home";
 
     private SharedPreferences remotePreferences;
     private SharedPreferences.OnSharedPreferenceChangeListener preferenceListener;
     private final List<File> configFiles = new ArrayList<>();
 
     @Override
-    public void onPackageLoaded(@NonNull XposedModuleInterface.PackageLoadedParam param) {
-        if (!TARGET_PACKAGE.equals(param.getPackageName()) || !param.isFirstPackage()) return;
+    public void onModuleLoaded(@NonNull XposedModuleInterface.ModuleLoadedParam param) {
+        if (!TARGET_PROCESS.equals(param.getProcessName())) return;
 
-        ApplicationInfo appInfo = param.getApplicationInfo();
-        addConfigFile(appInfo.deviceProtectedDataDir);
-        addConfigFile(appInfo.dataDir);
+        // HyperOS 4 Launcher is a hyos_spawner/Rust process. Do not depend on
+        // onPackageLoaded being delivered: initialize as soon as the module
+        // generation itself is attached to com.miui.home.
+        addConfigFile("/data/user_de/0/com.miui.home");
+        addConfigFile("/data/user/0/com.miui.home");
+        addConfigFile("/data/data/com.miui.home");
 
         try {
             remotePreferences = getRemotePreferences(ConfigBridge.REMOTE_PREF_GROUP);
@@ -57,7 +55,6 @@ public final class ModuleMain extends XposedModule {
     }
 
     private void addConfigFile(String dataDir) {
-        if (dataDir == null || dataDir.isBlank()) return;
         File file = new File(new File(dataDir, "cache"), ConfigBridge.NATIVE_CONFIG_FILE);
         for (File existing : configFiles) {
             if (existing.equals(file)) return;
