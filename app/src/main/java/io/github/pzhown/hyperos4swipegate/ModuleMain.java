@@ -35,11 +35,13 @@ public final class ModuleMain extends XposedModule {
     private SharedPreferences remotePreferences;
     private SharedPreferences.OnSharedPreferenceChangeListener preferenceListener;
     private final List<File> configFiles = new ArrayList<>();
+    private final List<File> logLevelFiles = new ArrayList<>();
     private final List<File> nativeLogFiles = new ArrayList<>();
     private final AtomicBoolean logMirrorStarted = new AtomicBoolean(false);
 
     private volatile int diagnosticsPort;
     private volatile String diagnosticsToken = "";
+    private volatile int currentLogLevel = ConfigBridge.DEFAULT_LOG_LEVEL;
     private volatile long lastMirroredLength = -1L;
     private volatile long lastMirroredModified = -1L;
     private volatile String lastMirroredPath = "";
@@ -63,6 +65,9 @@ public final class ModuleMain extends XposedModule {
                 if (ConfigBridge.REMOTE_PREF_KEY_THRESHOLD_DP.equals(key)) {
                     publishThreshold(preferences);
                 }
+                if (ConfigBridge.REMOTE_PREF_KEY_LOG_LEVEL.equals(key)) {
+                    publishLogLevel(preferences);
+                }
                 if (ConfigBridge.REMOTE_PREF_KEY_DIAGNOSTICS_PORT.equals(key)
                         || ConfigBridge.REMOTE_PREF_KEY_DIAGNOSTICS_TOKEN.equals(key)) {
                     updateDiagnosticsEndpoint(preferences);
@@ -72,11 +77,13 @@ public final class ModuleMain extends XposedModule {
             if (remotePreferences.contains(ConfigBridge.REMOTE_PREF_KEY_THRESHOLD_DP)) {
                 publishThreshold(remotePreferences);
             }
+            publishLogLevel(remotePreferences);
             updateDiagnosticsEndpoint(remotePreferences);
             startNativeLogMirror();
             log(android.util.Log.INFO, "HyperOS4SwipeGateJava",
                     "Remote bridge ready user=" + userId
                             + " configFiles=" + configFiles.size()
+                            + " logLevel=" + currentLogLevel
                             + " nativeLogFiles=" + nativeLogFiles.size());
         } catch (Throwable t) {
             log(android.util.Log.ERROR, "HyperOS4SwipeGateJava",
@@ -89,6 +96,9 @@ public final class ModuleMain extends XposedModule {
         File configFile = new File(cacheDir, ConfigBridge.NATIVE_CONFIG_FILE);
         if (!configFiles.contains(configFile)) configFiles.add(configFile);
 
+        File logLevelFile = new File(cacheDir, ConfigBridge.NATIVE_LOG_LEVEL_FILE);
+        if (!logLevelFiles.contains(logLevelFile)) logLevelFiles.add(logLevelFile);
+
         File nativeLogFile = new File(cacheDir, NATIVE_LOG_NAME);
         if (!nativeLogFiles.contains(nativeLogFile)) nativeLogFiles.add(nativeLogFile);
     }
@@ -98,10 +108,40 @@ public final class ModuleMain extends XposedModule {
                 ConfigBridge.REMOTE_PREF_KEY_THRESHOLD_DP,
                 ConfigBridge.DEFAULT_THRESHOLD_DP);
         thresholdDp = Math.max(0, Math.min(ConfigBridge.MAX_THRESHOLD_DP, thresholdDp));
-        byte[] bytes = (Integer.toString(thresholdDp) + "\n").getBytes(StandardCharsets.US_ASCII);
+        int successes = writeValueFiles(configFiles, thresholdDp);
 
+        log(android.util.Log.INFO, "HyperOS4SwipeGateJava",
+                "Published threshold=" + thresholdDp + "dp files=" + successes);
+    }
+
+    private void publishLogLevel(SharedPreferences preferences) {
+        int logLevel = preferences.getInt(
+                ConfigBridge.REMOTE_PREF_KEY_LOG_LEVEL,
+                ConfigBridge.DEFAULT_LOG_LEVEL);
+        logLevel = Math.max(
+                ConfigBridge.LOG_LEVEL_OFF,
+                Math.min(ConfigBridge.LOG_LEVEL_DETAILED, logLevel));
+        currentLogLevel = logLevel;
+        int successes = writeValueFiles(logLevelFiles, logLevel);
+
+        if (logLevel == ConfigBridge.LOG_LEVEL_OFF) {
+            for (File file : nativeLogFiles) {
+                try {
+                    if (file.isFile()) file.delete();
+                } catch (Throwable ignored) {
+                }
+            }
+            resetMirrorSnapshot();
+        }
+
+        log(android.util.Log.INFO, "HyperOS4SwipeGateJava",
+                "Published logLevel=" + logLevel + " files=" + successes);
+    }
+
+    private int writeValueFiles(List<File> files, int value) {
+        byte[] bytes = (Integer.toString(value) + "\n").getBytes(StandardCharsets.US_ASCII);
         int successes = 0;
-        for (File file : configFiles) {
+        for (File file : files) {
             File parent = file.getParentFile();
             if (parent == null || (!parent.exists() && !parent.mkdirs())) continue;
             File temporary = new File(parent, file.getName() + ".tmp");
@@ -128,9 +168,7 @@ public final class ModuleMain extends XposedModule {
             }
             successes++;
         }
-
-        log(android.util.Log.INFO, "HyperOS4SwipeGateJava",
-                "Published threshold=" + thresholdDp + "dp files=" + successes);
+        return successes;
     }
 
     private void updateDiagnosticsEndpoint(SharedPreferences preferences) {
@@ -142,9 +180,14 @@ public final class ModuleMain extends XposedModule {
 
         diagnosticsPort = nextPort;
         diagnosticsToken = nextToken;
+        resetMirrorSnapshot();
+    }
+
+    private void resetMirrorSnapshot() {
         lastMirroredLength = -1L;
         lastMirroredModified = -1L;
         lastMirroredPath = "";
+        lastMirrorError = "";
     }
 
     private void startNativeLogMirror() {
@@ -158,7 +201,10 @@ public final class ModuleMain extends XposedModule {
         while (true) {
             try {
                 File source = findNativeLogFile();
-                if (source != null && diagnosticsPort > 0 && !diagnosticsToken.isBlank()) {
+                if (currentLogLevel > ConfigBridge.LOG_LEVEL_OFF
+                        && source != null
+                        && diagnosticsPort > 0
+                        && !diagnosticsToken.isBlank()) {
                     long length = source.length();
                     long modified = source.lastModified();
                     String path = source.getAbsolutePath();
