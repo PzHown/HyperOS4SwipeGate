@@ -1,6 +1,7 @@
 package io.github.pzhown.hyperos4swipegate;
 
 import android.content.SharedPreferences;
+import android.os.UserHandle;
 
 import androidx.annotation.NonNull;
 
@@ -31,9 +32,10 @@ public final class ModuleMain extends XposedModule {
         // HyperOS 4 Launcher is a hyos_spawner/Rust process. Do not depend on
         // onPackageLoaded being delivered: initialize as soon as the module
         // generation itself is attached to com.miui.home.
-        addConfigFile("/data/user_de/0/com.miui.home");
-        addConfigFile("/data/user/0/com.miui.home");
-        addConfigFile("/data/data/com.miui.home");
+        final int userId = UserHandle.myUserId();
+        addConfigFile("/data/user_de/" + userId + "/com.miui.home");
+        addConfigFile("/data/user/" + userId + "/com.miui.home");
+        if (userId == 0) addConfigFile("/data/data/com.miui.home");
 
         try {
             remotePreferences = getRemotePreferences(ConfigBridge.REMOTE_PREF_GROUP);
@@ -47,7 +49,8 @@ public final class ModuleMain extends XposedModule {
                 publishThreshold(remotePreferences);
             }
             log(android.util.Log.INFO, "HyperOS4SwipeGateJava",
-                    "RemotePreferences bridge ready configFiles=" + configFiles.size());
+                    "RemotePreferences bridge ready user=" + userId
+                            + " configFiles=" + configFiles.size());
         } catch (Throwable t) {
             log(android.util.Log.ERROR, "HyperOS4SwipeGateJava",
                     "RemotePreferences bridge failed", t);
