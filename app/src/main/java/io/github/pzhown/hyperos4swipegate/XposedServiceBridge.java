@@ -13,6 +13,7 @@ import io.github.libxposed.service.XposedServiceHelper;
 public final class XposedServiceBridge {
     private static final AtomicBoolean INITIALIZED = new AtomicBoolean(false);
     private static volatile XposedService service;
+    private static volatile Context appContext;
     private static volatile String serviceError = "";
 
     private XposedServiceBridge() {}
@@ -31,12 +32,14 @@ public final class XposedServiceBridge {
     ) {}
 
     public static void initialize(Context context) {
+        appContext = context.getApplicationContext();
         if (!INITIALIZED.compareAndSet(false, true)) return;
         XposedServiceHelper.registerListener(new XposedServiceHelper.OnServiceListener() {
             @Override
             public void onServiceBind(XposedService boundService) {
                 service = boundService;
                 serviceError = "";
+                migrateLocalThresholdIfNeeded(boundService);
             }
 
             @Override
@@ -47,6 +50,28 @@ public final class XposedServiceBridge {
                 }
             }
         });
+    }
+
+    private static void migrateLocalThresholdIfNeeded(XposedService current) {
+        Context context = appContext;
+        if (context == null) return;
+        try {
+            if (current.getApiVersion() < XposedService.API_102) return;
+            if ((current.getFrameworkProperties() & XposedService.PROP_CAP_REMOTE) == 0) return;
+            SharedPreferences remote = current.getRemotePreferences(ConfigBridge.REMOTE_PREF_GROUP);
+            if (remote.contains(ConfigBridge.REMOTE_PREF_KEY_THRESHOLD_DP)) return;
+            int localValue = ConfigBridge.localPreferences(context)
+                    .getInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, ConfigBridge.DEFAULT_THRESHOLD_DP);
+            localValue = Math.max(0, Math.min(ConfigBridge.MAX_THRESHOLD_DP, localValue));
+            remote.edit()
+                    .putInt(ConfigBridge.REMOTE_PREF_KEY_THRESHOLD_DP, localValue)
+                    .commit();
+        } catch (Throwable t) {
+            String message = t.getMessage();
+            serviceError = message == null || message.isBlank()
+                    ? t.getClass().getSimpleName()
+                    : message;
+        }
     }
 
     public static ConfigBridge.Result applyThresholdDp(Context context, int thresholdDp) {
