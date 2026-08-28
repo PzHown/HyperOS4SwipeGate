@@ -12,7 +12,7 @@
 - 进程入口：`/system_ext/bin/hyos_spawner`
 - native 库：`libapp_launcher.so`
 - 架构：arm64-v8a
-- LSPosed Modern API 102 `native_init`
+- LSPosed Modern API 102 `java_init` + `native_init`
 
 模块不会根据 Launcher `versionName` 做硬编码拒绝，也不再使用固定 offset 直接定位 Hook。当前会扫描 `libapp_launcher.so` 的可执行 `PT_LOAD` 段，并只在找到唯一已验证 Pattern 时继续安装 Hook。
 
@@ -55,8 +55,8 @@ libapp_launcher.so loaded
         ↓
 按 4-byte ARM64 alignment 扫描 Pattern database
         ↓
-0 candidate  → fail closed
-1 candidate  → 二次确认 Pattern → Hook
+0 candidate   → fail closed
+1 candidate   → 二次确认 Pattern → Hook
 2+ candidates → fail closed
 ```
 
@@ -96,13 +96,44 @@ FF 83 05 D1 EA 7B 00 FD E9 A3 0F 6D FD FB 10 A9
 
 如果扫描不到目标、出现多个候选、扫描与实际安装之间 Pattern 发生变化，都会拒绝安装。
 
-## 距离门槛
+## Rootless 配置链路
 
-配置存储在系统属性：
+当前配置不再依赖 `su`、`resetprop` 或 `setprop`。
+
+```text
+Module App
+   ↓ XposedService API 102
+RemotePreferences (group: swipegate)
+   ↓ change listener
+ModuleMain in com.miui.home
+   ↓ launcher-owned cache file
+native config reader
+   ↓
+DP_GATE
+```
+
+配置键：
+
+```text
+threshold_dp
+```
+
+Launcher cache 镜像文件：
+
+```text
+/data/user_de/<userId>/com.miui.home/cache/hyperos4swipegate_config
+/data/user/<userId>/com.miui.home/cache/hyperos4swipegate_config
+```
+
+native 端通过 linker `--wrap=__system_property_get` 只接管本模块旧阈值属性的读取：如果 cache 镜像存在且内容有效，就返回 RemotePreferences 的值；否则继续调用 Android 原始 `__system_property_get`。
+
+因此旧版本留下的：
 
 ```text
 persist.hyperos4swipegate.threshold_dp
 ```
+
+只作为升级迁移 fallback，不再是新配置的写入通道。其他系统属性（包括 density）不会被修改。
 
 范围：
 
@@ -116,15 +147,27 @@ persist.hyperos4swipegate.threshold_dp
 - `1–88 dp` 的有效值仍为 `88 dp`
 - `89–320 dp` 才会延后原厂侧边栏触发
 
-native 端会定期读取属性，因此修改后不需要重启 Launcher。
+native 端约每 250 ms 刷新一次阈值，因此修改后不需要重启 Launcher。
+
+## App 状态检测
+
+模块 App 不再通过 `su -c pidof/logcat/getprop` 判断状态。
+
+当前使用 XposedService API 102 `getRunningTargets()` 查询正在运行的模块目标，并匹配：
+
+```text
+com.miui.home
+```
+
+因此首页的「已激活 / 未激活」表示 **LSPosed 是否已经把当前模块 generation 加载进 Launcher 进程**。这解决了以前 Hook 实际生效、但 App 因无法读取 root logcat 而显示「状态未知」的问题。
+
+需要注意：`getRunningTargets()` 不能替代 native Pattern 健康检查。native Hook 是否成功安装、是否遇到 Pattern 冲突，仍以 LSPosed/native 日志中的 `HOOK_SCAN` / `HOOK_HEALTH` 为准。App 不会为了读取这些日志再次申请 Root。
 
 ## Hook 策略
 
 `on_swipe_process` 会收到本次手势的真实横向距离。
 
 当用户设置的门槛高于 `88 dp` 且实际距离尚未达到用户门槛时，SwipeGate 不阻断整个返回手势，而是把传给原函数的距离限制在原厂 `88 dp` 边界之前。
-
-简化后的逻辑：
 
 ```text
 if customThreshold > 88dp and horizontalDistance < customThreshold:
@@ -152,9 +195,7 @@ call original on_swipe_process(effectiveDistance)
 
 ## Hook 健康检查
 
-模块会持续检查已经安装的目标函数入口状态。
-
-主要状态包括：
+模块会持续检查已经安装的目标函数入口状态：
 
 - 当前 Hook patch 仍存在：保持运行
 - 原始指令被恢复：尝试执行一次 unhook + rehook 修复
@@ -173,8 +214,6 @@ call original on_swipe_process(effectiveDistance)
 - 尚未找到目标时：watchdog 最多每 5 秒重新扫描一次
 - Hook 正常后：只检查已解析的目标入口
 
-这样避免每 500 ms 对整个 `libapp_launcher.so` 做全量扫描。
-
 ## 日志
 
 native 日志 Tag：
@@ -182,8 +221,6 @@ native 日志 Tag：
 ```text
 HyperOS4SwipeGateNative
 ```
-
-同时会尝试写入 Launcher cache 中的模块日志文件，App 的「日志」页会汇总相关诊断信息。
 
 常见日志关键字：
 
@@ -198,7 +235,7 @@ install refused
 foreign
 ```
 
-其中 `resolvedOffset` 是扫描得到的实际地址相对 library base 的偏移；`referenceOffset=0x816fc4` 只用于对比已测试版本的位置变化。
+App 的「日志」页现在提供无 Root 的 LSPosed service / target / RemotePreferences 诊断。更详细的 native Hook 日志请直接在 LSPosed 日志中查看。
 
 ## 构建
 
@@ -222,7 +259,7 @@ GitHub Actions 还会检查：
 
 Launcher 8.0+ 是目标兼容范围，但当前只有 `RELEASE-8.01.02.5459-260807-08242024-R` 完成明确测试。
 
-测试其他版本时先观察日志：
+测试其他版本时先观察 LSPosed native 日志：
 
 ```text
 HOOK_SCAN resolved ...
