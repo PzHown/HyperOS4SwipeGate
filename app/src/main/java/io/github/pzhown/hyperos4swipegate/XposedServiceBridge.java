@@ -79,12 +79,15 @@ public final class XposedServiceBridge {
                 changed = true;
             }
 
-            int localLogLevel = local.getInt(
+            int storedLogLevel = local.getInt(
                     ConfigBridge.PREF_KEY_LOG_LEVEL,
                     ConfigBridge.DEFAULT_LOG_LEVEL);
-            localLogLevel = Math.max(
-                    ConfigBridge.LOG_LEVEL_OFF,
-                    Math.min(ConfigBridge.LOG_LEVEL_DETAILED, localLogLevel));
+            int localLogLevel = ConfigBridge.sanitizeLogLevel(storedLogLevel);
+            if (storedLogLevel != localLogLevel) {
+                local.edit()
+                        .putInt(ConfigBridge.PREF_KEY_LOG_LEVEL, localLogLevel)
+                        .apply();
+            }
             if (remote.getInt(
                     ConfigBridge.REMOTE_PREF_KEY_LOG_LEVEL,
                     ConfigBridge.DEFAULT_LOG_LEVEL) != localLogLevel) {
@@ -160,9 +163,7 @@ public final class XposedServiceBridge {
 
     public static ConfigBridge.Result applyLogLevel(Context context, int logLevel) {
         initialize(context);
-        int safeValue = Math.max(
-                ConfigBridge.LOG_LEVEL_OFF,
-                Math.min(ConfigBridge.LOG_LEVEL_DETAILED, logLevel));
+        int safeValue = ConfigBridge.sanitizeLogLevel(logLevel);
         ConfigBridge.localPreferences(context)
                 .edit()
                 .putInt(ConfigBridge.PREF_KEY_LOG_LEVEL, safeValue)
@@ -200,9 +201,10 @@ public final class XposedServiceBridge {
 
     public static String readNativeRuntimeLog(Context context) {
         initialize(context);
-        int logLevel = ConfigBridge.localPreferences(context).getInt(
-                ConfigBridge.PREF_KEY_LOG_LEVEL,
-                ConfigBridge.DEFAULT_LOG_LEVEL);
+        int logLevel = ConfigBridge.sanitizeLogLevel(
+                ConfigBridge.localPreferences(context).getInt(
+                        ConfigBridge.PREF_KEY_LOG_LEVEL,
+                        ConfigBridge.DEFAULT_LOG_LEVEL));
         if (logLevel <= ConfigBridge.LOG_LEVEL_OFF) {
             return "日志记录已关闭。";
         }
