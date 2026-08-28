@@ -1,41 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">HyperOS4 SwipeGate</string>
-    <string name="tab_settings">设置</string>
-    <string name="tab_logs">日志</string>
-    <string name="tab_about">关于</string>
-
-    <string name="settings_category_gesture">手势</string>
-    <string name="threshold_title">侧边栏触发距离</string>
-    <string name="threshold_summary">超过 88 dp 后才会延后侧边栏。</string>
-    <string name="value_default">默认（88 dp）</string>
-    <string name="behavior_title">说明</string>
-    <string name="behavior_summary">返回手势不变。</string>
-    <string name="settings_category_runtime">状态</string>
-    <string name="status_title">配置</string>
-    <string name="status_waiting">等待应用</string>
-    <string name="status_applying_default">正在恢复默认…</string>
-    <string name="status_applying">正在应用 %1$d dp…</string>
-    <string name="status_applied_default">已应用：默认（88 dp）</string>
-    <string name="status_applied_stock_floor">已应用：88 dp（系统下限）</string>
-    <string name="status_applied">已应用：%1$d dp</string>
-    <string name="status_failed">应用失败：%1$s</string>
-
-    <string name="log_intro">用于排查模块运行状态。</string>
-    <string name="log_refresh">刷新</string>
-    <string name="log_copy">复制</string>
-    <string name="log_loading">正在读取日志…</string>
-    <string name="log_copied">日志已复制</string>
-
-    <string name="about_version">版本 %1$s</string>
-    <string name="about_intro_title">HyperOS 4 侧滑控制</string>
-    <string name="about_intro_body">控制侧滑停顿触发距离。</string>
-    <string name="about_compat_title">适配</string>
-    <string name="about_compat_launcher">Launcher RELEASE-8.01.02.5459</string>
-    <string name="about_compat_api">LSPosed API 102</string>
-    <string name="about_compat_arch">arm64-v8a · Android 17</string>
-    <string name="about_project_title">项目</string>
-    <string name="about_repository">GitHub 项目</string>
-    <string name="about_issues">问题反馈</string>
-    <string name="about_footer">PzHown · 非小米官方项目</string>
 </resources>
