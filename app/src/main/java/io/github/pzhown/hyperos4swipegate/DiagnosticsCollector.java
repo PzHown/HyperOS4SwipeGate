@@ -38,12 +38,19 @@ public final class DiagnosticsCollector {
             out.append("serviceError=").append(snapshot.error()).append('\n');
         }
 
+        out.append("\n[HYOS runtime]\n");
+        out.append(XposedServiceBridge.runtimeEvidence()).append('\n');
+
         out.append("\n[target]\n");
-        out.append("process=com.miui.home\n");
-        out.append("moduleLoaded=").append(snapshot.launcherLoaded()).append('\n');
+        out.append("package=com.miui.home\n");
+        out.append("moduleActivated=").append(snapshot.launcherLoaded()).append('\n');
         if (snapshot.launcherLoaded()) {
-            out.append("pid=").append(snapshot.targetPid()).append('\n');
-            out.append("state=").append(snapshot.targetState()).append('\n');
+            if (snapshot.targetPid() > 0) {
+                out.append("pid=").append(snapshot.targetPid()).append('\n');
+            }
+            if (!snapshot.targetState().isBlank()) {
+                out.append("state=").append(snapshot.targetState()).append('\n');
+            }
         }
 
         out.append("\n[configuration]\n");
@@ -54,12 +61,12 @@ public final class DiagnosticsCollector {
 
         out.append("\n[native hook]\n");
         if (snapshot.launcherLoaded()) {
-            out.append("The module generation is loaded in com.miui.home.\n");
-            out.append("Native Pattern/health details are recorded by LSPosed/native logs.\n");
+            out.append("HYOS activation evidence is present.\n");
+            out.append("Native Pattern/HOOK_HEALTH is a separate readiness check.\n");
         } else {
-            out.append("The module is not currently reported as loaded in com.miui.home.\n");
+            out.append("No HYOS activation evidence is currently available.\n");
         }
-        out.append("This app no longer requests su only to read process/logcat diagnostics.\n");
+        out.append("The app does not use su for activation or logcat detection.\n");
         return out.toString();
     }
 
