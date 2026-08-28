@@ -65,15 +65,30 @@ public final class XposedServiceBridge {
         try {
             if (current.getApiVersion() < XposedService.API_102) return;
             if ((current.getFrameworkProperties() & XposedService.PROP_CAP_REMOTE) == 0) return;
+            SharedPreferences local = ConfigBridge.localPreferences(context);
             SharedPreferences remote = current.getRemotePreferences(ConfigBridge.REMOTE_PREF_GROUP);
             SharedPreferences.Editor editor = remote.edit();
             boolean changed = false;
 
             if (!remote.contains(ConfigBridge.REMOTE_PREF_KEY_THRESHOLD_DP)) {
-                int localValue = ConfigBridge.localPreferences(context)
-                        .getInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, ConfigBridge.DEFAULT_THRESHOLD_DP);
+                int localValue = local.getInt(
+                        ConfigBridge.PREF_KEY_THRESHOLD_DP,
+                        ConfigBridge.DEFAULT_THRESHOLD_DP);
                 localValue = Math.max(0, Math.min(ConfigBridge.MAX_THRESHOLD_DP, localValue));
                 editor.putInt(ConfigBridge.REMOTE_PREF_KEY_THRESHOLD_DP, localValue);
+                changed = true;
+            }
+
+            int localLogLevel = local.getInt(
+                    ConfigBridge.PREF_KEY_LOG_LEVEL,
+                    ConfigBridge.DEFAULT_LOG_LEVEL);
+            localLogLevel = Math.max(
+                    ConfigBridge.LOG_LEVEL_OFF,
+                    Math.min(ConfigBridge.LOG_LEVEL_DETAILED, localLogLevel));
+            if (remote.getInt(
+                    ConfigBridge.REMOTE_PREF_KEY_LOG_LEVEL,
+                    ConfigBridge.DEFAULT_LOG_LEVEL) != localLogLevel) {
+                editor.putInt(ConfigBridge.REMOTE_PREF_KEY_LOG_LEVEL, localLogLevel);
                 changed = true;
             }
 
@@ -143,8 +158,54 @@ public final class XposedServiceBridge {
         }
     }
 
+    public static ConfigBridge.Result applyLogLevel(Context context, int logLevel) {
+        initialize(context);
+        int safeValue = Math.max(
+                ConfigBridge.LOG_LEVEL_OFF,
+                Math.min(ConfigBridge.LOG_LEVEL_DETAILED, logLevel));
+        ConfigBridge.localPreferences(context)
+                .edit()
+                .putInt(ConfigBridge.PREF_KEY_LOG_LEVEL, safeValue)
+                .apply();
+        DiagnosticsStreamBridge.clearLog();
+
+        XposedService current = service;
+        if (current == null) {
+            return new ConfigBridge.Result(false, safeValue, "LSPosed 服务未连接");
+        }
+
+        try {
+            if (current.getApiVersion() < XposedService.API_102) {
+                return new ConfigBridge.Result(false, safeValue, "需要 LSPosed API 102");
+            }
+            if ((current.getFrameworkProperties() & XposedService.PROP_CAP_REMOTE) == 0) {
+                return new ConfigBridge.Result(false, safeValue, "当前框架不支持 RemotePreferences");
+            }
+            SharedPreferences remote = current.getRemotePreferences(ConfigBridge.REMOTE_PREF_GROUP);
+            boolean committed = remote.edit()
+                    .putInt(ConfigBridge.REMOTE_PREF_KEY_LOG_LEVEL, safeValue)
+                    .commit();
+            if (!committed) {
+                return new ConfigBridge.Result(false, safeValue, "日志设置写入失败");
+            }
+            serviceError = "";
+            return new ConfigBridge.Result(true, safeValue, "ok");
+        } catch (Throwable t) {
+            String message = t.getMessage();
+            if (message == null || message.isBlank()) message = t.getClass().getSimpleName();
+            serviceError = message;
+            return new ConfigBridge.Result(false, safeValue, message);
+        }
+    }
+
     public static String readNativeRuntimeLog(Context context) {
         initialize(context);
+        int logLevel = ConfigBridge.localPreferences(context).getInt(
+                ConfigBridge.PREF_KEY_LOG_LEVEL,
+                ConfigBridge.DEFAULT_LOG_LEVEL);
+        if (logLevel <= ConfigBridge.LOG_LEVEL_OFF) {
+            return "日志记录已关闭。";
+        }
         return DiagnosticsStreamBridge.currentLog();
     }
 
