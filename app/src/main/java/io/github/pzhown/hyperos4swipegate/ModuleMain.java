@@ -117,12 +117,10 @@ public final class ModuleMain extends XposedModule {
     }
 
     private void publishLogLevel(SharedPreferences preferences) {
-        int logLevel = preferences.getInt(
+        int requestedLogLevel = preferences.getInt(
                 ConfigBridge.REMOTE_PREF_KEY_LOG_LEVEL,
                 ConfigBridge.DEFAULT_LOG_LEVEL);
-        logLevel = Math.max(
-                ConfigBridge.LOG_LEVEL_OFF,
-                Math.min(ConfigBridge.LOG_LEVEL_DETAILED, logLevel));
+        int logLevel = ConfigBridge.sanitizeLogLevel(requestedLogLevel);
         currentLogLevel = logLevel;
         int successes = writeValueFiles(logLevelFiles, logLevel);
 
