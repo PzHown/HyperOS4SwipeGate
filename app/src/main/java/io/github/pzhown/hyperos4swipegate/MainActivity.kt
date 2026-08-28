@@ -12,7 +12,15 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -33,6 +41,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -49,10 +58,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -204,12 +215,23 @@ private fun SwipeGateManager() {
             },
             bottomBar = bottomBar,
         ) { innerPadding ->
-            Box(
+            AnimatedContent(
+                targetState = currentTab,
                 modifier = Modifier
                     .fillMaxSize()
                     .then(if (captureForLiquid) Modifier.layerBackdrop(backdrop) else Modifier),
-            ) {
-                when (currentTab) {
+                transitionSpec = {
+                    val direction = if (targetState.ordinal > initialState.ordinal) 1 else -1
+                    (slideInHorizontally(animationSpec = tween(220)) { width -> direction * (width / 6) } +
+                        fadeIn(animationSpec = tween(180)))
+                        .togetherWith(
+                            slideOutHorizontally(animationSpec = tween(180)) { width -> -direction * (width / 8) } +
+                                fadeOut(animationSpec = tween(140)),
+                        )
+                },
+                label = "main-tab-content",
+            ) { tab ->
+                when (tab) {
                     MainTab.Home -> HomePage(contentPadding = innerPadding)
                     MainTab.Diagnostics -> DiagnosticsPage(innerPadding)
                     MainTab.Settings -> SettingsPage(
@@ -301,6 +323,20 @@ private fun HomePage(contentPadding: PaddingValues) {
         HookUiState.Error -> if (dark) Color(0xFFFFB4AB) else Color(0xFF5A1010)
         else -> MiuixTheme.colorScheme.onSurfaceContainer
     }
+    val statusIconBackground = when (snapshot.state) {
+        HookUiState.Active -> if (dark) Color(0xFF2C5F3E) else Color(0xFFB8EBC8)
+        HookUiState.Repairing -> if (dark) Color(0xFF66511A) else Color(0xFFFFE08A)
+        HookUiState.Error -> if (dark) Color(0xFF693535) else Color(0xFFFFC2C2)
+        else -> MiuixTheme.colorScheme.surface
+    }
+    val statusIcon = when (snapshot.state) {
+        HookUiState.Active -> "✓"
+        HookUiState.Repairing -> "↻"
+        HookUiState.Error -> "!"
+        HookUiState.Inactive -> "–"
+        HookUiState.Unknown -> "?"
+        HookUiState.Loading -> "…"
+    }
     val primaryLabel = when (snapshot.state) {
         HookUiState.Active -> "运行正常"
         HookUiState.Repairing -> "正在更新"
@@ -310,10 +346,7 @@ private fun HomePage(contentPadding: PaddingValues) {
         HookUiState.Loading -> "检测中"
     }
     val moduleLabel = when (snapshot.state) {
-        HookUiState.Active -> buildString {
-            append("系统桌面已加载")
-            snapshot.thresholdDp?.let { append(" · ${it} dp") }
-        }
+        HookUiState.Active -> "系统桌面已加载"
         HookUiState.Repairing -> "模块更新中"
         HookUiState.Error -> when {
             snapshot.detail.startsWith("LSPosed 版本不支持") -> "LSPosed 版本不支持"
@@ -348,8 +381,13 @@ private fun HomePage(contentPadding: PaddingValues) {
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(moduleLabel, fontSize = 15.sp)
                     }
-                    if (snapshot.state == HookUiState.Active) {
-                        Text("✓", fontSize = 32.sp, fontWeight = FontWeight.Bold)
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(statusIconBackground, CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(statusIcon, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -383,13 +421,14 @@ private fun HomePage(contentPadding: PaddingValues) {
                         applyThreshold(thresholdDp.roundToInt())
                     },
                     title = "侧边栏触发距离",
-                    summary = "88 dp 为系统默认；数值越大越不易误触",
+                    summary = "",
                     endActions = {
                         Text(
                             text = "${thresholdLabel(value)} ›",
                             modifier = Modifier
                                 .clickable {
-                                    thresholdInput = TextFieldValue(value.toString())
+                                    val text = value.toString()
+                                    thresholdInput = TextFieldValue(text, selection = TextRange(text.length))
                                     thresholdInputError = ""
                                     showThresholdInput = true
                                 }
@@ -401,6 +440,12 @@ private fun HomePage(contentPadding: PaddingValues) {
                     valueRange = ConfigBridge.STOCK_THRESHOLD_DP.toFloat()..ConfigBridge.MAX_THRESHOLD_DP.toFloat(),
                     steps = ConfigBridge.MAX_THRESHOLD_DP - ConfigBridge.STOCK_THRESHOLD_DP - 1,
                     showKeyPoints = false,
+                )
+                Text(
+                    text = "范围 88–300 dp · 88 dp 为系统默认",
+                    modifier = Modifier.padding(start = 24.dp, end = 24.dp, bottom = if (applyStatus.isBlank()) 18.dp else 6.dp),
+                    fontSize = 13.sp,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                 )
                 if (applyStatus.isNotBlank()) {
                     Text(
@@ -434,7 +479,13 @@ private fun HomePage(contentPadding: PaddingValues) {
             value = thresholdInput,
             onValueChange = { newValue ->
                 val digits = newValue.text.filter { it.isDigit() }.take(3)
-                thresholdInput = TextFieldValue(digits)
+                thresholdInput = TextFieldValue(
+                    text = digits,
+                    selection = TextRange(
+                        newValue.selection.start.coerceIn(0, digits.length),
+                        newValue.selection.end.coerceIn(0, digits.length),
+                    ),
+                )
                 thresholdInputError = ""
             },
             modifier = Modifier.fillMaxWidth(),
@@ -484,19 +535,22 @@ private fun HomePage(contentPadding: PaddingValues) {
 
 @Composable
 private fun OverviewInfoRow(label: String, value: String) {
-    Column(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 24.dp, vertical = 13.dp),
+            .padding(horizontal = 24.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Text(label, fontSize = 16.sp)
-        Spacer(modifier = Modifier.height(3.dp))
         Text(
             value,
+            modifier = Modifier.weight(1f),
             fontSize = 13.sp,
             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.End,
         )
     }
 }
@@ -753,29 +807,20 @@ private fun SettingsPage(
                     Image(
                         painter = painterResource(R.drawable.swipegate_logo),
                         contentDescription = "SwipeGate Logo",
-                        modifier = Modifier.size(76.dp),
+                        modifier = Modifier.size(64.dp),
                         contentScale = ContentScale.Fit,
                     )
                     Column(modifier = Modifier.weight(1f)) {
                         Text("SwipeGate", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                        Spacer(modifier = Modifier.height(3.dp))
+                        Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                            "${BuildConfig.VERSION_NAME} · ${BuildConfig.VERSION_CODE}",
                             fontSize = 13.sp,
                             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            "延后侧滑停顿触发，不改变返回手势",
-                            fontSize = 13.sp,
-                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }
                 OverviewInfoRow("兼容", "HyperOS 4 · Launcher 8.0+ · arm64-v8a")
-                OverviewInfoRow("作者", "PzHown")
                 ArrowPreference(
                     title = "GitHub 项目",
                     summary = "PzHown/HyperOS4SwipeGate",
@@ -785,6 +830,31 @@ private fun SettingsPage(
                                 Intent.ACTION_VIEW,
                                 Uri.parse("https://github.com/PzHown/HyperOS4SwipeGate"),
                             ),
+                        )
+                    },
+                )
+            }
+        }
+
+        item { SmallTitle("开发者") }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                OverviewInfoRow("作者", "PzHown")
+                ArrowPreference(
+                    title = "GitHub",
+                    summary = "@PzHown",
+                    onClick = {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/PzHown")),
+                        )
+                    },
+                )
+                ArrowPreference(
+                    title = "酷安",
+                    summary = "PzHown",
+                    onClick = {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse("https://www.coolapk.com/u/464418")),
                         )
                     },
                 )
