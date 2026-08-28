@@ -13,8 +13,8 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        versionCode = 24
-        versionName = "0.3.10"
+        versionCode = 25
+        versionName = "0.3.11-r8"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -56,8 +56,12 @@ android {
             }
         }
         getByName("release") {
-            isMinifyEnabled = false
-            isShrinkResources = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             if (ciSigningConfig != null) {
                 signingConfig = ciSigningConfig
             }
