@@ -40,6 +40,8 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -56,6 +58,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextRange
@@ -77,10 +80,12 @@ import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.NavigationBar
 import top.yukonga.miuix.kmp.basic.NavigationBarDisplayMode
 import top.yukonga.miuix.kmp.basic.NavigationBarItem
 import top.yukonga.miuix.kmp.basic.Scaffold
+import top.yukonga.miuix.kmp.basic.ScrollBehavior
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
@@ -146,15 +151,26 @@ private fun SwipeGateManager() {
     var selectedTab by remember { mutableIntStateOf(0) }
     var floatingBar by remember { mutableStateOf(prefs.getBoolean(PREF_UI_FLOATING_BAR, true)) }
     var liquidGlass by remember { mutableStateOf(prefs.getBoolean(PREF_UI_LIQUID_GLASS, true)) }
+    val homeListState = rememberLazyListState()
+    val diagnosticsListState = rememberLazyListState()
+    val settingsListState = rememberLazyListState()
     val blurSupported = isRuntimeShaderSupported()
 
     MiuixTheme(controller = themeController) {
+        val homeScrollBehavior = MiuixScrollBehavior()
+        val diagnosticsScrollBehavior = MiuixScrollBehavior()
+        val settingsScrollBehavior = MiuixScrollBehavior()
         val surfaceColor = MiuixTheme.colorScheme.background
         val backdrop = rememberLayerBackdrop {
             drawRect(surfaceColor)
             drawContent()
         }
         val currentTab = MainTab.entries[selectedTab]
+        val currentScrollBehavior = when (currentTab) {
+            MainTab.Home -> homeScrollBehavior
+            MainTab.Diagnostics -> diagnosticsScrollBehavior
+            MainTab.Settings -> settingsScrollBehavior
+        }
         val captureForLiquid = floatingBar && liquidGlass && blurSupported
 
         val bottomBar: @Composable () -> Unit = {
@@ -211,6 +227,7 @@ private fun SwipeGateManager() {
                     title = if (currentTab == MainTab.Home) "SwipeGate" else currentTab.title,
                     largeTitle = if (currentTab == MainTab.Home) "SwipeGate" else currentTab.title,
                     subtitle = "",
+                    scrollBehavior = currentScrollBehavior,
                 )
             },
             bottomBar = bottomBar,
@@ -232,10 +249,20 @@ private fun SwipeGateManager() {
                 label = "main-tab-content",
             ) { tab ->
                 when (tab) {
-                    MainTab.Home -> HomePage(contentPadding = innerPadding)
-                    MainTab.Diagnostics -> DiagnosticsPage(innerPadding)
+                    MainTab.Home -> HomePage(
+                        contentPadding = innerPadding,
+                        listState = homeListState,
+                        scrollBehavior = homeScrollBehavior,
+                    )
+                    MainTab.Diagnostics -> DiagnosticsPage(
+                        contentPadding = innerPadding,
+                        listState = diagnosticsListState,
+                        scrollBehavior = diagnosticsScrollBehavior,
+                    )
                     MainTab.Settings -> SettingsPage(
                         contentPadding = innerPadding,
+                        listState = settingsListState,
+                        scrollBehavior = settingsScrollBehavior,
                         floatingBar = floatingBar,
                         liquidGlass = liquidGlass,
                         blurSupported = blurSupported,
@@ -278,7 +305,11 @@ private fun StandardBottomBar(
 }
 
 @Composable
-private fun HomePage(contentPadding: PaddingValues) {
+private fun HomePage(
+    contentPadding: PaddingValues,
+    listState: LazyListState,
+    scrollBehavior: ScrollBehavior,
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val prefs = remember { ConfigBridge.localPreferences(context) }
     var snapshot by remember { mutableStateOf(HookStatusSnapshot.loading()) }
@@ -360,7 +391,10 @@ private fun HomePage(contentPadding: PaddingValues) {
     }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+        state = listState,
+        modifier = Modifier
+            .fillMaxSize()
+            .nestedScroll(scrollBehavior.nestedScrollConnection),
         contentPadding = pagePadding(contentPadding),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -656,7 +690,11 @@ private fun collectHookStatusSnapshot(context: Context): HookStatusSnapshot {
 }
 
 @Composable
-private fun DiagnosticsPage(contentPadding: PaddingValues) {
+private fun DiagnosticsPage(
+    contentPadding: PaddingValues,
+    listState: LazyListState,
+    scrollBehavior: ScrollBehavior,
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     var logs by remember { mutableStateOf("读取诊断…") }
@@ -673,7 +711,10 @@ private fun DiagnosticsPage(contentPadding: PaddingValues) {
     LaunchedEffect(Unit) { refresh() }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+        state = listState,
+        modifier = Modifier
+            .fillMaxSize()
+            .nestedScroll(scrollBehavior.nestedScrollConnection),
         contentPadding = pagePadding(contentPadding),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -735,6 +776,8 @@ private fun DiagnosticsPage(contentPadding: PaddingValues) {
 @Composable
 private fun SettingsPage(
     contentPadding: PaddingValues,
+    listState: LazyListState,
+    scrollBehavior: ScrollBehavior,
     floatingBar: Boolean,
     liquidGlass: Boolean,
     blurSupported: Boolean,
@@ -745,7 +788,10 @@ private fun SettingsPage(
     var launcherIconHidden by remember { mutableStateOf(isLauncherIconHidden(context)) }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+        state = listState,
+        modifier = Modifier
+            .fillMaxSize()
+            .nestedScroll(scrollBehavior.nestedScrollConnection),
         contentPadding = pagePadding(contentPadding),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
