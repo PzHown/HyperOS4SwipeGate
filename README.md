@@ -1,79 +1,76 @@
+<div align="center">
+
 # HyperOS4 SwipeGate
 
+**延后 HyperOS 4 侧滑停顿触发，不改变返回手势。**
+
 [![Build APK](https://github.com/PzHown/HyperOS4SwipeGate/actions/workflows/build.yml/badge.svg)](https://github.com/PzHown/HyperOS4SwipeGate/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/PzHown/HyperOS4SwipeGate?include_prereleases&label=release)](https://github.com/PzHown/HyperOS4SwipeGate/releases)
+![Android 17](https://img.shields.io/badge/Android-17-3DDC84?logo=android&logoColor=white)
+![LSPosed API 102](https://img.shields.io/badge/LSPosed-API%20102-blue)
 
-为 HyperOS 4 系统桌面的「侧滑停顿呼出侧边栏」增加可调触发距离。
+</div>
 
-普通侧滑仍然返回；只有横向滑动达到设定距离后，才允许系统进入侧边栏停顿触发。
+## 介绍
 
-## 功能
+HyperOS 4 系统桌面支持通过「侧滑停顿」呼出手机管家侧边栏。
 
-- 调整侧边栏停顿触发距离
-- 保留原厂返回手势与动画
-- 修改后即时生效，无需重启桌面
-- 模块状态与 Hook 异常检测
-- 内置诊断日志与一键复制
-
-## 使用
-
-1. 安装 APK。
-2. 在 LSPosed 中启用模块，作用域选择 **系统桌面（`com.miui.home`）**。
-3. 在手机管家中启用「侧滑停顿呼出」侧边栏。
-4. 打开 HyperOS4 SwipeGate，在「设置」中调整触发距离。
-5. 首次修改时授予 Root 权限。
-
-### 触发距离
-
-| 设置 | 实际行为 |
-| --- | --- |
-| `0` | 使用系统默认 `88 dp` |
-| `1–88 dp` | 受系统原厂下限限制，仍为 `88 dp` |
-| `89–320 dp` | 使用自定义触发距离 |
-
-数值越大，需要向屏幕内侧滑得越远才会进入侧边栏停顿触发。
-
-## 当前适配
-
-- HyperOS 4
-- System Launcher `RELEASE-8.01.02.5459`
-- Android 17 / SDK 37
-- arm64-v8a
-- LSPosed Modern API 102
-- 作用域：`com.miui.home`
-
-> 当前采用严格版本匹配。未适配的 Launcher 不会强行安装 Native Hook。
-
-## 工作方式
-
-HyperOS 4 Launcher 的相关手势逻辑位于 Rust/native `libapp_launcher.so`。
-
-SwipeGate 在原厂侧边栏停顿逻辑前增加距离门槛：未达到门槛时继续保持返回手势；达到门槛后停止干预，由系统原生逻辑继续判断是否呼出侧边栏。
-
-模块会检查目标代码特征。发现版本不匹配或 Hook 冲突时会停止覆盖，尽量保持原厂行为。
-
-阈值通过系统属性 `persist.hyperos4swipegate.threshold_dp` 动态读取，因此调整后无需重启桌面。
+SwipeGate 可以提高这项手势的触发距离：**未达到设定距离时仍执行系统返回，达到后才允许原厂侧边栏停顿逻辑继续触发。**
 
 ## 下载
 
-最新自动构建可在 [Releases](https://github.com/PzHown/HyperOS4SwipeGate/releases) 或 [Actions](https://github.com/PzHown/HyperOS4SwipeGate/actions) 获取。
+前往 [Releases](https://github.com/PzHown/HyperOS4SwipeGate/releases) 获取最新构建。
 
-当前仍处于适配阶段，建议升级系统桌面后先确认兼容版本。
+当前提供自动构建版本，适配范围请以本页「当前支持」为准。
 
-## 构建
+## 当前支持
 
-```bash
-gradle :app:assembleDebug
-```
+| 项目 | 支持范围 |
+| --- | --- |
+| 系统 | HyperOS 4 |
+| 系统桌面 | `RELEASE-8.01.02.5459-260807-08242024-R` |
+| Android | Android 17 / API 37 |
+| 架构 | arm64-v8a |
+| LSPosed | Modern API 102 |
+| 作用域 | `com.miui.home` |
 
-GitHub Actions 会自动检查：
+> 当前采用严格版本校验。未适配的 Launcher 不会强行安装 Hook。
 
-- LSPosed API 102 模块元数据
-- `native_init` 入口
-- arm64 native 库
-- 16 KB ELF / APK 对齐
+## 安装与使用
 
-## 注意
+1. 安装 APK。
+2. 在 LSPosed 中启用 **HyperOS4 SwipeGate**，作用域选择 **系统桌面（`com.miui.home`）**。
+3. 重启系统桌面或设备，使模块加载。
+4. 在手机管家中将侧边栏呼出方式设为「侧滑停顿呼出」。
+5. 打开 SwipeGate，在「设置」中调整触发距离。
 
-本项目会 Hook 系统桌面的 Native/Rust 代码。系统桌面升级后，内部实现可能发生变化；如果出现未激活或异常状态，请先查看 App 内「日志」。
+首次修改触发距离时需要授予 Root 权限。之后调整即时生效，无需重启桌面。
 
-非小米官方项目。
+## 触发距离
+
+- `0`：使用原厂 `88 dp`
+- `1–88 dp`：实际仍按原厂 `88 dp`
+- `89–320 dp`：使用设定距离
+
+数值越大，需要向屏幕内侧滑得越远才会进入侧边栏停顿触发。
+
+## 排查
+
+**显示「未激活」**  
+确认 LSPosed 已启用模块、作用域包含 `com.miui.home`，并检查 Launcher 是否为当前适配版本。
+
+**显示「异常」**  
+进入 App 的「日志」页刷新并复制诊断信息，再通过 [Issues](https://github.com/PzHown/HyperOS4SwipeGate/issues) 反馈。
+
+**升级了系统桌面**  
+内部代码可能已经变化。新版本完成适配前，不建议假定旧 Hook 仍然兼容。
+
+## 技术说明
+
+模块通过 LSPosed Modern API 102 `native_init` 进入 HyperOS 4 Launcher 的 native/Rust 进程，并在版本与目标代码特征校验通过后调整原厂手势距离输入。
+
+逆向目标、Hook 策略、安全校验与构建说明见 [docs/TECHNICAL.md](docs/TECHNICAL.md)。
+
+---
+
+本项目与 Xiaomi / 小米官方无关。
