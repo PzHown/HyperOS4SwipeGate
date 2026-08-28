@@ -43,7 +43,25 @@ jobs:
         with:
           gradle-version: '9.5.1'
 
+      - name: Prepare persistent signing keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/hyperos4swipegate-release.jks"
+            echo "CI_SIGNING_ENABLED=1" >> "$GITHUB_ENV"
+            echo "Persistent Android signing key loaded."
+          else
+            echo "CI_SIGNING_ENABLED=0" >> "$GITHUB_ENV"
+            echo "No persistent signing secret configured; falling back to the Gradle debug key."
+          fi
+
       - name: Build APK
+        env:
+          ANDROID_SIGNING_STORE_FILE: ${{ runner.temp }}/hyperos4swipegate-release.jks
+          ANDROID_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: gradle --no-daemon :app:assembleDebug
 
       - name: Verify LSPosed API102 packaging
@@ -85,6 +103,16 @@ jobs:
           print('ELF LOAD alignments:', [hex(a) for a in aligns])
           PY
           "$ZIPALIGN" -c -P 16 -v 4 "$APK"
+
+      - name: Verify APK signing certificate
+        run: |
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          APKSIGNER="$ANDROID_HOME/build-tools/37.0.0/apksigner"
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee apk-signing.txt
+          if [ "$CI_SIGNING_ENABLED" = "1" ]; then
+            tr '[:upper:]' '[:lower:]' < apk-signing.txt | grep -q 'f7a9ef2678d55e321a01f54cef9d1c180ec4e0c87473611437a04d2d801b8f11'
+            echo "Persistent signing certificate verified."
+          fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
