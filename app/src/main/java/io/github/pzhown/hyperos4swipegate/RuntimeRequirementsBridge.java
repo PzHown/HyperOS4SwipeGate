@@ -15,9 +15,11 @@ import io.github.libxposed.service.XposedService;
  * reuses the single service connection owned by XposedServiceBridge instead of registering
  * a second listener.
  *
- * Zygisk Next 1.5.0 is the first release that exposes HyperOS Runtime. We validate that
- * capability by observing the HYOS runtime target through LSPosed API 102 rather than
- * reading /data/adb/modules with root.
+ * Zygisk Next keeps its exact installed version below /data/adb, which a normal app cannot
+ * read without root. Prefer direct HYOS target evidence from LSPosed API 102; when a HYOS-only
+ * child is not exposed through getRunningTargets(), fall back to the complete capability chain:
+ * supported LSPosed + Launcher scope + Xiaomi hyos_spawner. This avoids reporting a false
+ * negative on working HYOS Runtime installations while keeping the App rootless.
  */
 public final class RuntimeRequirementsBridge {
     public static final long MIN_LSPOSED_VERSION_CODE = 7846L;
@@ -61,7 +63,7 @@ public final class RuntimeRequirementsBridge {
             final boolean launcherInScope = current.getScope().contains(TARGET_PACKAGE);
             final int launcherUid = resolveLauncherUid(context);
 
-            boolean hyosRuntimeDetected = false;
+            boolean directHyosRuntimeDetected = false;
             StringBuilder targetDump = new StringBuilder();
 
             if (api >= XposedService.API_102) {
@@ -75,19 +77,35 @@ public final class RuntimeRequirementsBridge {
                             .append(" state=").append(target.getState().name());
 
                     if (processName != null && processName.contains("hyos_spawner")) {
-                        hyosRuntimeDetected = true;
+                        directHyosRuntimeDetected = true;
                     } else if (hyosSpawnerPresent && launcherUid >= 0 && target.getUid() == launcherUid) {
-                        hyosRuntimeDetected = true;
+                        directHyosRuntimeDetected = true;
                     }
                 }
             }
 
+            // HYOS native children are not guaranteed to appear in getRunningTargets().
+            // If the framework is new enough, Launcher is in scope and the device exposes
+            // Xiaomi's HYOS spawner, treat the runtime capability as available instead of
+            // producing a false negative solely because the native child was omitted.
+            final boolean capabilityFallback = !directHyosRuntimeDetected
+                    && api >= XposedService.API_102
+                    && lsposedSupported
+                    && launcherInScope
+                    && hyosSpawnerPresent;
+            final boolean hyosRuntimeDetected = directHyosRuntimeDetected || capabilityFallback;
             final boolean zygiskNextSupported = hyosRuntimeDetected;
+            final String hyosEvidenceMode = directHyosRuntimeDetected
+                    ? "running-target"
+                    : (capabilityFallback ? "capability-fallback" : "none");
+
             final String evidence = "frameworkVersionCode=" + frameworkVersionCode
                     + " api=" + api
                     + " launcherInScope=" + launcherInScope
                     + " hyosSpawnerPresent=" + hyosSpawnerPresent
+                    + " directHyosRuntimeDetected=" + directHyosRuntimeDetected
                     + " hyosRuntimeDetected=" + hyosRuntimeDetected
+                    + " hyosEvidenceMode=" + hyosEvidenceMode
                     + " targets=[" + targetDump + "]";
 
             return new Snapshot(true, api, frameworkName, frameworkVersion, frameworkVersionCode,
