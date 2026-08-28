@@ -26,6 +26,37 @@ android {
         }
     }
 
+    val ciStorePath = System.getenv("ANDROID_SIGNING_STORE_FILE")
+    val ciStorePassword = System.getenv("ANDROID_SIGNING_STORE_PASSWORD")
+    val ciKeyAlias = System.getenv("ANDROID_SIGNING_KEY_ALIAS")
+    val ciKeyPassword = System.getenv("ANDROID_SIGNING_KEY_PASSWORD")
+    val ciSigningConfig = if (
+        !ciStorePath.isNullOrBlank()
+        && !ciStorePassword.isNullOrBlank()
+        && !ciKeyAlias.isNullOrBlank()
+        && !ciKeyPassword.isNullOrBlank()
+    ) {
+        signingConfigs.create("ci") {
+            storeFile = file(ciStorePath)
+            storePassword = ciStorePassword
+            keyAlias = ciKeyAlias
+            keyPassword = ciKeyPassword
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+        }
+    } else {
+        null
+    }
+
+    buildTypes {
+        getByName("debug") {
+            if (ciSigningConfig != null) {
+                signingConfig = ciSigningConfig
+            }
+        }
+    }
+
     buildFeatures {
         buildConfig = true
         compose = true
