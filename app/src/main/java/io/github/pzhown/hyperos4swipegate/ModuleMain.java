@@ -29,7 +29,9 @@ public final class ModuleMain extends XposedModule {
     private static final String TARGET_PROCESS = "com.miui.home";
     private static final String NATIVE_LOG_NAME = "hyperos4swipegate_native.log";
     private static final int ANDROID_USER_OFFSET = 100000;
-    private static final int MAX_LOG_BYTES = 96 * 1024;
+    private static final int MAX_STREAM_LOG_BYTES = 96 * 1024;
+    private static final int MAX_SOURCE_LOG_BYTES = 512 * 1024;
+    private static final int RETAIN_SOURCE_LOG_BYTES = 256 * 1024;
     private static final long LOG_MIRROR_INTERVAL_MS = 1000L;
 
     private SharedPreferences remotePreferences;
@@ -125,14 +127,9 @@ public final class ModuleMain extends XposedModule {
         int successes = writeValueFiles(logLevelFiles, logLevel);
 
         if (logLevel == ConfigBridge.LOG_LEVEL_OFF) {
-            for (File file : nativeLogFiles) {
-                try {
-                    if (file.isFile()) file.delete();
-                } catch (Throwable ignored) {
-                }
-            }
-            resetMirrorSnapshot();
+            purgeNativeLogs();
         }
+        resetMirrorSnapshot();
 
         log(android.util.Log.INFO, "HyperOS4SwipeGateJava",
                 "Published logLevel=" + logLevel + " files=" + successes);
@@ -200,33 +197,39 @@ public final class ModuleMain extends XposedModule {
     private void nativeLogMirrorLoop() {
         while (true) {
             try {
+                if (currentLogLevel <= ConfigBridge.LOG_LEVEL_OFF) {
+                    purgeNativeLogs();
+                    Thread.sleep(LOG_MIRROR_INTERVAL_MS);
+                    continue;
+                }
+
                 File source = findNativeLogFile();
-                if (currentLogLevel > ConfigBridge.LOG_LEVEL_OFF
-                        && source != null
-                        && diagnosticsPort > 0
-                        && !diagnosticsToken.isBlank()) {
-                    long length = source.length();
-                    long modified = source.lastModified();
-                    String path = source.getAbsolutePath();
-                    if (length != lastMirroredLength
-                            || modified != lastMirroredModified
-                            || !path.equals(lastMirroredPath)) {
-                        try {
-                            sendNativeLog(source);
-                        } catch (Throwable t) {
-                            String message = t.getClass().getSimpleName() + ": "
-                                    + (t.getMessage() == null ? "" : t.getMessage());
-                            if (!message.equals(lastMirrorError)) {
-                                lastMirrorError = message;
-                                log(android.util.Log.WARN, "HyperOS4SwipeGateJava",
-                                        "Native log stream failed: " + message);
+                if (source != null) {
+                    trimNativeLogIfNeeded(source);
+                    if (diagnosticsPort > 0 && !diagnosticsToken.isBlank()) {
+                        long length = source.length();
+                        long modified = source.lastModified();
+                        String path = source.getAbsolutePath();
+                        if (length != lastMirroredLength
+                                || modified != lastMirroredModified
+                                || !path.equals(lastMirroredPath)) {
+                            try {
+                                sendNativeLog(source, currentLogLevel);
+                            } catch (Throwable t) {
+                                String message = t.getClass().getSimpleName() + ": "
+                                        + (t.getMessage() == null ? "" : t.getMessage());
+                                if (!message.equals(lastMirrorError)) {
+                                    lastMirrorError = message;
+                                    log(android.util.Log.WARN, "HyperOS4SwipeGateJava",
+                                            "Native log stream failed: " + message);
+                                }
+                            } finally {
+                                // Do not reconnect to a stale app endpoint every second. A log change
+                                // or a newly published endpoint will make the snapshot eligible again.
+                                lastMirroredLength = source.length();
+                                lastMirroredModified = source.lastModified();
+                                lastMirroredPath = path;
                             }
-                        } finally {
-                            // Do not reconnect to a stale app endpoint every second. A log change
-                            // or a newly published endpoint will make the snapshot eligible again.
-                            lastMirroredLength = length;
-                            lastMirroredModified = modified;
-                            lastMirroredPath = path;
                         }
                     }
                 }
@@ -252,6 +255,15 @@ public final class ModuleMain extends XposedModule {
         }
     }
 
+    private void purgeNativeLogs() {
+        for (File file : nativeLogFiles) {
+            try {
+                if (file.isFile()) file.delete();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
     private File findNativeLogFile() {
         for (File file : nativeLogFiles) {
             if (file.isFile() && file.canRead()) return file;
@@ -259,12 +271,41 @@ public final class ModuleMain extends XposedModule {
         return null;
     }
 
-    private void sendNativeLog(File source) throws Exception {
+    private void trimNativeLogIfNeeded(File source) throws Exception {
+        long length = source.length();
+        if (length <= MAX_SOURCE_LOG_BYTES) return;
+
+        long start = Math.max(0L, length - RETAIN_SOURCE_LOG_BYTES);
+        byte[] tail;
+        try (RandomAccessFile input = new RandomAccessFile(source, "r")) {
+            input.seek(start);
+            tail = new byte[(int) (length - start)];
+            input.readFully(tail);
+        }
+
+        int offset = 0;
+        if (start > 0L) {
+            while (offset < tail.length && tail[offset] != '\n') offset++;
+            if (offset < tail.length) offset++;
+        }
+
+        try (FileOutputStream output = new FileOutputStream(source, false)) {
+            output.write("[... older native log trimmed ...]\n"
+                    .getBytes(StandardCharsets.UTF_8));
+            if (offset < tail.length) {
+                output.write(tail, offset, tail.length - offset);
+            }
+            output.flush();
+        }
+        resetMirrorSnapshot();
+    }
+
+    private void sendNativeLog(File source, int logLevel) throws Exception {
         byte[] bytes;
         boolean truncated;
         try (RandomAccessFile input = new RandomAccessFile(source, "r")) {
             long length = input.length();
-            long start = Math.max(0L, length - MAX_LOG_BYTES);
+            long start = Math.max(0L, length - MAX_STREAM_LOG_BYTES);
             truncated = start > 0L;
             input.seek(start);
             bytes = new byte[(int) (length - start)];
@@ -277,14 +318,20 @@ public final class ModuleMain extends XposedModule {
             if (offset < bytes.length) offset++;
         }
 
+        String text = offset < bytes.length
+                ? new String(bytes, offset, bytes.length - offset, StandardCharsets.UTF_8)
+                : "";
+        if (logLevel == ConfigBridge.LOG_LEVEL_COMPACT) {
+            text = compactLog(text);
+        }
+        if (text.isBlank()) return;
+
         ByteArrayOutputStream payload = new ByteArrayOutputStream();
         if (truncated) {
             payload.write("[... earlier native log omitted ...]\n"
                     .getBytes(StandardCharsets.UTF_8));
         }
-        if (offset < bytes.length) {
-            payload.write(bytes, offset, bytes.length - offset);
-        }
+        payload.write(text.getBytes(StandardCharsets.UTF_8));
         byte[] data = payload.toByteArray();
 
         try (Socket socket = new Socket()) {
@@ -300,5 +347,18 @@ public final class ModuleMain extends XposedModule {
             }
         }
         lastMirrorError = "";
+    }
+
+    private String compactLog(String text) {
+        StringBuilder out = new StringBuilder(text.length());
+        String[] lines = text.split("\\R");
+        for (String line : lines) {
+            if (line.startsWith("DP_GATE rawDx=")
+                    || line.startsWith("HOOK_HEALTH healthy ")) {
+                continue;
+            }
+            if (!line.isBlank()) out.append(line).append('\n');
+        }
+        return out.toString();
     }
 }
