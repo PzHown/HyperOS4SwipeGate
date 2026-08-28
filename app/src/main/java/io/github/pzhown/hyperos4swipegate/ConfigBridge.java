@@ -19,6 +19,7 @@ public final class ConfigBridge {
 
     public static final String REMOTE_PREF_GROUP = "swipegate";
     public static final String REMOTE_PREF_KEY_THRESHOLD_DP = "threshold_dp";
+    public static final String REMOTE_NATIVE_LOG_FILE = "swipegate_native_runtime.log";
     public static final String NATIVE_CONFIG_FILE = "hyperos4swipegate_config";
 
     // Legacy migration fallback only. New builds use libxposed RemotePreferences.
