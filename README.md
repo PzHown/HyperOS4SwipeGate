@@ -28,13 +28,14 @@ SwipeGate 可以提高这项手势的触发距离：**未达到设定距离时�
 | 项目 | 支持范围 |
 | --- | --- |
 | 系统 | HyperOS 4 |
-| 系统桌面 | `RELEASE-8.01.02.5459-260807-08242024-R` |
+| 系统桌面 | Launcher 8.0+ |
+| 已测试版本 | `RELEASE-8.01.02.5459-260807-08242024-R` |
 | Android | Android 17 / API 37 |
 | 架构 | arm64-v8a |
 | LSPosed | Modern API 102 |
 | 作用域 | `com.miui.home` |
 
-> 当前采用严格版本校验。未适配的 Launcher 不会强行安装 Hook。
+> Launcher 8.0+ 为目标兼容范围。当前不会按版本号直接拒绝加载，而是校验目标代码特征；如果内部布局或指令签名发生变化，模块会停止安装 Hook 并保持原厂行为。
 
 ## 安装与使用
 
@@ -57,17 +58,17 @@ SwipeGate 可以提高这项手势的触发距离：**未达到设定距离时�
 ## 排查
 
 **显示「未激活」**  
-确认 LSPosed 已启用模块、作用域包含 `com.miui.home`，并检查 Launcher 是否为当前适配版本。
+确认 LSPosed 已启用模块、作用域包含 `com.miui.home`。如果使用其他 Launcher 8.0+ 版本，也可能因为内部代码差异而未能安装 Hook。
 
 **显示「异常」**  
 进入 App 的「日志」页刷新并复制诊断信息，再通过 [Issues](https://github.com/PzHown/HyperOS4SwipeGate/issues) 反馈。
 
 **升级了系统桌面**  
-内部代码可能已经变化。新版本完成适配前，不建议假定旧 Hook 仍然兼容。
+Launcher 8.0+ 属于目标兼容范围，但当前仅明确测试过上方列出的版本。升级后如出现异常，请附带 Launcher 完整版本号和 App 日志反馈。
 
 ## 技术说明
 
-模块通过 LSPosed Modern API 102 `native_init` 进入 HyperOS 4 Launcher 的 native/Rust 进程，并在版本与目标代码特征校验通过后调整原厂手势距离输入。
+模块通过 LSPosed Modern API 102 `native_init` 进入 HyperOS 4 Launcher 的 native/Rust 进程，并在目标代码特征校验通过后调整原厂手势距离输入。
 
 逆向目标、Hook 策略、安全校验与构建说明见 [docs/TECHNICAL.md](docs/TECHNICAL.md)。
 
