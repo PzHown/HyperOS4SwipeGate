@@ -13,8 +13,8 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        versionCode = 23
-        versionName = "0.3.9-ui-tune"
+        versionCode = 24
+        versionName = "0.3.10"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -51,6 +51,13 @@ android {
 
     buildTypes {
         getByName("debug") {
+            if (ciSigningConfig != null) {
+                signingConfig = ciSigningConfig
+            }
+        }
+        getByName("release") {
+            isMinifyEnabled = false
+            isShrinkResources = false
             if (ciSigningConfig != null) {
                 signingConfig = ciSigningConfig
             }
