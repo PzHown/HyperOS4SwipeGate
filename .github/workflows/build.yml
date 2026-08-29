@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [ main, dev ]
   workflow_dispatch:
+    inputs:
+      publish_lsposed:
+        description: 'Publish signed APK to LSPosed Module Repository release'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -225,4 +231,41 @@ jobs:
             dist/SwipeGate-release.apk \
             --target "$GITHUB_SHA" \
             --title "SwipeGate v${VERSION_NAME}" \
-            --notes "Signed Release build from the main branch. Tested on RELEASE-8.01.02.5459-260807-08242024-R and RELEASE-8.01.02.5465-260807-08262034-R. Sidebar hold threshold range: 88-300 dp."
+            --notes "Signed Release build from the main branch. Tested on RELEASE-8.01.02.5459-260807-08242024-R and RELEASE-8.01.02.6174-260818-08281208-R. Sidebar hold threshold range: 88-300 dp."
+
+      - name: Publish to LSPosed Module Repository
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish_lsposed == true
+        env:
+          GH_TOKEN: ${{ secrets.LSPOSED_REPO_TOKEN }}
+          LSPOSED_REPO: Xposed-Modules-Repo/io.github.pzhown.hyperos4swipegate
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Repository secret LSPOSED_REPO_TOKEN is required for cross-repository publishing."
+            exit 1
+          fi
+
+          gh auth status
+          RELEASE_NOTES="Signed SwipeGate v${VERSION_NAME} release. LSPosed API 102 native_init. Supports HyperOS 4 Launcher 8.0+, including RELEASE-8.01.02.5459-260807-08242024-R and RELEASE-8.01.02.6174-260818-08281208-R. Sidebar hold threshold range: 88-300 dp."
+
+          if gh release view "$RELEASE_TAG" --repo "$LSPOSED_REPO" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" \
+              dist/SwipeGate-release.apk \
+              --repo "$LSPOSED_REPO" \
+              --clobber
+            gh release edit "$RELEASE_TAG" \
+              --repo "$LSPOSED_REPO" \
+              --title "$VERSION_NAME" \
+              --notes "$RELEASE_NOTES"
+          else
+            gh release create "$RELEASE_TAG" \
+              dist/SwipeGate-release.apk \
+              --repo "$LSPOSED_REPO" \
+              --target main \
+              --title "$VERSION_NAME" \
+              --notes "$RELEASE_NOTES"
+          fi
+
+          gh release view "$RELEASE_TAG" \
+            --repo "$LSPOSED_REPO" \
+            --json tagName,name,isDraft,isPrerelease,assets \
+            --jq '{tag: .tagName, name: .name, draft: .isDraft, prerelease: .isPrerelease, assets: [.assets[].name]}'
