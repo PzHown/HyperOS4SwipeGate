@@ -1,39 +1,33 @@
 package io.github.pzhown.hyperos4swipegate;
 
+import android.app.BroadcastOptions;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.os.Process;
 import android.os.SystemClock;
 
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Direct App <-> HyperOS Runtime native transport.
+ * App-side endpoint for the HyperOS Runtime control protocol.
  *
- * HyperOS Launcher native children do not execute libxposed Java module entries, so configuration,
- * hook health and user-facing logs must not depend on ModuleMain. The app owns a fixed IPv4
- * loopback endpoint while it is alive; the injected native module connects outward from the
- * Launcher child, publishes a snapshot and receives the latest locally persisted settings in the
- * same exchange.
+ * There is intentionally no localhost socket. The app sends a nonce-bound query to the module code
+ * running inside SystemUI. SystemUI carries the configuration through Xiaomi's existing protected
+ * fsgesture broadcast into the HyOS launcher native receiver; the native bridge replies through the
+ * HyperOS broadcast runtime and SystemUI relays the authenticated response back here.
  */
 public final class NativeControlBridge {
-    private static final int PROTOCOL_MAGIC = 0x53474331; // SGC1
-    private static final int PROTOCOL_VERSION = 1;
-    private static final String CONTROL_HOST = "127.0.0.1";
-    private static final int CONTROL_PORT = 39173;
-    private static final int MAX_PATTERN_BYTES = 128;
-    private static final int MAX_DETAIL_BYTES = 768;
-    private static final int MAX_LOG_BYTES = 24 * 1024;
     private static final long PEER_FRESH_MS = 5_000L;
+    private static final long PULSE_INTERVAL_MS = 1_500L;
 
     private static final AtomicBoolean STARTED = new AtomicBoolean(false);
+    private static final AtomicBoolean RECEIVER_REGISTERED = new AtomicBoolean(false);
+    private static final AtomicLong PENDING_NONCE = new AtomicLong(0L);
+
     private static volatile Context appContext;
-    private static volatile ServerSocket serverSocket;
     private static volatile String lastError = "";
     private static volatile String latestLog = "";
     private static volatile Snapshot latestSnapshot = Snapshot.unknown();
@@ -47,7 +41,7 @@ public final class NativeControlBridge {
             long receivedAtElapsedMs
     ) {
         static Snapshot unknown() {
-            return new Snapshot("UNKNOWN", "", "等待 Native Hook 状态", 0L);
+            return new Snapshot("UNKNOWN", "", "等待 HyOS Runtime Hook 状态", 0L);
         }
 
         public boolean fresh() {
@@ -59,23 +53,45 @@ public final class NativeControlBridge {
 
     public static void initialize(Context context) {
         appContext = context.getApplicationContext();
+        registerReplyReceiverIfNeeded();
+        requestSync();
         if (!STARTED.compareAndSet(false, true)) return;
 
+        Thread pulse = new Thread(NativeControlBridge::pulseLoop, "SwipeGateRuntimePulse");
+        pulse.setDaemon(true);
+        pulse.start();
+    }
+
+    public static void requestSync() {
+        Context context = appContext;
+        if (context == null) return;
+        registerReplyReceiverIfNeeded();
+
+        long nonce = SystemClock.elapsedRealtimeNanos();
+        if (nonce <= 0L) nonce = System.nanoTime();
+        if (nonce <= 0L) nonce = 1L;
+        PENDING_NONCE.set(nonce);
+
+        int threshold = ConfigBridge.localPreferences(context)
+                .getInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, ConfigBridge.DEFAULT_THRESHOLD_DP);
+        threshold = Math.max(ConfigBridge.STOCK_THRESHOLD_DP,
+                Math.min(ConfigBridge.MAX_THRESHOLD_DP, threshold));
+        int logLevel = ConfigBridge.sanitizeLogLevel(
+                ConfigBridge.localPreferences(context).getInt(
+                        ConfigBridge.PREF_KEY_LOG_LEVEL,
+                        ConfigBridge.DEFAULT_LOG_LEVEL));
+
         try {
-            ServerSocket server = new ServerSocket();
-            server.setReuseAddress(true);
-            // Native side uses AF_INET + INADDR_LOOPBACK. Do not use getLoopbackAddress() here:
-            // Android may resolve that to IPv6 ::1, leaving the IPv4 native peer unable to connect.
-            InetAddress ipv4Loopback = InetAddress.getByName(CONTROL_HOST);
-            server.bind(new InetSocketAddress(ipv4Loopback, CONTROL_PORT), 8);
-            serverSocket = server;
+            Intent query = new Intent(SystemUiBridgeModule.ACTION_APP_QUERY)
+                    .setPackage(SystemUiBridgeModule.SYSTEM_UI_PACKAGE)
+                    .putExtra(SystemUiBridgeModule.EXTRA_NONCE, nonce)
+                    .putExtra(SystemUiBridgeModule.EXTRA_THRESHOLD_DP, threshold)
+                    .putExtra(SystemUiBridgeModule.EXTRA_LOG_LEVEL, logLevel)
+                    .putExtra(SystemUiBridgeModule.EXTRA_SENDER_UID, Process.myUid());
+            context.sendBroadcast(query, null,
+                    BroadcastOptions.makeBasic().setShareIdentityEnabled(true).toBundle());
             lastError = "";
-            Thread worker = new Thread(NativeControlBridge::acceptLoop, "SwipeGateNativeControl");
-            worker.setDaemon(true);
-            worker.start();
         } catch (Throwable t) {
-            serverSocket = null;
-            STARTED.set(false);
             String message = t.getMessage();
             lastError = message == null || message.isBlank()
                     ? t.getClass().getSimpleName()
@@ -93,8 +109,6 @@ public final class NativeControlBridge {
 
     public static void clearLog() {
         latestLog = "";
-        // Keep transport errors. Clearing user-facing runtime logs must not erase the only evidence
-        // that the control listener failed to bind or accept a peer.
     }
 
     public static String currentLog() {
@@ -107,80 +121,91 @@ public final class NativeControlBridge {
                                 ConfigBridge.DEFAULT_LOG_LEVEL));
         if (level <= ConfigBridge.LOG_LEVEL_OFF) return "日志记录已关闭。";
         if (!latestLog.isBlank()) return latestLog;
-        if (!lastError.isBlank()) return "Native 直连通道异常：" + lastError;
-        if (latestSnapshot.fresh()) return "Native 已连接，暂无运行日志。";
-
-        ServerSocket server = serverSocket;
-        if (server == null || server.isClosed()) {
-            return "Native 直连监听未启动。";
-        }
-        return "等待 Native 直连…\nApp 已监听 127.0.0.1:39173，等待 Launcher Native 连接。";
+        if (!lastError.isBlank()) return "HyOS Runtime 通道异常：" + lastError;
+        if (latestSnapshot.fresh()) return "HyOS Runtime 已连接，暂无新的 Native 日志。";
+        return "等待 SystemUI → HyOS Runtime 状态回包…\n"
+                + "配置和状态通过小米 fsgesture Native Broadcast 通道同步，不再使用本地端口。";
     }
 
-    private static void acceptLoop() {
-        ServerSocket server = serverSocket;
-        if (server == null) return;
+    private static void registerReplyReceiverIfNeeded() {
+        Context context = appContext;
+        if (context == null || !RECEIVER_REGISTERED.compareAndSet(false, true)) return;
+        try {
+            IntentFilter filter = new IntentFilter(SystemUiBridgeModule.ACTION_APP_REPLY);
+            context.registerReceiver(replyReceiver, filter, Context.RECEIVER_EXPORTED);
+        } catch (Throwable t) {
+            RECEIVER_REGISTERED.set(false);
+            String message = t.getMessage();
+            lastError = message == null || message.isBlank()
+                    ? t.getClass().getSimpleName()
+                    : message;
+        }
+    }
 
-        while (!server.isClosed()) {
-            try (Socket client = server.accept()) {
-                client.setSoTimeout(1_000);
-                if (!client.getInetAddress().isLoopbackAddress()) continue;
-                handleClient(client);
-                lastError = "";
-            } catch (Throwable t) {
-                if (server.isClosed()) return;
-                String message = t.getMessage();
-                if (message != null && !message.isBlank()) lastError = message;
+    private static void pulseLoop() {
+        while (true) {
+            try {
+                requestSync();
+                Thread.sleep(PULSE_INTERVAL_MS);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Throwable ignored) {
+                try {
+                    Thread.sleep(PULSE_INTERVAL_MS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
             }
         }
     }
 
-    private static void handleClient(Socket client) throws Exception {
-        DataInputStream input = new DataInputStream(client.getInputStream());
-        DataOutputStream output = new DataOutputStream(client.getOutputStream());
+    private static final BroadcastReceiver replyReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (!SystemUiBridgeModule.ACTION_APP_REPLY.equals(intent.getAction())) return;
+            int senderUid = getSentFromUid();
+            String senderPackage = getSentFromPackage();
+            int claimedUid = intent.getIntExtra(SystemUiBridgeModule.EXTRA_SENDER_UID, -1);
+            if (senderUid == Process.INVALID_UID
+                    || senderUid != claimedUid
+                    || !SystemUiBridgeModule.SYSTEM_UI_PACKAGE.equals(senderPackage)
+                    || !isUidOwner(context, senderUid, SystemUiBridgeModule.SYSTEM_UI_PACKAGE)) {
+                return;
+            }
 
-        int magic = input.readInt();
-        int version = input.readInt();
-        if (magic != PROTOCOL_MAGIC || version != PROTOCOL_VERSION) return;
+            long nonce = intent.getLongExtra(SystemUiBridgeModule.EXTRA_NONCE, 0L);
+            long expected = PENDING_NONCE.get();
+            if (nonce <= 0L || nonce != expected) return;
 
-        String state = stateName(input.readInt());
-        String pattern = readUtf8(input, MAX_PATTERN_BYTES);
-        String detail = readUtf8(input, MAX_DETAIL_BYTES);
-        String log = readUtf8(input, MAX_LOG_BYTES);
-
-        long now = SystemClock.elapsedRealtime();
-        latestSnapshot = new Snapshot(state, pattern, detail, now);
-        if (!log.isBlank()) latestLog = log.trim();
-
-        Context context = appContext;
-        int threshold = ConfigBridge.STOCK_THRESHOLD_DP;
-        int logLevel = ConfigBridge.DEFAULT_LOG_LEVEL;
-        if (context != null) {
-            threshold = ConfigBridge.localPreferences(context)
-                    .getInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, ConfigBridge.STOCK_THRESHOLD_DP);
-            threshold = Math.max(
-                    ConfigBridge.STOCK_THRESHOLD_DP,
-                    Math.min(ConfigBridge.MAX_THRESHOLD_DP, threshold));
-            logLevel = ConfigBridge.sanitizeLogLevel(
-                    ConfigBridge.localPreferences(context).getInt(
-                            ConfigBridge.PREF_KEY_LOG_LEVEL,
-                            ConfigBridge.DEFAULT_LOG_LEVEL));
+            int state = intent.getIntExtra(SystemUiBridgeModule.EXTRA_HOOK_STATE, 0);
+            String pattern = safeString(intent.getStringExtra(SystemUiBridgeModule.EXTRA_PATTERN));
+            String detail = safeString(intent.getStringExtra(SystemUiBridgeModule.EXTRA_DETAIL));
+            String log = safeString(intent.getStringExtra(SystemUiBridgeModule.EXTRA_NATIVE_LOG));
+            latestSnapshot = new Snapshot(
+                    stateName(state), pattern, detail, SystemClock.elapsedRealtime());
+            if (!log.isBlank()) latestLog = log.trim();
+            lastError = "";
+            PENDING_NONCE.compareAndSet(nonce, 0L);
         }
+    };
 
-        output.writeInt(PROTOCOL_MAGIC);
-        output.writeInt(PROTOCOL_VERSION);
-        output.writeInt(threshold);
-        output.writeInt(logLevel);
-        output.flush();
+    private static boolean isUidOwner(Context context, int uid, String packageName) {
+        if (context == null || uid < 0) return false;
+        try {
+            String[] packages = context.getPackageManager().getPackagesForUid(uid);
+            if (packages == null) return false;
+            for (String candidate : packages) {
+                if (packageName.equals(candidate)) return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
     }
 
-    private static String readUtf8(DataInputStream input, int maxBytes) throws Exception {
-        int length = input.readInt();
-        if (length < 0 || length > maxBytes) throw new IllegalArgumentException("invalid payload length");
-        if (length == 0) return "";
-        byte[] bytes = new byte[length];
-        input.readFully(bytes);
-        return new String(bytes, StandardCharsets.UTF_8);
+    private static String safeString(String value) {
+        return value == null ? "" : value;
     }
 
     private static String stateName(int state) {
