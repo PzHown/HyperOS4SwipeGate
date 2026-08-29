@@ -237,7 +237,7 @@ jobs:
             dist/SwipeGate-release.apk \
             --target "$GITHUB_SHA" \
             --title "SwipeGate v${VERSION_NAME}" \
-            --notes "Signed Release build from the main branch. Tested on RELEASE-8.01.02.5459-260807-08242024-R and RELEASE-8.01.02.6174-260818-08281208-R. Sidebar hold threshold range: 88-300 dp."
+            --notes "SwipeGate v${VERSION_NAME}: LSPosed API 102 native_init for HyperOS 4 Launcher 8.0+. Adds Launcher 8.01.02.6174 compatibility, HyOS Runtime private-broadcast control/status transport through SystemUI, configurable 88-300 dp sidebar threshold, selectable native log levels, and stricter native hook health reporting."
 
       - name: Publish LSPosed prerelease
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -251,7 +251,7 @@ jobs:
           fi
 
           gh auth status
-          RELEASE_NOTES="Signed SwipeGate v${VERSION_NAME} prerelease. LSPosed API 102 native_init. Supports HyperOS 4 Launcher 8.0+, including RELEASE-8.01.02.5459-260807-08242024-R and RELEASE-8.01.02.6174-260818-08281208-R. Sidebar hold threshold range: 88-300 dp."
+          RELEASE_NOTES="SwipeGate v${VERSION_NAME} prerelease. LSPosed API 102 native_init for HyperOS 4 Launcher 8.0+. Adds Launcher 8.01.02.6174 compatibility, HyOS Runtime private-broadcast control/status transport through SystemUI, configurable 88-300 dp sidebar threshold, selectable native log levels, and stricter native hook health reporting."
 
           if gh release view "$RELEASE_TAG" --repo "$LSPOSED_REPO" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" \
