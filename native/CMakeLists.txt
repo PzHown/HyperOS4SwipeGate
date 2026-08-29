@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 add_library(hyperos4swipegate SHARED
-    src/main_compat.cpp
+    src/main.cpp
     src/config_reader.cpp
 )
 
