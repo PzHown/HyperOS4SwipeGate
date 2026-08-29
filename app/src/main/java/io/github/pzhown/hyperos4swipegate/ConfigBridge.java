@@ -22,8 +22,8 @@ public final class ConfigBridge {
     public static final int LOG_LEVEL_COMPACT = 1;
     public static final int LOG_LEVEL_DETAILED = 2;
     public static final int DEFAULT_LOG_LEVEL = LOG_LEVEL_OFF;
-    // 0.5.0 release gate: keep compact/detailed code available but force persistence off.
-    public static final boolean LOG_RECORDING_OPTIONS_ENABLED = false;
+    // Native logging levels are user-selectable. Hook-health transport remains available when off.
+    public static final boolean LOG_RECORDING_OPTIONS_ENABLED = true;
 
     public static final String REMOTE_PREF_GROUP = "swipegate";
     public static final String REMOTE_PREF_KEY_THRESHOLD_DP = "threshold_dp";
