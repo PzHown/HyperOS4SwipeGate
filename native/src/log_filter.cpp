@@ -1,3 +1,4 @@
+#include <android/log.h>
 #include <fcntl.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -10,6 +11,7 @@
 namespace {
 
 constexpr const char *kLogLevelFileName = "hyperos4swipegate_log_level";
+constexpr const char *kLsposedErrorFileName = "hyperos4swipegate_lsp_error.log";
 constexpr int kLogLevelOff = 0;
 constexpr int kLogLevelCompact = 1;
 constexpr int kLogLevelDetailed = 2;
@@ -65,18 +67,56 @@ bool isDetailedOnlyLine(const char *message) {
             || std::strncmp(message, "HOOK_HEALTH healthy ", 20) == 0;
 }
 
-bool shouldPersist(const char *message) {
+bool shouldPersistForApp(const char *message) {
     const int level = readNativeLogLevel();
     if (level >= kLogLevelDetailed) return true;
     if (isDetailedOnlyLine(message)) return false;
 
-    // OFF still permits short-lived hook lifecycle/error lines. ModuleMain consumes these
-    // for strict hook-health state and immediately removes the transient source file.
-    // COMPACT keeps those same lifecycle/config/error lines as the user-visible log.
+    // The native file is also a short-lived transport for hook-health state. When App logging is
+    // OFF, ModuleMain consumes these lifecycle/error lines and immediately deletes the file. This
+    // is transport, not App log retention. COMPACT keeps the same lines as the user-visible log.
     return true;
 }
 
+void appendLsposedError(const char *message) {
+    if (message == nullptr || *message == '\0') return;
+
+    const int userId = static_cast<int>(getuid()) / kAndroidUserOffset;
+    char path[256]{};
+    const char *formats[] = {
+            "/data/user_de/%d/com.miui.home/cache/%s",
+            "/data/user/%d/com.miui.home/cache/%s",
+            "/data/data/com.miui.home/cache/%s",
+    };
+
+    for (size_t i = 0; i < 3; ++i) {
+        if (i == 2 && userId != 0) break;
+        if (i < 2) {
+            std::snprintf(path, sizeof(path), formats[i], userId, kLsposedErrorFileName);
+        } else {
+            std::snprintf(path, sizeof(path), formats[i], kLsposedErrorFileName);
+        }
+
+        const int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+        if (fd < 0) continue;
+        const size_t length = std::strlen(message);
+        (void) write(fd, message, length);
+        (void) write(fd, "\n", 1);
+        close(fd);
+        return;
+    }
+}
+
 }  // namespace
+
+extern "C" int __real___android_log_write(int priority, const char *tag, const char *text);
+
+extern "C" int __wrap___android_log_write(int priority, const char *tag, const char *text) {
+    // Error reporting is intentionally independent from the SwipeGate App log setting. Keep the
+    // normal Android log emission and additionally relay ERROR+ lines to a dedicated LSPosed queue.
+    if (priority >= ANDROID_LOG_ERROR) appendLsposedError(text);
+    return __real___android_log_write(priority, tag, text);
+}
 
 extern "C" int __wrap_dprintf(int fd, const char *format, ...) {
     va_list args;
@@ -88,7 +128,7 @@ extern "C" int __wrap_dprintf(int fd, const char *format, ...) {
         va_copy(inspect, args);
         const char *message = va_arg(inspect, const char *);
         va_end(inspect);
-        suppress = !shouldPersist(message);
+        suppress = !shouldPersistForApp(message);
     }
 
     int result = 0;
