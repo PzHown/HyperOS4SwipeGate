@@ -26,6 +26,7 @@ target_link_options(hyperos4swipegate PRIVATE
     "-Wl,-z,common-page-size=16384"
     "-Wl,--wrap=__system_property_get"
     "-Wl,--wrap=dprintf"
+    "-Wl,--wrap=__android_log_write"
 )
 
 find_library(log-lib log)
