@@ -4,18 +4,18 @@
 extern "C" {
 #endif
 
-// Live configuration received directly from the SwipeGate app. A negative value means that no
-// live value has been received yet and callers should fall back to the persisted launcher cache.
+// Live configuration received through SystemUI -> Xiaomi fsgesture -> HyOS Runtime. A negative
+// value means no authenticated runtime value has arrived yet and callers should fall back to the
+// persisted launcher cache / legacy property path.
 int swipegate_control_threshold_dp();
 int swipegate_control_log_level();
 
-// Feed every native log line into the control plane. Hook state is always parsed regardless of the
-// user-facing App log level; App log retention itself remains controlled by log_level.
+// Feed every Native log line into the runtime control plane. Hook state is parsed regardless of
+// the user-facing App log level; App log retention remains controlled by log_level.
 void swipegate_control_on_log(int priority, const char *text);
 
-// Opportunistically exchange hook state/logs for the latest App configuration. This is intentionally
-// outbound-only from the Launcher process so no worker thread is ever created in the root
-// hyos_spawner before fork.
+// Ensure the process-local HyOS Runtime bridge installer is active. There is no socket and no
+// network transport; this function only drives the native broadcast bridge lifecycle.
 void swipegate_control_sync_if_due();
 
 #ifdef __cplusplus
