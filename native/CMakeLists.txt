@@ -9,6 +9,7 @@ add_library(hyperos4swipegate SHARED
     src/main.cpp
     src/config_reader.cpp
     src/log_filter.cpp
+    src/control_channel.cpp
 )
 
 target_include_directories(hyperos4swipegate PRIVATE include)
@@ -27,6 +28,7 @@ target_link_options(hyperos4swipegate PRIVATE
     "-Wl,--wrap=__system_property_get"
     "-Wl,--wrap=dprintf"
     "-Wl,--wrap=__android_log_write"
+    "-Wl,--wrap=clock_gettime"
 )
 
 find_library(log-lib log)
