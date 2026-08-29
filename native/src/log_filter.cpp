@@ -1,3 +1,5 @@
+#include "control_channel.h"
+
 #include <android/log.h>
 #include <fcntl.h>
 #include <sys/types.h>
@@ -41,6 +43,9 @@ bool readLevelFile(const char *path, int *outLevel) {
 }
 
 int readNativeLogLevel() {
+    const int liveLevel = swipegate_control_log_level();
+    if (liveLevel >= kLogLevelOff && liveLevel <= kLogLevelDetailed) return liveLevel;
+
     const int userId = static_cast<int>(getuid()) / kAndroidUserOffset;
     char path[256]{};
     int level = kLogLevelOff;
@@ -69,12 +74,8 @@ bool isDetailedOnlyLine(const char *message) {
 
 bool shouldPersistForApp(const char *message) {
     const int level = readNativeLogLevel();
-    if (level >= kLogLevelDetailed) return true;
-    if (isDetailedOnlyLine(message)) return false;
-
-    // The native file is also a short-lived transport for hook-health state. When App logging is
-    // OFF, ModuleMain consumes these lifecycle/error lines and immediately deletes the file. This
-    // is transport, not App log retention. COMPACT keeps the same lines as the user-visible log.
+    if (level <= kLogLevelOff) return false;
+    if (level == kLogLevelCompact && isDetailedOnlyLine(message)) return false;
     return true;
 }
 
@@ -112,8 +113,12 @@ void appendLsposedError(const char *message) {
 extern "C" int __real___android_log_write(int priority, const char *tag, const char *text);
 
 extern "C" int __wrap___android_log_write(int priority, const char *tag, const char *text) {
+    // Hook health/state is always parsed and sent through the direct native control channel,
+    // independently of whether App log recording is enabled.
+    swipegate_control_on_log(priority, text);
+
     // Error reporting is intentionally independent from the SwipeGate App log setting. Keep the
-    // normal Android log emission and additionally relay ERROR+ lines to a dedicated LSPosed queue.
+    // normal Android log emission and additionally retain ERROR+ lines for LSPosed-side diagnosis.
     if (priority >= ANDROID_LOG_ERROR) appendLsposedError(text);
     return __real___android_log_write(priority, tag, text);
 }
