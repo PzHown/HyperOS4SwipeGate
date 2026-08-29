@@ -13,13 +13,18 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+
+extern "C" {
+alignas(8) void *g_swipegate_original_broadcast_send = nullptr;
+void SwipeGateBroadcastSendCaptureHook();
+void SwipeGateCaptureBroadcastRuntime(void *holder);
+}
 
 namespace {
 
@@ -28,8 +33,6 @@ constexpr const char *kLauncherPackage = "com.miui.home";
 constexpr const char *kSystemUiPackage = "com.android.systemui";
 constexpr const char *kLauncherLibrary = "libapp_launcher.so";
 constexpr const char *kBroadcastPrivateName = "libhyper_os_broadcast_private.dylib.so";
-constexpr const char *kBroadcastPrivatePath =
-        "/system_ext/lib64/libhyper_os_broadcast_private.dylib.so";
 constexpr const char *kCarrierAction = "com.android.systemui.fsgesture";
 constexpr const char *kNativeReplyAction =
         "io.github.pzhown.hyperos4swipegate.action.NATIVE_RUNTIME_REPLY";
@@ -140,7 +143,6 @@ std::atomic<bool> gReceiverHookInstalled{false};
 std::atomic<bool> gSendCaptureHookInstalled{false};
 std::atomic<void *> gOriginalReceiver{nullptr};
 std::atomic<void *> gCapturedRuntime{nullptr};
-std::atomic<uintptr_t> gLauncherBase{0};
 
 int gThresholdDp = -1;
 int gLogLevel = -1;
@@ -356,27 +358,19 @@ void *resolveExactFileSymbol(const LoadedImage &image, const char *name) {
 
     uintptr_t matchedValue = 0;
     int matches = 0;
-    for (size_t sectionIndex = 0; sectionIndex < sections.size(); ++sectionIndex) {
-        const Elf64_Shdr &symbols = sections[sectionIndex];
+    for (const Elf64_Shdr &symbols : sections) {
         if ((symbols.sh_type != SHT_DYNSYM && symbols.sh_type != SHT_SYMTAB)
                 || symbols.sh_entsize != sizeof(Elf64_Sym)
-                || symbols.sh_link >= sections.size()
-                || symbols.sh_size == 0) {
-            continue;
-        }
+                || symbols.sh_link >= sections.size() || symbols.sh_size == 0) continue;
         const Elf64_Shdr &strings = sections[symbols.sh_link];
         if (strings.sh_size == 0 || strings.sh_size > 64 * 1024 * 1024) continue;
         std::vector<char> stringTable(static_cast<size_t>(strings.sh_size));
         if (!preadExact(fd, stringTable.data(), stringTable.size(),
-                        static_cast<off_t>(strings.sh_offset))) {
-            continue;
-        }
+                        static_cast<off_t>(strings.sh_offset))) continue;
         const size_t symbolCount = static_cast<size_t>(symbols.sh_size / sizeof(Elf64_Sym));
         std::vector<Elf64_Sym> table(symbolCount);
         if (!preadExact(fd, table.data(), table.size() * sizeof(Elf64_Sym),
-                        static_cast<off_t>(symbols.sh_offset))) {
-            continue;
-        }
+                        static_cast<off_t>(symbols.sh_offset))) continue;
         for (const Elf64_Sym &symbol : table) {
             if (symbol.st_name >= stringTable.size() || symbol.st_value == 0) continue;
             const char *candidate = stringTable.data() + symbol.st_name;
@@ -400,8 +394,7 @@ T resolveLauncherSymbol(const char *name) {
     void *handle = dlopen(launcher.path.c_str(), RTLD_NOW | RTLD_NOLOAD);
     if (handle == nullptr) handle = dlopen(kLauncherLibrary, RTLD_NOW | RTLD_NOLOAD);
     if (handle == nullptr) return nullptr;
-    resolved = dlsym(handle, name);
-    return reinterpret_cast<T>(resolved);
+    return reinterpret_cast<T>(dlsym(handle, name));
 }
 
 bool isNativeSuccess(const NativeResult &result) {
@@ -438,8 +431,7 @@ bool readNativeI64(void *bundle, const char *key, int64_t *output) {
 bool verifyPackageUid(const char *packageName, int32_t claimedUid) {
     const auto getInfo = resolveLauncherSymbol<PackageManagerGetApplicationInfoFn>(
             "PackageManager_get_application_info");
-    const auto getUid = resolveLauncherSymbol<ApplicationInfoGetUidFn>(
-            "ApplicationInfo_get_uid");
+    const auto getUid = resolveLauncherSymbol<ApplicationInfoGetUidFn>("ApplicationInfo_get_uid");
     const auto drop = resolveLauncherSymbol<ApplicationInfoDropFn>("ApplicationInfo_drop");
     if (packageName == nullptr || claimedUid < 0 || getInfo == nullptr
             || getUid == nullptr || drop == nullptr) return false;
@@ -462,7 +454,6 @@ const void *rStringVtable() {
     if (pattern.find("8.01.02.6174-v2") == std::string::npos) return nullptr;
     const LoadedImage launcher = findLoadedImage(kLauncherLibrary);
     if (launcher.base == 0) return nullptr;
-    gLauncherBase.store(launcher.base, std::memory_order_release);
     return reinterpret_cast<const void *>(launcher.base + kRStringVtableOffset6174);
 }
 
@@ -580,9 +571,7 @@ bool sendNativeReply(int64_t nonce) {
             || !addBundleI32(extras, kSenderUidExtra, static_cast<int32_t>(getuid()))
             || !addBundleString(extras, kPatternExtra, pattern)
             || !addBundleString(extras, kDetailExtra, detail)
-            || !addBundleString(extras, kNativeLogExtra, appLog)) {
-        return false;
-    }
+            || !addBundleString(extras, kNativeLogExtra, appLog)) return false;
 
     void *intent = intentDefault();
     if (intent == nullptr) return false;
@@ -629,8 +618,8 @@ void handleControlCarrier(void *intent) {
         return;
     }
 
-    bool thresholdChanged = false;
-    bool logLevelChanged = false;
+    bool thresholdChanged;
+    bool logLevelChanged;
     {
         SpinGuard guard;
         thresholdChanged = gThresholdDp != thresholdDp;
@@ -652,9 +641,7 @@ void hookBroadcastReceiverOnReceive(void *receiver, void *context, void *intent)
     const auto original = reinterpret_cast<BroadcastReceiverOnReceiveFn>(
             gOriginalReceiver.load(std::memory_order_acquire));
     if (original == nullptr) return;
-    if (intent != nullptr && intentActionEquals(intent, kCarrierAction)) {
-        handleControlCarrier(intent);
-    }
+    if (intent != nullptr && intentActionEquals(intent, kCarrierAction)) handleControlCarrier(intent);
     original(receiver, context, intent);
 }
 
@@ -667,19 +654,15 @@ void *installerMain(void *) {
         HookFunType hook = gHookFunction.load(std::memory_order_acquire);
         const LoadedImage broadcastImage = findLoadedImage(kBroadcastPrivateName);
         const LoadedImage launcherImage = findLoadedImage(kLauncherLibrary);
-        if (launcherImage.base != 0) gLauncherBase.store(launcherImage.base, std::memory_order_release);
         if (hook != nullptr && broadcastImage.base != 0 && launcherImage.base != 0) {
             if (!gSendCaptureHookInstalled.load(std::memory_order_acquire)) {
                 void *target = resolveExactFileSymbol(broadcastImage, kBroadcastSendSymbol);
-                if (target != nullptr) {
-                    extern void *g_swipegate_original_broadcast_send;
-                    extern void SwipeGateBroadcastSendCaptureHook();
-                    if (hook(target, reinterpret_cast<void *>(SwipeGateBroadcastSendCaptureHook),
-                             &g_swipegate_original_broadcast_send) == 0
-                            && g_swipegate_original_broadcast_send != nullptr) {
-                        gSendCaptureHookInstalled.store(true, std::memory_order_release);
-                        bridgeLog(ANDROID_LOG_INFO, "HyOS private broadcast runtime capture installed");
-                    }
+                if (target != nullptr
+                        && hook(target, reinterpret_cast<void *>(SwipeGateBroadcastSendCaptureHook),
+                                &g_swipegate_original_broadcast_send) == 0
+                        && g_swipegate_original_broadcast_send != nullptr) {
+                    gSendCaptureHookInstalled.store(true, std::memory_order_release);
+                    bridgeLog(ANDROID_LOG_INFO, "HyOS private broadcast runtime capture installed");
                 }
             }
             if (!gReceiverHookInstalled.load(std::memory_order_acquire)) {
@@ -691,8 +674,7 @@ void *installerMain(void *) {
                                 &backup) == 0 && backup != nullptr) {
                     gOriginalReceiver.store(backup, std::memory_order_release);
                     gReceiverHookInstalled.store(true, std::memory_order_release);
-                    bridgeLog(ANDROID_LOG_INFO,
-                            "HyOS fsgesture native receiver bridge installed");
+                    bridgeLog(ANDROID_LOG_INFO, "HyOS fsgesture native receiver bridge installed");
                 }
             }
             if (gSendCaptureHookInstalled.load(std::memory_order_acquire)
@@ -758,7 +740,6 @@ void resetAfterFork() {
     gSendCaptureHookInstalled.store(false, std::memory_order_release);
     gOriginalReceiver.store(nullptr, std::memory_order_release);
     gCapturedRuntime.store(nullptr, std::memory_order_release);
-    // The LSPosed hook backend pointer was learned in native_init before fork and is inherited.
     startChildProbeAfterFork();
 }
 
@@ -767,8 +748,6 @@ __attribute__((constructor)) void initializeRuntimeBridge() {
 }
 
 }  // namespace
-
-extern "C" alignas(8) void *g_swipegate_original_broadcast_send = nullptr;
 
 extern "C" void SwipeGateCaptureBroadcastRuntime(void *holder) {
     if (reinterpret_cast<uintptr_t>(holder) < 0x100000000ull) return;
