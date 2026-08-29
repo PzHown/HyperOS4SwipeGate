@@ -16,13 +16,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Direct App <-> HyperOS Runtime native transport.
  *
  * HyperOS Launcher native children do not execute libxposed Java module entries, so configuration,
- * hook health and user-facing logs must not depend on ModuleMain. The app owns a fixed loopback
- * endpoint while it is alive; the injected native module connects outward from the Launcher child,
- * publishes a snapshot and receives the latest locally persisted settings in the same exchange.
+ * hook health and user-facing logs must not depend on ModuleMain. The app owns a fixed IPv4
+ * loopback endpoint while it is alive; the injected native module connects outward from the
+ * Launcher child, publishes a snapshot and receives the latest locally persisted settings in the
+ * same exchange.
  */
 public final class NativeControlBridge {
     private static final int PROTOCOL_MAGIC = 0x53474331; // SGC1
     private static final int PROTOCOL_VERSION = 1;
+    private static final String CONTROL_HOST = "127.0.0.1";
     private static final int CONTROL_PORT = 39173;
     private static final int MAX_PATTERN_BYTES = 128;
     private static final int MAX_DETAIL_BYTES = 768;
@@ -62,13 +64,18 @@ public final class NativeControlBridge {
         try {
             ServerSocket server = new ServerSocket();
             server.setReuseAddress(true);
-            server.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), CONTROL_PORT), 8);
+            // Native side uses AF_INET + INADDR_LOOPBACK. Do not use getLoopbackAddress() here:
+            // Android may resolve that to IPv6 ::1, leaving the IPv4 native peer unable to connect.
+            InetAddress ipv4Loopback = InetAddress.getByName(CONTROL_HOST);
+            server.bind(new InetSocketAddress(ipv4Loopback, CONTROL_PORT), 8);
             serverSocket = server;
             lastError = "";
             Thread worker = new Thread(NativeControlBridge::acceptLoop, "SwipeGateNativeControl");
             worker.setDaemon(true);
             worker.start();
         } catch (Throwable t) {
+            serverSocket = null;
+            STARTED.set(false);
             String message = t.getMessage();
             lastError = message == null || message.isBlank()
                     ? t.getClass().getSimpleName()
@@ -86,7 +93,8 @@ public final class NativeControlBridge {
 
     public static void clearLog() {
         latestLog = "";
-        lastError = "";
+        // Keep transport errors. Clearing user-facing runtime logs must not erase the only evidence
+        // that the control listener failed to bind or accept a peer.
     }
 
     public static String currentLog() {
@@ -101,7 +109,12 @@ public final class NativeControlBridge {
         if (!latestLog.isBlank()) return latestLog;
         if (!lastError.isBlank()) return "Native 直连通道异常：" + lastError;
         if (latestSnapshot.fresh()) return "Native 已连接，暂无运行日志。";
-        return "等待 Native 直连…\n返回系统桌面执行一次侧滑后会自动建立通道。";
+
+        ServerSocket server = serverSocket;
+        if (server == null || server.isClosed()) {
+            return "Native 直连监听未启动。";
+        }
+        return "等待 Native 直连…\nApp 已监听 127.0.0.1:39173，等待 Launcher Native 连接。";
     }
 
     private static void acceptLoop() {
@@ -110,7 +123,7 @@ public final class NativeControlBridge {
 
         while (!server.isClosed()) {
             try (Socket client = server.accept()) {
-                client.setSoTimeout(250);
+                client.setSoTimeout(1_000);
                 if (!client.getInetAddress().isLoopbackAddress()) continue;
                 handleClient(client);
                 lastError = "";
