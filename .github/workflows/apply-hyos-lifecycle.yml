@@ -1,0 +1,36 @@
+name: Apply HyOS lifecycle patch
+
+on:
+  push:
+    branches: [ dev ]
+    paths:
+      - '.github/tmp/apply_hyos_lifecycle.py'
+      - '.github/workflows/apply-hyos-lifecycle.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Apply guarded source patch
+        run: |
+          python3 .github/tmp/apply_hyos_lifecycle.py
+          git diff --check
+          grep -q 'bool isHyosSpawnerProcessFamily()' native/src/main.cpp
+          grep -q 'DP_GATE native_init checks' native/src/main.cpp
+          grep -q 'native-init-backfill' native/src/main.cpp
+
+      - name: Commit lifecycle fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add native/src/main.cpp
+          git commit -m 'fix: handle HyOS root-spawner native lifecycle'
+          git push origin HEAD:dev
