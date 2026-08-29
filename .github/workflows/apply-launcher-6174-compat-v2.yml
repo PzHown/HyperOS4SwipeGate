@@ -1,0 +1,56 @@
+name: Apply Launcher 6174 Compatibility v2
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - .github/workflows/apply-launcher-6174-compat-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Apply compatibility patch
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('native/src/main.cpp')
+          s=p.read_text()
+          if '8.01.02.6174-v2' in s:
+              raise SystemExit('already patched')
+          s=s.replace('''struct PatternSpec {\n    const char *name;\n    const uint8_t *bytes;\n    const uint8_t *mask;\n    size_t size;\n};''','''constexpr uint8_t kOnSwipeProcessPatternV2[] = {\n        0xff, 0x83, 0x04, 0xd1, 0xeb, 0x2b, 0x0a, 0x6d,\n        0xe9, 0x23, 0x0b, 0x6d, 0xfd, 0x7b, 0x0c, 0xa9,\n        0xfc, 0x6b, 0x00, 0xf9, 0xfa, 0x67, 0x0e, 0xa9,\n};\nconstexpr uint8_t kOnSwipeProcessMaskV2[] = {\n        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,\n        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,\n        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,\n};\n\nenum class SwipeProcessAbi : uint8_t { PointPointerV1, InlinePointFloatsV2 };\n\nstruct PatternSpec {\n    const char *name;\n    const uint8_t *bytes;\n    const uint8_t *mask;\n    size_t size;\n    SwipeProcessAbi abi;\n};''')
+          s=s.replace('''{"8.01.02.5459-v1", kOnSwipeProcessPatternV1, kOnSwipeProcessMaskV1,\n         sizeof(kOnSwipeProcessPatternV1)},''','''{"8.01.02.5459-v1", kOnSwipeProcessPatternV1, kOnSwipeProcessMaskV1,\n         sizeof(kOnSwipeProcessPatternV1), SwipeProcessAbi::PointPointerV1},\n        {"8.01.02.6174-v2", kOnSwipeProcessPatternV2, kOnSwipeProcessMaskV2,\n         sizeof(kOnSwipeProcessPatternV2), SwipeProcessAbi::InlinePointFloatsV2},''')
+          s=s.replace('using OnSwipeProcessFn = void (*)(void *, bool, uint32_t, const void *, float);','using OnSwipeProcessFnV1 = void (*)(void *, bool, uint32_t, const void *, float);\nusing OnSwipeProcessFnV2 = void (*)(void *, bool, uint32_t, float, float, float);')
+          s=s.replace('std::atomic<OnSwipeProcessFn> gOriginalOnSwipeProcess{nullptr};','std::atomic<OnSwipeProcessFnV1> gOriginalOnSwipeProcessV1{nullptr};\nstd::atomic<OnSwipeProcessFnV2> gOriginalOnSwipeProcessV2{nullptr};')
+          pat=re.compile(r'void onSwipeProcessHook\(void \*self, bool readyFinish, uint32_t side,\n\s*const void \*point, float horizontalDistancePx\) \{.*?\n\}',re.S)
+          m=pat.search(s)
+          if not m: raise SystemExit('hook function not found')
+          body=m.group(0)
+          inner=body[body.find('{')+1:-1]
+          inner=inner.replace('    ActiveHookCallGuard activeGuard;\n\n','',1)
+          inner=re.sub(r'\n    const OnSwipeProcessFn original = gOriginalOnSwipeProcess\.load\(std::memory_order_acquire\);\n    if \(original != nullptr\) \{\n        original\(self, readyFinish, side, point, effectiveDistancePx\);\n    \}\n?$', '\n    return effectiveDistancePx;\n', inner)
+          replacement='float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDistancePx) {'+inner+'}\n\nvoid onSwipeProcessHookV1(void *self, bool readyFinish, uint32_t side, const void *point, float horizontalDistancePx) {\n    ActiveHookCallGuard activeGuard;\n    const float effectiveDistancePx = gateHorizontalDistance(readyFinish, side, horizontalDistancePx);\n    const auto original = gOriginalOnSwipeProcessV1.load(std::memory_order_acquire);\n    if (original != nullptr) original(self, readyFinish, side, point, effectiveDistancePx);\n}\n\nvoid onSwipeProcessHookV2(void *self, bool readyFinish, uint32_t side, float horizontalDistancePx, float pointX, float pointY) {\n    ActiveHookCallGuard activeGuard;\n    const float effectiveDistancePx = gateHorizontalDistance(readyFinish, side, horizontalDistancePx);\n    const auto original = gOriginalOnSwipeProcessV2.load(std::memory_order_acquire);\n    if (original != nullptr) original(self, readyFinish, side, effectiveDistancePx, pointX, pointY);\n}'
+          s=s[:m.start()]+replacement+s[m.end():]
+          s=s.replace('reinterpret_cast<void *>(onSwipeProcessHook), &backup);','(pattern.abi == SwipeProcessAbi::InlinePointFloatsV2 ? reinterpret_cast<void *>(onSwipeProcessHookV2) : reinterpret_cast<void *>(onSwipeProcessHookV1)), &backup);')
+          s=re.sub(r'gOriginalOnSwipeProcess\.store\(reinterpret_cast<OnSwipeProcessFn>\(backup\),\s*std::memory_order_release\);','''gOriginalOnSwipeProcessV1.store(nullptr, std::memory_order_release);\n    gOriginalOnSwipeProcessV2.store(nullptr, std::memory_order_release);\n    if (pattern.abi == SwipeProcessAbi::InlinePointFloatsV2) gOriginalOnSwipeProcessV2.store(reinterpret_cast<OnSwipeProcessFnV2>(backup), std::memory_order_release);\n    else gOriginalOnSwipeProcessV1.store(reinterpret_cast<OnSwipeProcessFnV1>(backup), std::memory_order_release);''',s)
+          s=s.replace('gOriginalOnSwipeProcess.store(nullptr, std::memory_order_release);','gOriginalOnSwipeProcessV1.store(nullptr, std::memory_order_release);\n    gOriginalOnSwipeProcessV2.store(nullptr, std::memory_order_release);')
+          p.write_text(s)
+          PY
+          git diff --check
+          grep -q '8.01.02.6174-v2' native/src/main.cpp
+          grep -q 'onSwipeProcessHookV2' native/src/main.cpp
+      - name: Commit
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add native/src/main.cpp
+          git commit -m 'fix: support launcher 8.01.02.6174 native ABI'
+          git push origin HEAD:main
