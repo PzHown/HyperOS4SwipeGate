@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <time.h>
@@ -47,11 +48,12 @@ enum HookState : uint32_t {
 
 std::atomic_flag gStateLock = ATOMIC_FLAG_INIT;
 std::atomic<int64_t> gLastSyncAttemptMs{0};
+std::atomic<bool> gWorkerStarted{false};
 int gThresholdDp = -1;
 int gLogLevel = -1;
-HookState gHookState = kHookUnknown;
+HookState gHookState = kHookWaiting;
 std::string gPattern;
-std::string gDetail = "等待 Native Hook 状态";
+std::string gDetail = "Native 模块已加载，等待 native_init / Hook";
 std::string gAppLog;
 
 extern "C" int __real_clock_gettime(clockid_t clockId, struct timespec *tp);
@@ -319,13 +321,47 @@ void exchangeWithApp() {
     if (logLevelChanged) persistValue(kLogLevelFileName, logLevel);
 }
 
+void *controlWorkerMain(void *) {
+    while (isLauncherProcess()) {
+        swipegate_control_sync_if_due();
+        usleep(100 * 1000);
+    }
+    gWorkerStarted.store(false, std::memory_order_release);
+    return nullptr;
+}
+
+void startControlWorkerIfLauncher() {
+    if (!isLauncherProcess()) return;
+    bool expected = false;
+    if (!gWorkerStarted.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        return;
+    }
+
+    pthread_t thread{};
+    const int result = pthread_create(&thread, nullptr, controlWorkerMain, nullptr);
+    if (result != 0) {
+        gWorkerStarted.store(false, std::memory_order_release);
+        SpinGuard guard;
+        gHookState = kHookFailed;
+        gDetail = "Native control worker 启动失败 rc=" + std::to_string(result);
+        return;
+    }
+    pthread_detach(thread);
+}
+
 void resetAfterFork() {
     gStateLock.clear(std::memory_order_release);
     gLastSyncAttemptMs.store(0, std::memory_order_release);
+    gWorkerStarted.store(false, std::memory_order_release);
 }
 
 __attribute__((constructor)) void initializeControlChannel() {
     (void) pthread_atfork(nullptr, nullptr, resetAfterFork);
+    // LSPosed's HyperOS Runtime loader is observed on real devices loading the native module
+    // directly in the final com.miui.home child. Start the transport immediately from the ELF
+    // constructor in that case; do not wait for native_init, Hook callbacks or gesture traffic.
+    startControlWorkerIfLauncher();
 }
 
 }  // namespace
@@ -341,6 +377,7 @@ extern "C" int swipegate_control_log_level() {
 }
 
 extern "C" void swipegate_control_on_log(int, const char *text) {
+    startControlWorkerIfLauncher();
     {
         SpinGuard guard;
         updateHookStateLocked(text);
@@ -351,6 +388,8 @@ extern "C" void swipegate_control_on_log(int, const char *text) {
 
 extern "C" void swipegate_control_sync_if_due() {
     if (!isLauncherProcess()) return;
+    startControlWorkerIfLauncher();
+
     const int64_t now = monotonicMsRaw();
     if (now <= 0) return;
 
