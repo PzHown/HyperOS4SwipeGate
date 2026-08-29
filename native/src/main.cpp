@@ -69,26 +69,44 @@ constexpr uint8_t kOnSwipeProcessMaskV1[] = {
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 };
 
+constexpr uint8_t kOnSwipeProcessPatternV2[] = {
+        0xff, 0x83, 0x04, 0xd1, 0xeb, 0x2b, 0x0a, 0x6d,
+        0xe9, 0x23, 0x0b, 0x6d, 0xfd, 0x7b, 0x0c, 0xa9,
+        0xfc, 0x6b, 0x00, 0xf9, 0xfa, 0x67, 0x0e, 0xa9,
+};
+constexpr uint8_t kOnSwipeProcessMaskV2[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+};
+
+enum class SwipeProcessAbi : uint8_t { PointPointerV1, InlinePointFloatsV2 };
+
 struct PatternSpec {
     const char *name;
     const uint8_t *bytes;
     const uint8_t *mask;
     size_t size;
+    SwipeProcessAbi abi;
 };
 
 constexpr PatternSpec kOnSwipeProcessPatterns[] = {
         {"8.01.02.5459-v1", kOnSwipeProcessPatternV1, kOnSwipeProcessMaskV1,
-         sizeof(kOnSwipeProcessPatternV1)},
+         sizeof(kOnSwipeProcessPatternV1), SwipeProcessAbi::PointPointerV1},
+        {"8.01.02.6174-v2", kOnSwipeProcessPatternV2, kOnSwipeProcessMaskV2,
+         sizeof(kOnSwipeProcessPatternV2), SwipeProcessAbi::InlinePointFloatsV2},
 };
 
 static_assert(sizeof(kOnSwipeProcessPatternV1) == sizeof(kOnSwipeProcessMaskV1));
 static_assert(sizeof(kOnSwipeProcessPatternV1) >= kHookProbeSize);
 
-using OnSwipeProcessFn = void (*)(void *, bool, uint32_t, const void *, float);
+using OnSwipeProcessFnV1 = void (*)(void *, bool, uint32_t, const void *, float);
+using OnSwipeProcessFnV2 = void (*)(void *, bool, uint32_t, float, float, float);
 
 HookFunType gHookFunction = nullptr;
 UnhookFunType gUnhookFunction = nullptr;
-std::atomic<OnSwipeProcessFn> gOriginalOnSwipeProcess{nullptr};
+std::atomic<OnSwipeProcessFnV1> gOriginalOnSwipeProcessV1{nullptr};
+std::atomic<OnSwipeProcessFnV2> gOriginalOnSwipeProcessV2{nullptr};
 
 std::atomic<bool> gWorkerStarted{false};
 std::atomic<bool> gHookInstalled{false};
@@ -392,10 +410,7 @@ struct ActiveHookCallGuard {
     }
 };
 
-void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
-                        const void *point, float horizontalDistancePx) {
-    ActiveHookCallGuard activeGuard;
-
+float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDistancePx) {
     const int configuredDp = readThresholdDp();
     const int effectiveDp = configuredDp == 0
             ? kStockBoundaryDp
@@ -437,10 +452,21 @@ void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
                 static_cast<unsigned long long>(gRepairCount.load(std::memory_order_relaxed)));
     }
 
-    const OnSwipeProcessFn original = gOriginalOnSwipeProcess.load(std::memory_order_acquire);
-    if (original != nullptr) {
-        original(self, readyFinish, side, point, effectiveDistancePx);
-    }
+    return effectiveDistancePx;
+}
+
+void onSwipeProcessHookV1(void *self, bool readyFinish, uint32_t side, const void *point, float horizontalDistancePx) {
+    ActiveHookCallGuard activeGuard;
+    const float effectiveDistancePx = gateHorizontalDistance(readyFinish, side, horizontalDistancePx);
+    const auto original = gOriginalOnSwipeProcessV1.load(std::memory_order_acquire);
+    if (original != nullptr) original(self, readyFinish, side, point, effectiveDistancePx);
+}
+
+void onSwipeProcessHookV2(void *self, bool readyFinish, uint32_t side, float horizontalDistancePx, float pointX, float pointY) {
+    ActiveHookCallGuard activeGuard;
+    const float effectiveDistancePx = gateHorizontalDistance(readyFinish, side, horizontalDistancePx);
+    const auto original = gOriginalOnSwipeProcessV2.load(std::memory_order_acquire);
+    if (original != nullptr) original(self, readyFinish, side, effectiveDistancePx, pointX, pointY);
 }
 
 bool waitForHookIdle() {
@@ -471,7 +497,7 @@ bool installFreshHookLocked(const LibraryInfo &library, uintptr_t target,
 
     void *backup = nullptr;
     const int rc = gHookFunction(reinterpret_cast<void *>(target),
-                                 reinterpret_cast<void *>(onSwipeProcessHook), &backup);
+                                 (pattern.abi == SwipeProcessAbi::InlinePointFloatsV2 ? reinterpret_cast<void *>(onSwipeProcessHookV2) : reinterpret_cast<void *>(onSwipeProcessHookV1)), &backup);
     if (rc != 0 || backup == nullptr) {
         gHookInstalled.store(false, std::memory_order_release);
         logLine(ANDROID_LOG_ERROR,
@@ -489,8 +515,10 @@ bool installFreshHookLocked(const LibraryInfo &library, uintptr_t target,
         return false;
     }
 
-    gOriginalOnSwipeProcess.store(reinterpret_cast<OnSwipeProcessFn>(backup),
-                                  std::memory_order_release);
+    gOriginalOnSwipeProcessV1.store(nullptr, std::memory_order_release);
+    gOriginalOnSwipeProcessV2.store(nullptr, std::memory_order_release);
+    if (pattern.abi == SwipeProcessAbi::InlinePointFloatsV2) gOriginalOnSwipeProcessV2.store(reinterpret_cast<OnSwipeProcessFnV2>(backup), std::memory_order_release);
+    else gOriginalOnSwipeProcessV1.store(reinterpret_cast<OnSwipeProcessFnV1>(backup), std::memory_order_release);
     gInstalledPatchHead = patchedHead;
     gInstalledPatchHeadReady = true;
     gHookedBase.store(library.base, std::memory_order_release);
@@ -546,7 +574,8 @@ bool repairRestoredHookLocked(const LibraryInfo &library, uintptr_t target, cons
         return false;
     }
 
-    gOriginalOnSwipeProcess.store(nullptr, std::memory_order_release);
+    gOriginalOnSwipeProcessV1.store(nullptr, std::memory_order_release);
+    gOriginalOnSwipeProcessV2.store(nullptr, std::memory_order_release);
     const int unhookRc = gUnhookFunction(reinterpret_cast<void *>(target));
 
     std::array<uint8_t, kHookProbeSize> afterUnhook{};
@@ -606,7 +635,8 @@ void resetTrackedHookForRemapLocked(uintptr_t newBase) {
                 reinterpret_cast<void *>(oldBase), reinterpret_cast<void *>(oldTarget),
                 reinterpret_cast<void *>(newBase));
     }
-    gOriginalOnSwipeProcess.store(nullptr, std::memory_order_release);
+    gOriginalOnSwipeProcessV1.store(nullptr, std::memory_order_release);
+    gOriginalOnSwipeProcessV2.store(nullptr, std::memory_order_release);
     gHookedBase.store(0, std::memory_order_release);
     gHookedTarget.store(0, std::memory_order_release);
     gInstalledPatchHeadReady = false;
