@@ -22,8 +22,7 @@ public final class ConfigBridge {
     public static final int LOG_LEVEL_COMPACT = 1;
     public static final int LOG_LEVEL_DETAILED = 2;
     public static final int DEFAULT_LOG_LEVEL = LOG_LEVEL_OFF;
-    // 0.5.0 release gate: keep compact/detailed code available but force persistence off.
-    public static final boolean LOG_RECORDING_OPTIONS_ENABLED = false;
+    public static final boolean LOG_RECORDING_OPTIONS_ENABLED = true;
 
     public static final String REMOTE_PREF_GROUP = "swipegate";
     public static final String REMOTE_PREF_KEY_THRESHOLD_DP = "threshold_dp";
@@ -33,7 +32,8 @@ public final class ConfigBridge {
     public static final String NATIVE_CONFIG_FILE = "hyperos4swipegate_config";
     public static final String NATIVE_LOG_LEVEL_FILE = "hyperos4swipegate_log_level";
 
-    // Legacy migration fallback only. New builds use libxposed RemotePreferences.
+    // Legacy migration fallback only. Live configuration is now exchanged directly with the native
+    // HyperOS Runtime child and persisted by native code into Launcher cache.
     public static final String SYSTEM_PROPERTY = "persist.hyperos4swipegate.threshold_dp";
     public static final String LEGACY_SYSTEM_PROPERTY_PX = "persist.hyperos4swipegate.threshold_px";
     public static final String LEGACY_SYSTEM_PROPERTY_EXTRA_DP = "persist.hyperos4swipegate.extra_dp";
@@ -62,8 +62,24 @@ public final class ConfigBridge {
     public static void applyThresholdDpAsync(Context context, int thresholdDp, Callback callback) {
         Context app = context.getApplicationContext();
         int safeValue = Math.max(STOCK_THRESHOLD_DP, Math.min(MAX_THRESHOLD_DP, thresholdDp));
+
+        // Local preferences are the authoritative App-side configuration. NativeControlBridge sends
+        // this value directly to the Launcher child on the next heartbeat/gesture and native code
+        // persists it into Launcher cache for subsequent restarts.
+        localPreferences(app).edit().putInt(PREF_KEY_THRESHOLD_DP, safeValue).apply();
+        NativeControlBridge.initialize(app);
+
         EXECUTOR.execute(() -> {
-            Result result = XposedServiceBridge.applyThresholdDp(app, safeValue);
+            // Keep RemotePreferences mirrored as a compatibility aid for ordinary Java targets, but
+            // never fail the setting operation when HyperOS Runtime omits the Java module entry.
+            try {
+                XposedServiceBridge.applyThresholdDp(app, safeValue);
+            } catch (Throwable ignored) {
+            }
+            String message = NativeControlBridge.hasFreshPeer()
+                    ? "ok"
+                    : "已保存，Native 将在下一次桌面侧滑/心跳同步";
+            Result result = new Result(true, safeValue, message);
             MAIN.post(() -> callback.onResult(result));
         });
     }
@@ -71,8 +87,19 @@ public final class ConfigBridge {
     public static void applyLogLevelAsync(Context context, int logLevel, Callback callback) {
         Context app = context.getApplicationContext();
         int safeValue = sanitizeLogLevel(logLevel);
+        localPreferences(app).edit().putInt(PREF_KEY_LOG_LEVEL, safeValue).apply();
+        NativeControlBridge.initialize(app);
+        NativeControlBridge.clearLog();
+
         EXECUTOR.execute(() -> {
-            Result result = XposedServiceBridge.applyLogLevel(app, safeValue);
+            try {
+                XposedServiceBridge.applyLogLevel(app, safeValue);
+            } catch (Throwable ignored) {
+            }
+            String message = NativeControlBridge.hasFreshPeer()
+                    ? "ok"
+                    : "已保存，Native 将在下一次桌面侧滑/心跳同步";
+            Result result = new Result(true, safeValue, message);
             MAIN.post(() -> callback.onResult(result));
         });
     }

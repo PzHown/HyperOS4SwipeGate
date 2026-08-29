@@ -22,6 +22,9 @@ public final class DiagnosticsCollector {
         out.append("stockSidebarBoundary=88dp\n\n");
 
         XposedServiceBridge.Snapshot snapshot = XposedServiceBridge.snapshot(context);
+        DiagnosticsStreamBridge.NativeHookStatus nativeHook =
+                DiagnosticsStreamBridge.nativeHookStatus();
+
         out.append("[LSPosed service]\n");
         out.append("connected=").append(snapshot.serviceConnected()).append('\n');
         if (snapshot.serviceConnected()) {
@@ -60,12 +63,15 @@ public final class DiagnosticsCollector {
         out.append("rootRequired=false\n");
 
         out.append("\n[native hook]\n");
-        if (snapshot.launcherLoaded()) {
-            out.append("HYOS activation evidence is present.\n");
-            out.append("Native Pattern/HOOK_HEALTH is a separate readiness check.\n");
-        } else {
-            out.append("No HYOS activation evidence is currently available.\n");
+        out.append("state=").append(nativeHook.state()).append('\n');
+        out.append("fresh=").append(nativeHook.fresh()).append('\n');
+        if (!nativeHook.pattern().isBlank()) {
+            out.append("pattern=").append(nativeHook.pattern()).append('\n');
         }
+        if (!nativeHook.detail().isBlank()) {
+            out.append("detail=").append(nativeHook.detail()).append('\n');
+        }
+        out.append("activeRequiresFreshHealthy=true\n");
         out.append("The app does not use su for activation or logcat detection.\n");
         return out.toString();
     }

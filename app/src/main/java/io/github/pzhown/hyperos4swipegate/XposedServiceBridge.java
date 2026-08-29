@@ -292,19 +292,40 @@ public final class XposedServiceBridge {
             boolean directRuntimeTarget = matchedTarget != null;
 
             // Some HYOS-enabled LSPosed builds do not expose a native-only child as a Java-style
-            // running target. In that case do not report a hard false negative merely because
-            // processName != com.miui.home. Scope + the Xiaomi HYOS runtime is treated as module
-            // activation evidence, while native Pattern/HOOK_HEALTH remains a separate health check.
+            // running target. Scope + the Xiaomi HYOS runtime is still valid activation evidence,
+            // but it is no longer sufficient for a green/active UI state. Native Hook health must
+            // independently arrive through DiagnosticsStreamBridge.
             boolean hyosActivationFallback = !directRuntimeTarget
                     && api >= XposedService.API_102
                     && launcherInScope
                     && hyosSpawnerPresent;
 
             boolean launcherLoaded = directRuntimeTarget || hyosActivationFallback;
-            String targetState = directRuntimeTarget
+            String frameworkTargetState = directRuntimeTarget
                     ? matchedTarget.getState().name()
                     : (hyosActivationFallback ? "UP_TO_DATE" : "");
             int targetPid = directRuntimeTarget ? matchedTarget.getPid() : 0;
+
+            DiagnosticsStreamBridge.NativeHookStatus nativeHookStatus =
+                    DiagnosticsStreamBridge.nativeHookStatus();
+            String targetState = frameworkTargetState;
+            if (launcherLoaded) {
+                if ("FAILED".equals(frameworkTargetState)) {
+                    targetState = "FAILED";
+                } else if ("RELOADING".equals(frameworkTargetState)) {
+                    targetState = "RELOADING";
+                } else if (!nativeHookStatus.fresh()) {
+                    // Strict readiness: activation/scope alone must never become Active.
+                    targetState = "RELOADING";
+                } else {
+                    targetState = switch (nativeHookStatus.state()) {
+                        case "HEALTHY" -> frameworkTargetState;
+                        case "FAILED" -> "FAILED";
+                        case "REPAIRING", "WAITING", "UNKNOWN" -> "RELOADING";
+                        default -> "RELOADING";
+                    };
+                }
+            }
 
             runtimeEvidence = "hyosSpawnerPresent=" + hyosSpawnerPresent
                     + " launcherUid=" + launcherUid
@@ -313,6 +334,10 @@ public final class XposedServiceBridge {
                     + " activation=" + (directRuntimeTarget
                     ? "running-target"
                     : (hyosActivationFallback ? "scope+hyos-fallback" : "none"))
+                    + " nativeHookState=" + nativeHookStatus.state()
+                    + " nativeHookFresh=" + nativeHookStatus.fresh()
+                    + " nativeHookPattern=" + nativeHookStatus.pattern()
+                    + " nativeHookDetail=" + nativeHookStatus.detail()
                     + " targets=[" + targetDump + "]";
 
             serviceError = "";

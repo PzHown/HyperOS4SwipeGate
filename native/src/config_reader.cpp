@@ -1,3 +1,5 @@
+#include "control_channel.h"
+
 #include <fcntl.h>
 #include <sys/system_properties.h>
 #include <sys/types.h>
@@ -12,6 +14,7 @@ namespace {
 
 constexpr const char *kThresholdDpProperty = "persist.hyperos4swipegate.threshold_dp";
 constexpr const char *kConfigFileName = "hyperos4swipegate_config";
+constexpr int kMinThresholdDp = 88;
 constexpr int kMaxThresholdDp = 300;
 constexpr int kAndroidUserOffset = 100000;
 
@@ -34,7 +37,7 @@ bool readThresholdFile(const char *path, int *outValue) {
     const long parsed = std::strtol(start, &end, 10);
     if (errno != 0 || end == start) return false;
     while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') ++end;
-    if (*end != '\0' || parsed < 0 || parsed > kMaxThresholdDp) return false;
+    if (*end != '\0' || parsed < kMinThresholdDp || parsed > kMaxThresholdDp) return false;
 
     *outValue = static_cast<int>(parsed);
     return true;
@@ -66,6 +69,16 @@ extern "C" int __real___system_property_get(const char *name, char *value);
 
 extern "C" int __wrap___system_property_get(const char *name, char *value) {
     if (name != nullptr && value != nullptr && std::strcmp(name, kThresholdDpProperty) == 0) {
+        // The app-facing Java module entry is not available in HyperOS Runtime children. Pull the
+        // latest value directly from the SwipeGate app whenever its local control endpoint is
+        // reachable, then fall back to the value persisted by the native bridge in Launcher cache.
+        swipegate_control_sync_if_due();
+        const int liveThresholdDp = swipegate_control_threshold_dp();
+        if (liveThresholdDp >= kMinThresholdDp && liveThresholdDp <= kMaxThresholdDp) {
+            const int written = std::snprintf(value, PROP_VALUE_MAX, "%d", liveThresholdDp);
+            return written > 0 ? written : 0;
+        }
+
         int thresholdDp = 0;
         if (readRootlessThreshold(&thresholdDp)) {
             const int written = std::snprintf(value, PROP_VALUE_MAX, "%d", thresholdDp);

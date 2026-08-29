@@ -33,6 +33,7 @@ public final class ModuleMain extends XposedModule {
     private static final int MAX_SOURCE_LOG_BYTES = 512 * 1024;
     private static final int RETAIN_SOURCE_LOG_BYTES = 256 * 1024;
     private static final long LOG_MIRROR_INTERVAL_MS = 1000L;
+    private static final long HOOK_STATUS_HEARTBEAT_MS = 1500L;
 
     private SharedPreferences remotePreferences;
     private SharedPreferences.OnSharedPreferenceChangeListener preferenceListener;
@@ -48,6 +49,12 @@ public final class ModuleMain extends XposedModule {
     private volatile long lastMirroredModified = -1L;
     private volatile String lastMirroredPath = "";
     private volatile String lastMirrorError = "";
+
+    private volatile String hookState = "UNKNOWN";
+    private volatile String hookPattern = "";
+    private volatile String hookDetail = "等待 Native Hook 状态";
+    private volatile String lastHookStatusPayload = "";
+    private volatile long lastHookStatusSentAtMs;
 
     @Override
     public void onModuleLoaded(@NonNull XposedModuleInterface.ModuleLoadedParam param) {
@@ -124,9 +131,8 @@ public final class ModuleMain extends XposedModule {
         currentLogLevel = logLevel;
         int successes = writeValueFiles(logLevelFiles, logLevel);
 
-        if (logLevel == ConfigBridge.LOG_LEVEL_OFF) {
-            purgeNativeLogs();
-        }
+        // Do not purge here. The worker first consumes Native hook state from the transient file,
+        // then removes it when user-facing logging is disabled.
         resetMirrorSnapshot();
 
         log(android.util.Log.INFO, "HyperOS4SwipeGateJava",
@@ -176,6 +182,8 @@ public final class ModuleMain extends XposedModule {
         diagnosticsPort = nextPort;
         diagnosticsToken = nextToken;
         resetMirrorSnapshot();
+        lastHookStatusPayload = "";
+        lastHookStatusSentAtMs = 0L;
     }
 
     private void resetMirrorSnapshot() {
@@ -195,39 +203,46 @@ public final class ModuleMain extends XposedModule {
     private void nativeLogMirrorLoop() {
         while (true) {
             try {
+                File source = findNativeLogFile();
+                if (source != null) {
+                    trimNativeLogIfNeeded(source);
+                    updateHookStatusFromLog(source);
+                }
+
+                sendHookStatusIfNeeded();
+
                 if (currentLogLevel <= ConfigBridge.LOG_LEVEL_OFF) {
+                    // Hook readiness is cached in memory and sent as a tiny heartbeat. Keep the
+                    // existing "logging off" promise by deleting the transient source afterwards.
                     purgeNativeLogs();
+                    resetMirrorSnapshot();
                     Thread.sleep(LOG_MIRROR_INTERVAL_MS);
                     continue;
                 }
 
-                File source = findNativeLogFile();
-                if (source != null) {
-                    trimNativeLogIfNeeded(source);
-                    if (diagnosticsPort > 0 && !diagnosticsToken.isBlank()) {
-                        long length = source.length();
-                        long modified = source.lastModified();
-                        String path = source.getAbsolutePath();
-                        if (length != lastMirroredLength
-                                || modified != lastMirroredModified
-                                || !path.equals(lastMirroredPath)) {
-                            try {
-                                sendNativeLog(source, currentLogLevel);
-                            } catch (Throwable t) {
-                                String message = t.getClass().getSimpleName() + ": "
-                                        + (t.getMessage() == null ? "" : t.getMessage());
-                                if (!message.equals(lastMirrorError)) {
-                                    lastMirrorError = message;
-                                    log(android.util.Log.WARN, "HyperOS4SwipeGateJava",
-                                            "Native log stream failed: " + message);
-                                }
-                            } finally {
-                                // Do not reconnect to a stale app endpoint every second. A log change
-                                // or a newly published endpoint will make the snapshot eligible again.
-                                lastMirroredLength = source.length();
-                                lastMirroredModified = source.lastModified();
-                                lastMirroredPath = path;
+                if (source != null && diagnosticsPort > 0 && !diagnosticsToken.isBlank()) {
+                    long length = source.length();
+                    long modified = source.lastModified();
+                    String path = source.getAbsolutePath();
+                    if (length != lastMirroredLength
+                            || modified != lastMirroredModified
+                            || !path.equals(lastMirroredPath)) {
+                        try {
+                            sendNativeLog(source, currentLogLevel);
+                        } catch (Throwable t) {
+                            String message = t.getClass().getSimpleName() + ": "
+                                    + (t.getMessage() == null ? "" : t.getMessage());
+                            if (!message.equals(lastMirrorError)) {
+                                lastMirrorError = message;
+                                log(android.util.Log.WARN, "HyperOS4SwipeGateJava",
+                                        "Native log stream failed: " + message);
                             }
+                        } finally {
+                            // Do not reconnect to a stale app endpoint every second. A log change
+                            // or a newly published endpoint will make the snapshot eligible again.
+                            lastMirroredLength = source.length();
+                            lastMirroredModified = source.lastModified();
+                            lastMirroredPath = path;
                         }
                     }
                 }
@@ -251,6 +266,129 @@ public final class ModuleMain extends XposedModule {
                 }
             }
         }
+    }
+
+    private void updateHookStatusFromLog(File source) throws Exception {
+        byte[] bytes;
+        try (RandomAccessFile input = new RandomAccessFile(source, "r")) {
+            long length = input.length();
+            long start = Math.max(0L, length - MAX_STREAM_LOG_BYTES);
+            input.seek(start);
+            bytes = new byte[(int) (length - start)];
+            input.readFully(bytes);
+        }
+
+        String text = new String(bytes, StandardCharsets.UTF_8);
+        String[] lines = text.split("\\R");
+        for (String line : lines) {
+            if (line.isBlank()) continue;
+            applyHookStatusLine(line);
+        }
+    }
+
+    private void applyHookStatusLine(String line) {
+        if (line.contains("DP_GATE native_init accepted")) {
+            setHookStatus("WAITING", "", "Native 模块已加载，等待目标库与 Hook");
+            return;
+        }
+        if (line.contains("HOOK_HEALTH launcher mapping changed")) {
+            setHookStatus("WAITING", hookPattern, "系统桌面映射已变化，正在重新定位目标函数");
+            return;
+        }
+        if (line.contains("HOOK_HEALTH libapp_launcher.so absent")) {
+            setHookStatus("WAITING", hookPattern, "等待系统桌面目标库 libapp_launcher.so");
+            return;
+        }
+        if (line.contains("HOOK_SCAN resolved")) {
+            String pattern = extractField(line, "pattern=");
+            setHookStatus("WAITING", pattern, "已定位目标函数，等待安装 Hook");
+            return;
+        }
+        if (line.contains("HOOK_HEALTH original bytes restored")
+                || line.contains("starting unhook+rehook repair")
+                || line.contains("HOOK_HEALTH repair deferred")) {
+            setHookStatus("REPAIRING", extractPatternOrCurrent(line), "Hook 被恢复，正在修复");
+            return;
+        }
+        if (line.contains("DP_GATE hook installed")
+                || line.contains("HOOK_HEALTH healthy ")
+                || line.contains("HOOK_HEALTH repaired successfully")
+                || line.contains("DP_GATE rawDx=")) {
+            String pattern = extractPatternOrCurrent(line);
+            setHookStatus("HEALTHY", pattern, "目标函数 Hook 健康");
+            return;
+        }
+        if (line.contains("HOOK_SCAN install refused")) {
+            setHookStatus("FAILED", hookPattern, "未匹配到唯一的 on_swipe_process 目标函数");
+            return;
+        }
+        if (line.contains("HOOK_SCAN pattern changed before hook")) {
+            setHookStatus("FAILED", extractPatternOrCurrent(line), "目标函数特征在安装前发生变化");
+            return;
+        }
+        if (line.contains("DP_GATE hook_func failed")) {
+            setHookStatus("FAILED", extractPatternOrCurrent(line), "LSPosed hook_func 安装失败");
+            return;
+        }
+        if (line.contains("hook_func returned success but entry is not patched")) {
+            setHookStatus("FAILED", hookPattern, "Hook 返回成功，但目标函数入口未被修改");
+            return;
+        }
+        if (line.contains("HOOK_HEALTH foreign patch detected")) {
+            setHookStatus("FAILED", extractPatternOrCurrent(line), "目标函数被其他 Hook 修改，已拒绝不安全修复");
+            return;
+        }
+        if (line.contains("HOOK_HEALTH repair unavailable")
+                || line.contains("HOOK_HEALTH repair failed")
+                || line.contains("HOOK_HEALTH repair aborted")) {
+            setHookStatus("FAILED", extractPatternOrCurrent(line), "Native Hook 自动修复失败");
+        }
+    }
+
+    private String extractPatternOrCurrent(String line) {
+        String pattern = extractField(line, "pattern=");
+        return pattern.isBlank() ? hookPattern : pattern;
+    }
+
+    private String extractField(String line, String key) {
+        int start = line.indexOf(key);
+        if (start < 0) return "";
+        start += key.length();
+        int end = line.indexOf(' ', start);
+        if (end < 0) end = line.length();
+        if (start >= end) return "";
+        return line.substring(start, end).trim();
+    }
+
+    private void setHookStatus(String state, String pattern, String detail) {
+        hookState = state == null || state.isBlank() ? "UNKNOWN" : state;
+        if (pattern != null && !pattern.isBlank() && !"<none>".equals(pattern)) {
+            hookPattern = pattern;
+        }
+        hookDetail = detail == null ? "" : detail;
+    }
+
+    private void sendHookStatusIfNeeded() throws Exception {
+        if (diagnosticsPort <= 0 || diagnosticsToken.isBlank()) return;
+
+        String payload = DiagnosticsStreamBridge.HOOK_STATUS_PREFIX
+                + "\t" + sanitizeStatusField(hookState)
+                + "\t" + sanitizeStatusField(hookPattern)
+                + "\t" + sanitizeStatusField(hookDetail);
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (payload.equals(lastHookStatusPayload)
+                && now - lastHookStatusSentAtMs < HOOK_STATUS_HEARTBEAT_MS) {
+            return;
+        }
+
+        sendPayload(payload.getBytes(StandardCharsets.UTF_8));
+        lastHookStatusPayload = payload;
+        lastHookStatusSentAtMs = now;
+    }
+
+    private String sanitizeStatusField(String value) {
+        if (value == null) return "";
+        return value.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ').trim();
     }
 
     private void purgeNativeLogs() {
@@ -330,8 +468,11 @@ public final class ModuleMain extends XposedModule {
                     .getBytes(StandardCharsets.UTF_8));
         }
         payload.write(text.getBytes(StandardCharsets.UTF_8));
-        byte[] data = payload.toByteArray();
+        sendPayload(payload.toByteArray());
+        lastMirrorError = "";
+    }
 
+    private void sendPayload(byte[] data) throws Exception {
         try (Socket socket = new Socket()) {
             socket.connect(
                     new InetSocketAddress(InetAddress.getLoopbackAddress(), diagnosticsPort),
@@ -344,7 +485,6 @@ public final class ModuleMain extends XposedModule {
                 output.flush();
             }
         }
-        lastMirrorError = "";
     }
 
     private String compactLog(String text) {

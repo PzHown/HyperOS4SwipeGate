@@ -145,14 +145,26 @@ jobs:
 
       - name: Verify LSPosed API102 packaging
         run: |
-          unzip -p "$APK_PATH" META-INF/xposed/java_init.list | grep -qx 'io.github.pzhown.hyperos4swipegate.ModuleMain'
-          unzip -p "$APK_PATH" META-INF/xposed/native_init.list | grep -qx 'libhyperos4swipegate.so'
+          JAVA_ENTRIES="$(unzip -p "$APK_PATH" META-INF/xposed/java_init.list)"
+          printf '%s\n' "$JAVA_ENTRIES" | grep -qx 'io.github.pzhown.hyperos4swipegate.ModuleMain'
+          printf '%s\n' "$JAVA_ENTRIES" | grep -qx 'io.github.pzhown.hyperos4swipegate.NativeErrorReporter'
+          printf '%s\n' "$JAVA_ENTRIES" | grep -qx 'io.github.pzhown.hyperos4swipegate.SystemUiBridgeModule'
+          test "$(printf '%s\n' "$JAVA_ENTRIES" | grep -cve '^$')" -eq 3
+
+          NATIVE_ENTRIES="$(unzip -p "$APK_PATH" META-INF/xposed/native_init.list)"
+          printf '%s\n' "$NATIVE_ENTRIES" | grep -qx 'libhyperos4swipegate.so'
+          test "$(printf '%s\n' "$NATIVE_ENTRIES" | grep -cve '^$')" -eq 1
+
           unzip -p "$APK_PATH" META-INF/xposed/module.prop | tee module.prop
           grep -qx 'minApiVersion=102' module.prop
           grep -qx 'targetApiVersion=102' module.prop
           grep -qx 'staticScope=true' module.prop
-          unzip -p "$APK_PATH" META-INF/xposed/scope.list | grep -qx 'com.miui.home'
-          test "$(unzip -p "$APK_PATH" META-INF/xposed/scope.list | grep -cve '^$')" -eq 1
+
+          SCOPES="$(unzip -p "$APK_PATH" META-INF/xposed/scope.list)"
+          printf '%s\n' "$SCOPES" | grep -qx 'com.miui.home'
+          printf '%s\n' "$SCOPES" | grep -qx 'com.android.systemui'
+          test "$(printf '%s\n' "$SCOPES" | grep -cve '^$')" -eq 2
+
           unzip -l "$APK_PATH" | grep -q 'lib/arm64-v8a/libhyperos4swipegate.so'
 
       - name: Verify native entry and 16 KB ELF alignment
@@ -225,7 +237,7 @@ jobs:
             dist/SwipeGate-release.apk \
             --target "$GITHUB_SHA" \
             --title "SwipeGate v${VERSION_NAME}" \
-            --notes "Signed Release build from the main branch. Tested on RELEASE-8.01.02.5459-260807-08242024-R and RELEASE-8.01.02.6174-260818-08281208-R. Sidebar hold threshold range: 88-300 dp."
+            --notes "SwipeGate v${VERSION_NAME}: LSPosed API 102 native_init for HyperOS 4 Launcher 8.0+. Adds Launcher 8.01.02.6174 compatibility, HyOS Runtime private-broadcast control/status transport through SystemUI, configurable 88-300 dp sidebar threshold, selectable native log levels, and stricter native hook health reporting."
 
       - name: Publish LSPosed prerelease
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -239,7 +251,7 @@ jobs:
           fi
 
           gh auth status
-          RELEASE_NOTES="Signed SwipeGate v${VERSION_NAME} prerelease. LSPosed API 102 native_init. Supports HyperOS 4 Launcher 8.0+, including RELEASE-8.01.02.5459-260807-08242024-R and RELEASE-8.01.02.6174-260818-08281208-R. Sidebar hold threshold range: 88-300 dp."
+          RELEASE_NOTES="SwipeGate v${VERSION_NAME} prerelease. LSPosed API 102 native_init for HyperOS 4 Launcher 8.0+. Adds Launcher 8.01.02.6174 compatibility, HyOS Runtime private-broadcast control/status transport through SystemUI, configurable 88-300 dp sidebar threshold, selectable native log levels, and stricter native hook health reporting."
 
           if gh release view "$RELEASE_TAG" --repo "$LSPOSED_REPO" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" \

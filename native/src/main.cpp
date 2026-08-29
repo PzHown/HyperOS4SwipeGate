@@ -163,8 +163,21 @@ std::string readProcessName() {
     return readSmallFile("/proc/self/cmdline", 256);
 }
 
+// LSPosed initializes HyperOS native modules in the root hyos_spawner before
+// the launcher child is specialized. At that stage /proc/self/cmdline is commonly
+// `usap64`, not com.miui.home. Keep executable identity as the hard injection
+// boundary and only require the launcher cmdline for child-only work such as the
+// watchdog thread.
+bool isLauncherProcess() {
+    return readProcessName() == kTargetPackage;
+}
+
+bool isHyosSpawnerProcessFamily() {
+    return readExecutable() == kSpawnerPath;
+}
+
 bool isTargetProcess() {
-    return readExecutable() == kSpawnerPath && readProcessName() == kTargetPackage;
+    return isHyosSpawnerProcessFamily() && isLauncherProcess();
 }
 
 void fileLog(const char *message) {
@@ -455,8 +468,14 @@ float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDi
     return effectiveDistancePx;
 }
 
+void ensureWorkerStarted();
+
 void onSwipeProcessHookV1(void *self, bool readyFinish, uint32_t side, const void *point, float horizontalDistancePx) {
     ActiveHookCallGuard activeGuard;
+    // The inline hook can be inherited from the root spawner. Start the child-only
+    // watchdog lazily on the first real launcher invocation if no loader callback
+    // was delivered after specialization.
+    if (isLauncherProcess()) ensureWorkerStarted();
     const float effectiveDistancePx = gateHorizontalDistance(readyFinish, side, horizontalDistancePx);
     const auto original = gOriginalOnSwipeProcessV1.load(std::memory_order_acquire);
     if (original != nullptr) original(self, readyFinish, side, point, effectiveDistancePx);
@@ -464,6 +483,7 @@ void onSwipeProcessHookV1(void *self, bool readyFinish, uint32_t side, const voi
 
 void onSwipeProcessHookV2(void *self, bool readyFinish, uint32_t side, float horizontalDistancePx, float pointX, float pointY) {
     ActiveHookCallGuard activeGuard;
+    if (isLauncherProcess()) ensureWorkerStarted();
     const float effectiveDistancePx = gateHorizontalDistance(readyFinish, side, horizontalDistancePx);
     const auto original = gOriginalOnSwipeProcessV2.load(std::memory_order_acquire);
     if (original != nullptr) original(self, readyFinish, side, effectiveDistancePx, pointX, pointY);
@@ -696,7 +716,8 @@ bool ensureHookLocked(const LibraryInfo &library, const char *source) {
     }
 
     const int64_t now = monotonicMs();
-    const bool forceScan = std::strcmp(source, "loader-callback") == 0;
+    const bool forceScan = std::strcmp(source, "loader-callback") == 0
+            || std::strcmp(source, "native-init-backfill") == 0;
     const int64_t lastScan = gLastPatternScanMs.load(std::memory_order_relaxed);
     if (!forceScan && now - lastScan < kPatternRescanIntervalMs) return false;
     gLastPatternScanMs.store(now, std::memory_order_relaxed);
@@ -759,11 +780,12 @@ void ensureWorkerStarted() {
 }
 
 void onLibraryLoaded(const char *name, void *) {
-    if (!isTargetProcess() || name == nullptr) return;
+    if (!isHyosSpawnerProcessFamily() || name == nullptr) return;
     if (std::strstr(name, kTargetLibrary) != nullptr) {
         const LibraryInfo library = findLauncherLibrary();
         if (library.base != 0) {
             ensureHook(library, "loader-callback");
+            if (isLauncherProcess()) ensureWorkerStarted();
         }
     }
 }
@@ -772,17 +794,65 @@ void onLibraryLoaded(const char *name, void *) {
 
 extern "C" __attribute__((visibility("default"), used))
 NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
-    if (entries == nullptr || entries->hook_func == nullptr || !isTargetProcess()) {
+    const std::string executable = readExecutable();
+    const std::string processName = readProcessName();
+    const bool entriesReady = entries != nullptr;
+    const bool hookReady = entriesReady && entries->hook_func != nullptr;
+    const bool hyosProcess = executable == kSpawnerPath;
+    const bool launcherProcess = processName == kTargetPackage;
+
+    // Always emit the preflight result before any rejection. This is intentionally
+    // independent from the app-side log recording level so LSPosed exports can
+    // distinguish lifecycle rejection from Pattern/ABI failures.
+    __android_log_print(
+            ANDROID_LOG_INFO, kTag,
+            "DP_GATE native_init checks entries=%d hook=%d unhook=%d hyosExe=%d launcherCmdline=%d api=%u exe=%s process=%s",
+            entriesReady ? 1 : 0, hookReady ? 1 : 0,
+            entriesReady && entries->unhook_func != nullptr ? 1 : 0,
+            hyosProcess ? 1 : 0, launcherProcess ? 1 : 0,
+            entriesReady ? entries->version : 0, executable.c_str(), processName.c_str());
+
+    if (!entriesReady || !hookReady) {
+        logLine(ANDROID_LOG_ERROR,
+                "DP_GATE native_init rejected: LSPosed native hook backend unavailable entries=%p hook_func=%p",
+                static_cast<const void *>(entries),
+                entriesReady ? reinterpret_cast<void *>(entries->hook_func) : nullptr);
         return nullptr;
     }
+    if (!hyosProcess) {
+        logLine(ANDROID_LOG_WARN,
+                "DP_GATE native_init rejected non-HYOS process exe=%s process=%s",
+                executable.c_str(), processName.c_str());
+        return nullptr;
+    }
+
     gHookFunction = entries->hook_func;
     gUnhookFunction = entries->unhook_func;
     logLine(ANDROID_LOG_INFO,
-            "DP_GATE native_init accepted api=%u exe=%s process=%s hook_func=%p unhook_func=%p watchdog=%lldms resolver=masked-pattern-scan repair=unhook+rehook",
-            entries->version, readExecutable().c_str(), readProcessName().c_str(),
+            "DP_GATE native_init accepted api=%u exe=%s process=%s launcherCmdline=%d hook_func=%p unhook_func=%p watchdog=%lldms resolver=masked-pattern-scan repair=unhook+rehook",
+            entries->version, executable.c_str(), processName.c_str(), launcherProcess ? 1 : 0,
             reinterpret_cast<void *>(entries->hook_func),
             reinterpret_cast<void *>(entries->unhook_func),
             static_cast<long long>(kHookHealthIntervalMs));
-    ensureWorkerStarted();
+
+    // HyperOS may map libapp_launcher.so before LSPosed calls native_init. Backfill
+    // the already-loaded image so the first hook can be installed in the spawner
+    // and inherited by the final launcher child instead of waiting for a callback
+    // that may never arrive.
+    const LibraryInfo library = findLauncherLibrary();
+    if (library.base != 0) {
+        logLine(ANDROID_LOG_INFO,
+                "DP_GATE native_init backfill found %s base=%p process=%s",
+                kTargetLibrary, reinterpret_cast<void *>(library.base), processName.c_str());
+        ensureHook(library, "native-init-backfill");
+    } else {
+        logLine(ANDROID_LOG_INFO,
+                "DP_GATE native_init waiting for %s process=%s",
+                kTargetLibrary, processName.c_str());
+    }
+
+    // Never start a worker thread in the root spawner: it would disappear across
+    // fork while the atomic started flag remained inherited by the child.
+    if (launcherProcess) ensureWorkerStarted();
     return onLibraryLoaded;
 }

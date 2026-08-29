@@ -1,1 +1,3 @@
 io.github.pzhown.hyperos4swipegate.ModuleMain
+io.github.pzhown.hyperos4swipegate.NativeErrorReporter
+io.github.pzhown.hyperos4swipegate.SystemUiBridgeModule

@@ -1,29 +1,33 @@
 cmake_minimum_required(VERSION 3.22.1)
-project(hyperos4swipegate_native LANGUAGES C CXX)
+project(hyperos4swipegate LANGUAGES C CXX ASM)
 
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-
-add_library(hyperos4swipegate SHARED
-    src/main.cpp
-    src/config_reader.cpp
+add_library(
+        hyperos4swipegate
+        SHARED
+        src/main.cpp
+        src/config_reader.cpp
+        src/log_filter.cpp
+        src/control_channel.cpp
+        src/broadcast_send_capture_hook.S
 )
 
 target_include_directories(hyperos4swipegate PRIVATE include)
-
+target_compile_features(hyperos4swipegate PRIVATE cxx_std_20)
 target_compile_options(hyperos4swipegate PRIVATE
-    -Wall
-    -Wextra
-    -Werror=return-type
-    -fvisibility=hidden
-    -fvisibility-inlines-hidden
+        -Wall
+        -Wextra
+        -Wpedantic
+        -fvisibility=hidden
+        -ffunction-sections
+        -fdata-sections
 )
 
 target_link_options(hyperos4swipegate PRIVATE
-    "-Wl,-z,max-page-size=16384"
-    "-Wl,-z,common-page-size=16384"
-    "-Wl,--wrap=__system_property_get"
+        "-Wl,--wrap=__system_property_get"
+        "-Wl,--wrap=dprintf"
+        "-Wl,--wrap=__android_log_write"
+        "-Wl,-z,max-page-size=16384"
+        "-Wl,--gc-sections"
 )
 
 find_library(log-lib log)

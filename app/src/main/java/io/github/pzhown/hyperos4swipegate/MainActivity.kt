@@ -45,6 +45,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -713,6 +714,12 @@ private fun DiagnosticsPage(
         }
     }
 
+    fun copyToClipboard(label: String, text: String, toast: String) {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+        Toast.makeText(context, toast, Toast.LENGTH_SHORT).show()
+    }
+
     LaunchedEffect(Unit) { refresh() }
 
     LazyColumn(
@@ -737,14 +744,12 @@ private fun DiagnosticsPage(
                 }
                 Button(
                     onClick = {
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         val payload = buildString {
                             append(diagnostics)
                             append("\n\n=== Native runtime log ===\n")
                             append(nativeLogs)
                         }
-                        clipboard.setPrimaryClip(ClipData.newPlainText("SwipeGate diagnostics", payload))
-                        Toast.makeText(context, "诊断已复制", Toast.LENGTH_SHORT).show()
+                        copyToClipboard("SwipeGate diagnostics", payload, "诊断已复制")
                     },
                     enabled = diagnostics.isNotBlank() && !loading,
                     modifier = Modifier.weight(1f),
@@ -768,32 +773,51 @@ private fun DiagnosticsPage(
         item { SmallTitle("Native 日志") }
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    text = nativeLogs,
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(18.dp),
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    lineHeight = 16.sp,
-                    softWrap = true,
-                )
+                        .padding(start = 18.dp, top = 12.dp, end = 18.dp),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    Button(
+                        onClick = {
+                            copyToClipboard("SwipeGate native log", nativeLogs, "日志已复制")
+                        },
+                        enabled = nativeLogs.isNotBlank() && !loading,
+                    ) {
+                        Text("复制日志")
+                    }
+                }
+                SelectionContainer {
+                    Text(
+                        text = nativeLogs,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 18.dp, end = 18.dp, top = 10.dp, bottom = 18.dp),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp,
+                        softWrap = true,
+                    )
+                }
             }
         }
 
         item { SmallTitle("诊断信息") }
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    text = diagnostics,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(18.dp),
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    lineHeight = 16.sp,
-                    softWrap = true,
-                )
+                SelectionContainer {
+                    Text(
+                        text = diagnostics,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(18.dp),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp,
+                        softWrap = true,
+                    )
+                }
             }
         }
     }
@@ -813,7 +837,13 @@ private fun SettingsPage(
     val context = androidx.compose.ui.platform.LocalContext.current
     val prefs = remember { ConfigBridge.localPreferences(context) }
     var launcherIconHidden by remember { mutableStateOf(isLauncherIconHidden(context)) }
-    var logLevel by remember { mutableIntStateOf(ConfigBridge.LOG_LEVEL_OFF) }
+    var logLevel by remember {
+        mutableIntStateOf(
+            ConfigBridge.sanitizeLogLevel(
+                prefs.getInt(ConfigBridge.PREF_KEY_LOG_LEVEL, ConfigBridge.DEFAULT_LOG_LEVEL),
+            ),
+        )
+    }
     var showLogLevelDialog by remember { mutableStateOf(false) }
 
     fun applyLogLevel(level: Int) {
@@ -824,14 +854,6 @@ private fun SettingsPage(
             if (!result.success()) {
                 Toast.makeText(context, "日志设置同步失败：${result.message()}", Toast.LENGTH_SHORT).show()
             }
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        if (prefs.getInt(ConfigBridge.PREF_KEY_LOG_LEVEL, ConfigBridge.DEFAULT_LOG_LEVEL) !=
-            ConfigBridge.LOG_LEVEL_OFF
-        ) {
-            applyLogLevel(ConfigBridge.LOG_LEVEL_OFF)
         }
     }
 
@@ -893,7 +915,11 @@ private fun SettingsPage(
             Card(modifier = Modifier.fillMaxWidth()) {
                 ArrowPreference(
                     title = "日志记录",
-                    summary = "关闭 · 精简/详细暂未开放",
+                    summary = when (logLevel) {
+                        ConfigBridge.LOG_LEVEL_COMPACT -> "精简 · Hook、配置变化与异常"
+                        ConfigBridge.LOG_LEVEL_DETAILED -> "详细 · 包含侧滑过程与周期健康状态"
+                        else -> "关闭 · Hook 健康检测仍保持可用"
+                    },
                     onClick = { showLogLevelDialog = true },
                 )
             }
@@ -969,30 +995,28 @@ private fun SettingsPage(
 
     OverlayDialog(
         title = "日志记录",
-        summary = "精简与详细暂未开放",
+        summary = "选择 Native 日志详细程度",
         show = showLogLevelDialog,
         onDismissRequest = { showLogLevelDialog = false },
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             LogLevelOption(
                 title = "关闭",
-                summary = "不保存运行日志（默认）",
+                summary = "不保留运行日志；Hook 健康检测仍可用（默认）",
                 selected = logLevel == ConfigBridge.LOG_LEVEL_OFF,
                 onClick = { applyLogLevel(ConfigBridge.LOG_LEVEL_OFF) },
             )
             LogLevelOption(
                 title = "精简",
-                summary = "记录加载、Hook、配置变化与异常 · 暂未开放",
-                selected = false,
-                enabled = false,
-                onClick = {},
+                summary = "记录加载、Hook、配置变化与异常",
+                selected = logLevel == ConfigBridge.LOG_LEVEL_COMPACT,
+                onClick = { applyLogLevel(ConfigBridge.LOG_LEVEL_COMPACT) },
             )
             LogLevelOption(
                 title = "详细",
-                summary = "额外记录侧滑过程与周期健康状态 · 暂未开放",
-                selected = false,
-                enabled = false,
-                onClick = {},
+                summary = "额外记录侧滑过程与周期健康状态",
+                selected = logLevel == ConfigBridge.LOG_LEVEL_DETAILED,
+                onClick = { applyLogLevel(ConfigBridge.LOG_LEVEL_DETAILED) },
             )
         }
     }
