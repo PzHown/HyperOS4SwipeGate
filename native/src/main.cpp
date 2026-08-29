@@ -69,6 +69,21 @@ constexpr uint8_t kOnSwipeProcessMaskV1[] = {
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 };
 
+// RELEASE-8.01.02.6174-260818-08281208-R moved on_swipe_process to 0x657080
+// and changed its prologue. The first 16 bytes are shared with another function,
+// so keep the fifth instruction as part of the signature to make this pattern
+// unique in libapp_launcher.so.
+constexpr uint8_t kOnSwipeProcessPatternV2[] = {
+        0xff, 0x83, 0x04, 0xd1, 0xeb, 0x2b, 0x0a, 0x6d,
+        0xe9, 0x23, 0x0b, 0x6d, 0xfd, 0x7b, 0x0c, 0xa9,
+        0xfc, 0x6b, 0x00, 0xf9,
+};
+constexpr uint8_t kOnSwipeProcessMaskV2[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff,
+};
+
 struct PatternSpec {
     const char *name;
     const uint8_t *bytes;
@@ -79,12 +94,21 @@ struct PatternSpec {
 constexpr PatternSpec kOnSwipeProcessPatterns[] = {
         {"8.01.02.5459-v1", kOnSwipeProcessPatternV1, kOnSwipeProcessMaskV1,
          sizeof(kOnSwipeProcessPatternV1)},
+        {"8.01.02.6174-v2", kOnSwipeProcessPatternV2, kOnSwipeProcessMaskV2,
+         sizeof(kOnSwipeProcessPatternV2)},
 };
 
 static_assert(sizeof(kOnSwipeProcessPatternV1) == sizeof(kOnSwipeProcessMaskV1));
 static_assert(sizeof(kOnSwipeProcessPatternV1) >= kHookProbeSize);
+static_assert(sizeof(kOnSwipeProcessPatternV2) == sizeof(kOnSwipeProcessMaskV2));
+static_assert(sizeof(kOnSwipeProcessPatternV2) >= kHookProbeSize);
 
-using OnSwipeProcessFn = void (*)(void *, bool, uint32_t, const void *, float);
+// AAPCS64 allocates general-purpose and floating-point argument registers in
+// separate lanes. Older Launcher builds used x3 for the point payload, while
+// 8.01.02.6174 passes the current point in s1/s2. Keep both lanes in the hook
+// signature: an unused extra lane is harmless, while dropping s1/s2 would
+// corrupt the 6174 current-position arguments when calling the original.
+using OnSwipeProcessFn = void (*)(void *, bool, uint32_t, const void *, float, float, float);
 
 HookFunType gHookFunction = nullptr;
 UnhookFunType gUnhookFunction = nullptr;
@@ -393,7 +417,8 @@ struct ActiveHookCallGuard {
 };
 
 void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
-                        const void *point, float horizontalDistancePx) {
+                        const void *point, float horizontalDistancePx,
+                        float pointX, float pointY) {
     ActiveHookCallGuard activeGuard;
 
     const int configuredDp = readThresholdDp();
@@ -439,7 +464,7 @@ void onSwipeProcessHook(void *self, bool readyFinish, uint32_t side,
 
     const OnSwipeProcessFn original = gOriginalOnSwipeProcess.load(std::memory_order_acquire);
     if (original != nullptr) {
-        original(self, readyFinish, side, point, effectiveDistancePx);
+        original(self, readyFinish, side, point, effectiveDistancePx, pointX, pointY);
     }
 }
 
