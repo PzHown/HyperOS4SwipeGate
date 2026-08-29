@@ -30,6 +30,8 @@ constexpr int kMinLogLevel = 0;
 constexpr int kMaxLogLevel = 2;
 constexpr int64_t kSyncIntervalMs = 500;
 constexpr int kConnectTimeoutMs = 20;
+constexpr int kChildProbeIntervalMs = 100;
+constexpr int kChildProbeAttempts = 150;  // 15s for HYOS specialization/name change.
 constexpr size_t kMaxPatternBytes = 128;
 constexpr size_t kMaxDetailBytes = 768;
 constexpr size_t kMaxAppLogBytes = 24 * 1024;
@@ -49,6 +51,7 @@ enum HookState : uint32_t {
 std::atomic_flag gStateLock = ATOMIC_FLAG_INIT;
 std::atomic<int64_t> gLastSyncAttemptMs{0};
 std::atomic<bool> gWorkerStarted{false};
+std::atomic<bool> gChildProbeStarted{false};
 int gThresholdDp = -1;
 int gLogLevel = -1;
 HookState gHookState = kHookWaiting;
@@ -350,17 +353,57 @@ void startControlWorkerIfLauncher() {
     pthread_detach(thread);
 }
 
+void *childProbeMain(void *) {
+    for (int attempt = 0; attempt < kChildProbeAttempts; ++attempt) {
+        if (isLauncherProcess()) {
+            {
+                SpinGuard guard;
+                if (gHookState == kHookWaiting && gDetail.find("Native 模块已加载") == 0) {
+                    gDetail = "Launcher child 已识别，等待 native_init / Hook";
+                }
+            }
+            gChildProbeStarted.store(false, std::memory_order_release);
+            startControlWorkerIfLauncher();
+            return nullptr;
+        }
+        usleep(kChildProbeIntervalMs * 1000);
+    }
+    gChildProbeStarted.store(false, std::memory_order_release);
+    return nullptr;
+}
+
+void startChildProbeAfterFork() {
+    bool expected = false;
+    if (!gChildProbeStarted.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        return;
+    }
+    pthread_t thread{};
+    const int result = pthread_create(&thread, nullptr, childProbeMain, nullptr);
+    if (result != 0) {
+        gChildProbeStarted.store(false, std::memory_order_release);
+        return;
+    }
+    pthread_detach(thread);
+}
+
 void resetAfterFork() {
     gStateLock.clear(std::memory_order_release);
     gLastSyncAttemptMs.store(0, std::memory_order_release);
     gWorkerStarted.store(false, std::memory_order_release);
+    gChildProbeStarted.store(false, std::memory_order_release);
+
+    // HYOS commonly loads LSPosed native modules in the root spawner (cmdline usap64) and then
+    // forks the actual package child. ELF constructors do not run again in that child, so create
+    // a bounded probe thread here and wait for specialization to rename cmdline to com.miui.home.
+    // Bionic has completed its own child-atfork bookkeeping before user child handlers run; the
+    // thread only performs ordinary work after pthread_create returns in the child.
+    startChildProbeAfterFork();
 }
 
 __attribute__((constructor)) void initializeControlChannel() {
     (void) pthread_atfork(nullptr, nullptr, resetAfterFork);
-    // LSPosed's HyperOS Runtime loader is observed on real devices loading the native module
-    // directly in the final com.miui.home child. Start the transport immediately from the ELF
-    // constructor in that case; do not wait for native_init, Hook callbacks or gesture traffic.
+    // Also cover frameworks that dlopen the module directly in the final launcher child.
     startControlWorkerIfLauncher();
 }
 
