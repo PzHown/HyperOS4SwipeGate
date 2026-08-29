@@ -8,6 +8,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 add_library(hyperos4swipegate SHARED
     src/main.cpp
     src/config_reader.cpp
+    src/log_filter.cpp
 )
 
 target_include_directories(hyperos4swipegate PRIVATE include)
@@ -24,6 +25,7 @@ target_link_options(hyperos4swipegate PRIVATE
     "-Wl,-z,max-page-size=16384"
     "-Wl,-z,common-page-size=16384"
     "-Wl,--wrap=__system_property_get"
+    "-Wl,--wrap=dprintf"
 )
 
 find_library(log-lib log)
