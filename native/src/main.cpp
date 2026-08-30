@@ -174,6 +174,7 @@ std::atomic<bool> gGestureActive{false};
 std::atomic<bool> gReadyHapticLatched{false};
 std::atomic<bool> gHapticUnavailableLogged{false};
 std::atomic<uint64_t> gHapticHookRepairCount{0};
+std::atomic<uint64_t> gHapticCaptureHookRepairCount{0};
 
 std::mutex gHookMutex;
 std::array<uint8_t, kHookProbeSize> gInstalledPatchHead{};
@@ -192,6 +193,7 @@ struct AuxHookHealth {
 };
 
 AuxHookHealth gBackInvokeHapticHookHealth{};
+AuxHookHealth gHapticCaptureHookHealth{};
 
 int64_t monotonicMs() {
     timespec ts{};
@@ -528,16 +530,98 @@ void *resolveHapticSymbol(const char *symbol) {
 bool ensureHapticCaptureHook() {
     void *standard = resolveHapticSymbol(kStandardHapticSymbol);
     if (standard != nullptr) gStandardHapticFeedback.store(standard, std::memory_order_release);
-    if (gHapticCaptureHookInstalled.load(std::memory_order_acquire)) return true;
     if (gHookFunction == nullptr) return false;
-    void *target = resolveHapticSymbol(kHapticSymbol);
-    if (target == nullptr) return false;
+
+    void *targetPointer = resolveHapticSymbol(kHapticSymbol);
+    if (targetPointer == nullptr) return false;
+    const uintptr_t target = reinterpret_cast<uintptr_t>(targetPointer);
+    AuxHookHealth &health = gHapticCaptureHookHealth;
+
+    if (health.target != 0 && health.target != target) {
+        logLine(ANDROID_LOG_WARN,
+                "HAPTIC capture target changed old=%p new=%p; resetting cached runtime",
+                reinterpret_cast<void *>(health.target), targetPointer);
+        health = AuxHookHealth{};
+        gHapticCaptureHookInstalled.store(false, std::memory_order_release);
+        gOriginalHapticFeedback.store(nullptr, std::memory_order_release);
+        gCapturedHapticArc.store(0, std::memory_order_release);
+    }
+
+    if (health.target == target && health.patchReady) {
+        std::array<uint8_t, kHookProbeSize> current{};
+        if (!readProbeHead(target, current)) return false;
+        if (probeEquals(current, health.patchHead)) {
+            gHapticCaptureHookInstalled.store(true, std::memory_order_release);
+            return true;
+        }
+        if (!health.originalReady || !probeEquals(current, health.originalHead)) {
+            gHapticCaptureHookInstalled.store(false, std::memory_order_release);
+            gCapturedHapticArc.store(0, std::memory_order_release);
+            logLine(ANDROID_LOG_ERROR,
+                    "HAPTIC capture hook foreign patch target=%p current=%s expectedPatch=%s",
+                    targetPointer, probeHex(current).c_str(), probeHex(health.patchHead).c_str());
+            return false;
+        }
+        if (gUnhookFunction == nullptr) return false;
+
+        gHapticCaptureHookInstalled.store(false, std::memory_order_release);
+        gOriginalHapticFeedback.store(nullptr, std::memory_order_release);
+        gCapturedHapticArc.store(0, std::memory_order_release);
+        const int unhookRc = gUnhookFunction(targetPointer);
+        std::array<uint8_t, kHookProbeSize> afterUnhook{};
+        if (!readProbeHead(target, afterUnhook)
+                || !probeEquals(afterUnhook, health.originalHead)) {
+            logLine(ANDROID_LOG_ERROR,
+                    "HAPTIC capture repair unhook failed rc=%d target=%p",
+                    unhookRc, targetPointer);
+            return false;
+        }
+        health.patchReady = false;
+        const uint64_t repairs = gHapticCaptureHookRepairCount.fetch_add(
+                1, std::memory_order_acq_rel) + 1;
+        logLine(ANDROID_LOG_WARN,
+                "HAPTIC capture hook restored by runtime; rehooking repair=%llu",
+                static_cast<unsigned long long>(repairs));
+    }
+
+    std::array<uint8_t, kHookProbeSize> original{};
+    if (!readProbeHead(target, original)) return false;
+    if (!health.originalReady) {
+        health.target = target;
+        health.originalHead = original;
+        health.originalReady = true;
+    } else if (!probeEquals(original, health.originalHead)) {
+        logLine(ANDROID_LOG_ERROR,
+                "HAPTIC capture hook install refused target=%p current=%s expectedOriginal=%s",
+                targetPointer, probeHex(original).c_str(), probeHex(health.originalHead).c_str());
+        return false;
+    }
+
     void *backup = nullptr;
-    const int rc = gHookFunction(target, reinterpret_cast<void *>(hapticFeedbackCaptureHook), &backup);
-    if (rc != 0 || backup == nullptr) return false;
+    const int rc = gHookFunction(
+            targetPointer, reinterpret_cast<void *>(hapticFeedbackCaptureHook), &backup);
+    if (rc != 0 || backup == nullptr) {
+        logLine(ANDROID_LOG_ERROR,
+                "HAPTIC capture hook install failed rc=%d target=%p", rc, targetPointer);
+        return false;
+    }
+
+    std::array<uint8_t, kHookProbeSize> patched{};
+    if (!readProbeHead(target, patched) || probeEquals(patched, health.originalHead)) {
+        logLine(ANDROID_LOG_ERROR,
+                "HAPTIC capture hook did not patch target=%p", targetPointer);
+        return false;
+    }
+    health.patchHead = patched;
+    health.patchReady = true;
     gOriginalHapticFeedback.store(backup, std::memory_order_release);
     gHapticCaptureHookInstalled.store(true, std::memory_order_release);
-    logLine(ANDROID_LOG_INFO, "HAPTIC capture hook installed target=%p lightTarget=%p", target, standard);
+    gHapticUnavailableLogged.store(false, std::memory_order_release);
+    logLine(ANDROID_LOG_INFO,
+            "HAPTIC capture hook ready target=%p lightTarget=%p repairs=%llu",
+            targetPointer, standard,
+            static_cast<unsigned long long>(
+                    gHapticCaptureHookRepairCount.load(std::memory_order_relaxed)));
     return true;
 }
 
