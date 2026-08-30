@@ -4,6 +4,7 @@
 #include <android/log.h>
 #include <elf.h>
 #include <fcntl.h>
+#include <dlfcn.h>
 #include <link.h>
 #include <sys/system_properties.h>
 #include <time.h>
@@ -30,6 +31,15 @@ __attribute__((visibility("hidden"))) void swipegate_on_swipe_process_hook();
 __attribute__((visibility("hidden"))) float swipegate_hook_enter_and_gate(
         uint32_t readyFinish, uint32_t side, float horizontalDistancePx);
 __attribute__((visibility("hidden"))) void swipegate_hook_exit();
+__attribute__((visibility("hidden"))) extern void *gSwipeGateOriginalOnSwipeStart;
+__attribute__((visibility("hidden"))) extern void *gSwipeGateOriginalOnBackInvoke;
+__attribute__((visibility("hidden"))) extern void *gSwipeGateOriginalOnBackCancelled;
+__attribute__((visibility("hidden"))) void swipegate_on_swipe_start_hook();
+__attribute__((visibility("hidden"))) void swipegate_on_back_invoke_hook();
+__attribute__((visibility("hidden"))) void swipegate_on_back_cancelled_hook();
+__attribute__((visibility("hidden"))) void swipegate_haptic_on_swipe_start();
+__attribute__((visibility("hidden"))) void swipegate_haptic_on_back_invoke();
+__attribute__((visibility("hidden"))) void swipegate_haptic_on_back_cancelled();
 }
 
 namespace {
@@ -38,6 +48,9 @@ constexpr const char *kTag = "HyperOS4SwipeGateNative";
 constexpr const char *kTargetPackage = "com.miui.home";
 constexpr const char *kSpawnerPath = "/system_ext/bin/hyos_spawner";
 constexpr const char *kTargetLibrary = "libapp_launcher.so";
+constexpr const char *kHapticLibrary = "libhyper_os_background_tasks_public.so";
+constexpr const char *kHapticSymbol = "HapticFeedback_perform_ext_haptic_feedback";
+constexpr uintptr_t kPointerTagMask = 0x00ffffffffffffffull;
 constexpr const char *kThresholdDpProperty = "persist.hyperos4swipegate.threshold_dp";
 constexpr int kDefaultThresholdDp = 0;
 constexpr int kStockBoundaryDp = 88;
@@ -95,6 +108,37 @@ constexpr PatternSpec kSemanticOnSwipeProcessPattern = {
         "semantic-motion-graph", nullptr, nullptr, 0,
 };
 
+constexpr uint8_t kOnSwipeStartPatternV1[] = {
+        0xff,0x03,0x05,0xd1,0xe8,0x6b,0x00,0xfd,0xfd,0x7b,0x0e,0xa9,0xfc,0x6f,0x0f,0xa9,
+        0xfa,0x67,0x10,0xa9,0xf8,0x5f,0x11,0xa9,0xf6,0x57,0x12,0xa9,0xf4,0x4f,0x13,0xa9,
+        0xfd,0x83,0x03,0x91,0x37,0x59,0x00,0xd0,
+};
+constexpr uint8_t kOnSwipeStartPatternV2[] = {
+        0xff,0x43,0x03,0xd1,0xe8,0x43,0x00,0xfd,0xfd,0x7b,0x09,0xa9,0xf8,0x5f,0x0a,0xa9,
+        0xf6,0x57,0x0b,0xa9,0xf4,0x4f,0x0c,0xa9,0xfd,0x43,0x02,0x91,0x77,0x41,0x00,0x90,
+        0xf3,0x03,0x02,0x2a,0xf5,0x03,0x01,0xaa,
+};
+constexpr uint8_t kOnBackInvokePatternV1[] = {
+        0xff,0x83,0x05,0xd1,0xfd,0x7b,0x10,0xa9,0xfc,0x6f,0x11,0xa9,0xfa,0x67,0x12,0xa9,
+        0xf8,0x5f,0x13,0xa9,0xf6,0x57,0x14,0xa9,0xf4,0x4f,0x15,0xa9,0xfd,0x03,0x04,0x91,
+        0xf9,0x03,0x00,0xaa,0x20,0x00,0x80,0x52,
+};
+constexpr uint8_t kOnBackInvokePatternV2[] = {
+        0xff,0x83,0x04,0xd1,0xfd,0x7b,0x0c,0xa9,0xfc,0x6f,0x0d,0xa9,0xfa,0x67,0x0e,0xa9,
+        0xf8,0x5f,0x0f,0xa9,0xf6,0x57,0x10,0xa9,0xf4,0x4f,0x11,0xa9,0xfd,0x03,0x03,0x91,
+        0xfa,0x03,0x00,0xaa,0x20,0x00,0x80,0x52,
+};
+constexpr uint8_t kOnBackCancelledPatternV1[] = {
+        0xff,0x03,0x04,0xd1,0xfd,0x7b,0x0c,0xa9,0xf8,0x5f,0x0d,0xa9,0xf6,0x57,0x0e,0xa9,
+        0xf4,0x4f,0x0f,0xa9,0xfd,0x03,0x03,0x91,0x14,0x04,0x40,0xf9,0xf3,0x03,0x00,0xaa,
+        0x74,0x1a,0x00,0xb4,0xe8,0xe3,0x00,0x91,
+};
+constexpr uint8_t kOnBackCancelledPatternV2[] = {
+        0xff,0xc3,0x02,0xd1,0xfd,0x7b,0x08,0xa9,0xf6,0x57,0x09,0xa9,0xf4,0x4f,0x0a,0xa9,
+        0xfd,0x03,0x02,0x91,0x14,0x04,0x40,0xf9,0xf3,0x03,0x00,0xaa,0xe0,0x03,0x14,0xaa,
+        0x6a,0x00,0x00,0x94,0xa0,0x05,0x00,0xb4,
+};
+
 static_assert(sizeof(kOnSwipeProcessPatternV1) == sizeof(kOnSwipeProcessMaskV1));
 static_assert(sizeof(kOnSwipeProcessPatternV1) >= kHookProbeSize);
 
@@ -117,6 +161,13 @@ std::atomic<uint32_t> gActiveHookCalls{0};
 std::atomic<uint64_t> gRepairCount{0};
 std::atomic<uint64_t> gClampedCount{0};
 std::atomic<uint64_t> gPassthroughCount{0};
+std::atomic<void *> gOriginalHapticFeedback{nullptr};
+std::atomic<uintptr_t> gCapturedHapticArc{0};
+std::atomic<bool> gHapticCaptureHookInstalled{false};
+std::atomic<uintptr_t> gAuxGestureScannedBase{0};
+std::atomic<bool> gGestureActive{false};
+std::atomic<bool> gReadyHapticLatched{false};
+std::atomic<bool> gHapticUnavailableLogged{false};
 
 std::mutex gHookMutex;
 std::array<uint8_t, kHookProbeSize> gInstalledPatchHead{};
@@ -433,6 +484,7 @@ int readThresholdDp() {
     return thresholdDp;
 }
 
+\nusing HapticFeedbackFn = void (*)(void *, int32_t);\n\nvoid hapticFeedbackCaptureHook(void *storage, int32_t constant) {\n    if (storage != nullptr) {\n        uintptr_t arc = 0;\n        std::memcpy(&arc, storage, sizeof(arc));\n        arc &= kPointerTagMask;\n        if (arc >= 0x10000u) {\n            gCapturedHapticArc.store(arc, std::memory_order_release);\n            gHapticUnavailableLogged.store(false, std::memory_order_release);\n        }\n    }\n    const auto original = reinterpret_cast<HapticFeedbackFn>(gOriginalHapticFeedback.load(std::memory_order_acquire));\n    if (original != nullptr) original(storage, constant);\n}\n\nbool ensureHapticCaptureHook() {\n    if (gHapticCaptureHookInstalled.load(std::memory_order_acquire)) return true;\n    if (gHookFunction == nullptr) return false;\n    void *target = dlsym(RTLD_DEFAULT, kHapticSymbol);\n    if (target == nullptr) {\n        void *handle = dlopen(kHapticLibrary, RTLD_NOW | RTLD_NOLOAD);\n        if (handle != nullptr) target = dlsym(handle, kHapticSymbol);\n    }\n    if (target == nullptr) return false;\n    void *backup = nullptr;\n    const int rc = gHookFunction(target, reinterpret_cast<void *>(hapticFeedbackCaptureHook), &backup);\n    if (rc != 0 || backup == nullptr) return false;\n    gOriginalHapticFeedback.store(backup, std::memory_order_release);\n    gHapticCaptureHookInstalled.store(true, std::memory_order_release);\n    logLine(ANDROID_LOG_INFO, "HAPTIC capture hook installed target=%p", target);\n    return true;\n}\n\nbool performReturnHaptic(const char *stage) {\n    if (swipegate_control_haptic_enabled() != 1) return false;\n    const auto original = reinterpret_cast<HapticFeedbackFn>(gOriginalHapticFeedback.load(std::memory_order_acquire));\n    const uintptr_t arc = gCapturedHapticArc.load(std::memory_order_acquire);\n    if (original == nullptr || arc < 0x10000u) {\n        bool expected = false;\n        if (gHapticUnavailableLogged.compare_exchange_strong(expected, true)) {\n            logLine(ANDROID_LOG_WARN, "HAPTIC skipped stage=%s reason=runtime-not-captured", stage == nullptr ? "unknown" : stage);\n        }\n        return false;\n    }\n    void *storage = reinterpret_cast<void *>(arc);\n    original(&storage, 0);\n    logLine(ANDROID_LOG_INFO, "HAPTIC feedback stage=%s", stage == nullptr ? "unknown" : stage);\n    return true;\n}\n\nuintptr_t resolveUniqueAuxPattern(const LibraryInfo &library, const uint8_t *bytes, size_t size) {\n    if (bytes == nullptr || size == 0) return 0;\n    uintptr_t found = 0;\n    for (size_t rangeIndex = 0; rangeIndex < library.executableRangeCount; ++rangeIndex) {\n        const ExecutableRange &range = library.executableRanges[rangeIndex];\n        if (range.start == 0 || range.size < size) continue;\n        const uintptr_t start = (range.start + 3u) & ~static_cast<uintptr_t>(3u);\n        const uintptr_t last = range.start + range.size - size;\n        for (uintptr_t cursor = start; cursor <= last; cursor += 4u) {\n            if (std::memcmp(reinterpret_cast<const void *>(cursor), bytes, size) != 0) continue;\n            if (found != 0 && found != cursor) return 0;\n            found = cursor;\n        }\n    }\n    return found;\n}\n\nuintptr_t resolveAuxForActiveProfile(const LibraryInfo &library, const uint8_t *v1, size_t v1Size, const uint8_t *v2, size_t v2Size) {\n    if (std::strcmp(gActivePatternName, "8.01.02.5459-v1") == 0) return resolveUniqueAuxPattern(library, v1, v1Size);\n    if (std::strcmp(gActivePatternName, "8.01.02.6174-v2") == 0) return resolveUniqueAuxPattern(library, v2, v2Size);\n    return 0;\n}\n\nbool installAuxGestureHapticHooks(const LibraryInfo &library) {\n    if (library.base == 0 || gHookFunction == nullptr) return false;\n    if (gAuxGestureScannedBase.load(std::memory_order_acquire) == library.base) {\n        return gSwipeGateOriginalOnSwipeStart != nullptr && gSwipeGateOriginalOnBackInvoke != nullptr && gSwipeGateOriginalOnBackCancelled != nullptr;\n    }\n    gAuxGestureScannedBase.store(library.base, std::memory_order_release);\n    const uintptr_t startTarget = resolveAuxForActiveProfile(library, kOnSwipeStartPatternV1, sizeof(kOnSwipeStartPatternV1), kOnSwipeStartPatternV2, sizeof(kOnSwipeStartPatternV2));\n    const uintptr_t invokeTarget = resolveAuxForActiveProfile(library, kOnBackInvokePatternV1, sizeof(kOnBackInvokePatternV1), kOnBackInvokePatternV2, sizeof(kOnBackInvokePatternV2));\n    const uintptr_t cancelTarget = resolveAuxForActiveProfile(library, kOnBackCancelledPatternV1, sizeof(kOnBackCancelledPatternV1), kOnBackCancelledPatternV2, sizeof(kOnBackCancelledPatternV2));\n    void *backup = nullptr;\n    if (startTarget != 0 && gHookFunction(reinterpret_cast<void *>(startTarget), reinterpret_cast<void *>(swipegate_on_swipe_start_hook), &backup) == 0 && backup != nullptr) __atomic_store_n(&gSwipeGateOriginalOnSwipeStart, backup, __ATOMIC_RELEASE);\n    backup = nullptr;\n    if (invokeTarget != 0 && gHookFunction(reinterpret_cast<void *>(invokeTarget), reinterpret_cast<void *>(swipegate_on_back_invoke_hook), &backup) == 0 && backup != nullptr) __atomic_store_n(&gSwipeGateOriginalOnBackInvoke, backup, __ATOMIC_RELEASE);\n    backup = nullptr;\n    if (cancelTarget != 0 && gHookFunction(reinterpret_cast<void *>(cancelTarget), reinterpret_cast<void *>(swipegate_on_back_cancelled_hook), &backup) == 0 && backup != nullptr) __atomic_store_n(&gSwipeGateOriginalOnBackCancelled, backup, __ATOMIC_RELEASE);\n    const bool ready = gSwipeGateOriginalOnSwipeStart != nullptr && gSwipeGateOriginalOnBackInvoke != nullptr && gSwipeGateOriginalOnBackCancelled != nullptr;\n    logLine(ready ? ANDROID_LOG_INFO : ANDROID_LOG_WARN, "HAPTIC gesture hooks ready=%d profile=%s start=%p invoke=%p cancel=%p", ready ? 1 : 0, gActivePatternName, reinterpret_cast<void *>(startTarget), reinterpret_cast<void *>(invokeTarget), reinterpret_cast<void *>(cancelTarget));\n    return ready;\n}\n
 float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDistancePx) {
     const int configuredDp = readThresholdDp();
     const int effectiveDp = configuredDp == 0 ? kStockBoundaryDp : std::max(configuredDp, kStockBoundaryDp);
@@ -720,7 +772,12 @@ bool ensureHookLocked(const LibraryInfo &library, const char *source) {
 
 bool ensureHook(const LibraryInfo &library, const char *source) {
     std::lock_guard<std::mutex> lock(gHookMutex);
-    return ensureHookLocked(library, source);
+    const bool ready = ensureHookLocked(library, source);
+    if (ready) {
+        installAuxGestureHapticHooks(library);
+        ensureHapticCaptureHook();
+    }
+    return ready;
 }
 
 void hookWatchdogWorker() {
@@ -763,12 +820,34 @@ void onLibraryLoaded(const char *name, void *) {
 
 extern "C" {
 __attribute__((visibility("hidden"))) void *gSwipeGateOriginalOnSwipeProcess = nullptr;
+__attribute__((visibility("hidden"))) void *gSwipeGateOriginalOnSwipeStart = nullptr;
+__attribute__((visibility("hidden"))) void *gSwipeGateOriginalOnBackInvoke = nullptr;
+__attribute__((visibility("hidden"))) void *gSwipeGateOriginalOnBackCancelled = nullptr;
 
 __attribute__((visibility("hidden"))) float swipegate_hook_enter_and_gate(
         uint32_t readyFinish, uint32_t side, float horizontalDistancePx) {
     gActiveHookCalls.fetch_add(1, std::memory_order_acq_rel);
     if (isLauncherProcess()) ensureWorkerStarted();
+    if (readyFinish != 0) {
+        bool expected = false;
+        if (gReadyHapticLatched.compare_exchange_strong(expected, true)) performReturnHaptic("ready");
+    }
     return gateHorizontalDistance(readyFinish != 0, side, horizontalDistancePx);
+}
+
+__attribute__((visibility("hidden"))) void swipegate_haptic_on_swipe_start() {
+    gGestureActive.store(true, std::memory_order_release);
+    gReadyHapticLatched.store(false, std::memory_order_release);
+}
+
+__attribute__((visibility("hidden"))) void swipegate_haptic_on_back_invoke() {
+    if (gGestureActive.exchange(false, std::memory_order_acq_rel)) performReturnHaptic("commit");
+    gReadyHapticLatched.store(false, std::memory_order_release);
+}
+
+__attribute__((visibility("hidden"))) void swipegate_haptic_on_back_cancelled() {
+    gGestureActive.store(false, std::memory_order_release);
+    gReadyHapticLatched.store(false, std::memory_order_release);
 }
 
 __attribute__((visibility("hidden"))) void swipegate_hook_exit() {

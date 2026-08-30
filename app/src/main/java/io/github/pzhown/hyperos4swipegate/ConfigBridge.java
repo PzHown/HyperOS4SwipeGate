@@ -13,6 +13,7 @@ public final class ConfigBridge {
     public static final String LEGACY_PREF_KEY_THRESHOLD_PX = "trigger_threshold_px";
     public static final String LEGACY_PREF_KEY_EXTRA_DP = "trigger_extra_dp";
     public static final String PREF_KEY_LOG_LEVEL = "native_log_level";
+    public static final String PREF_KEY_HAPTIC_FEEDBACK = "back_haptic_feedback";
 
     public static final int DEFAULT_THRESHOLD_DP = 0; // Legacy alias: 0 = Xiaomi stock/default (88dp).
     public static final int STOCK_THRESHOLD_DP = 88;
@@ -22,6 +23,7 @@ public final class ConfigBridge {
     public static final int LOG_LEVEL_COMPACT = 1;
     public static final int LOG_LEVEL_DETAILED = 2;
     public static final int DEFAULT_LOG_LEVEL = LOG_LEVEL_OFF;
+    public static final boolean DEFAULT_HAPTIC_FEEDBACK = false;
     public static final boolean LOG_RECORDING_OPTIONS_ENABLED = true;
 
     public static final String REMOTE_PREF_GROUP = "swipegate";
@@ -80,6 +82,20 @@ public final class ConfigBridge {
                     ? "ok"
                     : "已保存，Native 将在下一次桌面侧滑/心跳同步";
             Result result = new Result(true, safeValue, message);
+            MAIN.post(() -> callback.onResult(result));
+        });
+    }
+
+    public static void applyHapticFeedbackAsync(Context context, boolean enabled, Callback callback) {
+        Context app = context.getApplicationContext();
+        localPreferences(app).edit().putBoolean(PREF_KEY_HAPTIC_FEEDBACK, enabled).apply();
+        NativeControlBridge.initialize(app);
+
+        EXECUTOR.execute(() -> {
+            String message = NativeControlBridge.hasFreshPeer()
+                    ? "ok"
+                    : "已保存，Native 将在下一次桌面侧滑/心跳同步";
+            Result result = new Result(true, enabled ? 1 : 0, message);
             MAIN.post(() -> callback.onResult(result));
         });
     }

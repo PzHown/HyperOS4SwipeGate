@@ -41,6 +41,7 @@ constexpr const char *kMarkerExtra = "swipegate_control";
 constexpr const char *kNonceExtra = "swipegate_nonce";
 constexpr const char *kThresholdExtra = "swipegate_threshold_dp";
 constexpr const char *kLogLevelExtra = "swipegate_log_level";
+constexpr const char *kHapticEnabledExtra = "swipegate_haptic_enabled";
 constexpr const char *kHookStateExtra = "swipegate_hook_state";
 constexpr const char *kPatternExtra = "swipegate_pattern";
 constexpr const char *kDetailExtra = "swipegate_detail";
@@ -49,6 +50,7 @@ constexpr const char *kSenderUidExtra = "sender_uid";
 
 constexpr const char *kConfigFileName = "hyperos4swipegate_config";
 constexpr const char *kLogLevelFileName = "hyperos4swipegate_log_level";
+constexpr const char *kHapticEnabledFileName = "hyperos4swipegate_haptic_enabled";
 constexpr int kAndroidUserOffset = 100000;
 constexpr int kMinThresholdDp = 88;
 constexpr int kMaxThresholdDp = 300;
@@ -146,6 +148,7 @@ std::atomic<void *> gCapturedRuntime{nullptr};
 
 int gThresholdDp = -1;
 int gLogLevel = -1;
+int gHapticEnabled = -1;
 HookState gHookState = kHookWaiting;
 std::string gPattern;
 std::string gDetail = "Native 模块已加载，等待 HyOS Runtime / Hook";
@@ -239,6 +242,33 @@ void persistValue(const char *fileName, int value) {
         close(fd);
         if (written == length) return;
     }
+}
+
+int readPersistedValue(const char *fileName, int minValue, int maxValue) {
+    if (fileName == nullptr) return -1;
+    const int userId = static_cast<int>(getuid()) / kAndroidUserOffset;
+    char path[256]{};
+    const char *formats[] = {
+            "/data/user_de/%d/com.miui.home/cache/%s",
+            "/data/user/%d/com.miui.home/cache/%s",
+            "/data/data/com.miui.home/cache/%s",
+    };
+    for (size_t index = 0; index < 3; ++index) {
+        if (index == 2 && userId != 0) break;
+        if (index < 2) std::snprintf(path, sizeof(path), formats[index], userId, fileName);
+        else std::snprintf(path, sizeof(path), formats[index], fileName);
+        const int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) continue;
+        char text[24]{};
+        const ssize_t size = read(fd, text, sizeof(text) - 1);
+        close(fd);
+        if (size <= 0) continue;
+        text[size] = '\0';
+        char *end = nullptr;
+        const long value = std::strtol(text, &end, 10);
+        if (end != text && value >= minValue && value <= maxValue) return static_cast<int>(value);
+    }
+    return -1;
 }
 
 bool isDetailedOnlyLine(const char *text) {
@@ -605,12 +635,14 @@ void handleControlCarrier(void *intent) {
     int32_t senderUid = -1;
     int32_t thresholdDp = -1;
     int32_t logLevel = -1;
+    bool hapticEnabled = false;
     int64_t nonce = 0;
     if (!readNativeBool(extras, kMarkerExtra, &marker) || !marker
             || !readNativeI32(extras, kSenderUidExtra, &senderUid)
             || !readNativeI64(extras, kNonceExtra, &nonce)
             || !readNativeI32(extras, kThresholdExtra, &thresholdDp)
             || !readNativeI32(extras, kLogLevelExtra, &logLevel)
+            || !readNativeBool(extras, kHapticEnabledExtra, &hapticEnabled)
             || nonce <= 0 || !verifyPackageUid(kSystemUiPackage, senderUid)
             || thresholdDp < kMinThresholdDp || thresholdDp > kMaxThresholdDp
             || logLevel < kMinLogLevel || logLevel > kMaxLogLevel) {
@@ -620,16 +652,20 @@ void handleControlCarrier(void *intent) {
 
     bool thresholdChanged;
     bool logLevelChanged;
+    bool hapticChanged;
     {
         SpinGuard guard;
         thresholdChanged = gThresholdDp != thresholdDp;
         logLevelChanged = gLogLevel != logLevel;
+        hapticChanged = gHapticEnabled != (hapticEnabled ? 1 : 0);
         gThresholdDp = thresholdDp;
         gLogLevel = logLevel;
+        gHapticEnabled = hapticEnabled ? 1 : 0;
         if (logLevel <= 0) gAppLog.clear();
     }
     if (thresholdChanged) persistValue(kConfigFileName, thresholdDp);
     if (logLevelChanged) persistValue(kLogLevelFileName, logLevel);
+    if (hapticChanged) persistValue(kHapticEnabledFileName, hapticEnabled ? 1 : 0);
 
     if (!sendNativeReply(nonce)) {
         bridgeLog(ANDROID_LOG_WARN,
@@ -764,6 +800,20 @@ extern "C" int swipegate_control_threshold_dp() {
 extern "C" int swipegate_control_log_level() {
     SpinGuard guard;
     return gLogLevel;
+}
+
+extern "C" int swipegate_control_haptic_enabled() {
+    {
+        SpinGuard guard;
+        if (gHapticEnabled >= 0) return gHapticEnabled;
+    }
+    const int persisted = readPersistedValue(kHapticEnabledFileName, 0, 1);
+    if (persisted >= 0) {
+        SpinGuard guard;
+        if (gHapticEnabled < 0) gHapticEnabled = persisted;
+        return gHapticEnabled;
+    }
+    return 0;
 }
 
 extern "C" void swipegate_control_on_log(int, const char *text) {
