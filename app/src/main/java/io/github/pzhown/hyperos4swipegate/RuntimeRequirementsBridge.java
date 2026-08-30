@@ -4,7 +4,6 @@ import android.content.Context;
 
 import java.io.File;
 import java.util.List;
-import java.util.Set;
 
 import io.github.libxposed.service.HookedTarget;
 import io.github.libxposed.service.XposedService;
@@ -67,9 +66,8 @@ public final class RuntimeRequirementsBridge {
             final long frameworkVersionCode = current.getFrameworkVersionCode();
             final boolean lsposedSupported = frameworkVersionCode >= MIN_LSPOSED_VERSION_CODE;
             final boolean hyosSpawnerPresent = new File(HYOS_SPAWNER).exists();
-            final Set<String> scope = current.getScope();
-            final boolean launcherInScope = scope.contains(TARGET_PACKAGE);
-            final boolean systemUiInScope = scope.contains(SYSTEM_UI_PACKAGE);
+            final boolean launcherInScope = current.getScope().contains(TARGET_PACKAGE);
+            final boolean systemUiInScope = current.getScope().contains(SYSTEM_UI_PACKAGE);
             final int launcherUid = resolveLauncherUid(context);
 
             boolean directHyosRuntimeDetected = false;
