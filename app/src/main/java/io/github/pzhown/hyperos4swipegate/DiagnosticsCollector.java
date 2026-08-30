@@ -52,6 +52,12 @@ public final class DiagnosticsCollector {
         out.append("\n[config]\n");
         out.append("thresholdDp=").append(service.thresholdDp()).append('\n');
 
+        out.append("\n[channel]\n");
+        out.append("stage=").append(NativeControlBridge.channelStage()).append('\n');
+        out.append("detail=").append(NativeControlBridge.channelDetail()).append('\n');
+        out.append("pending=").append(NativeControlBridge.hasPendingQuery()).append('\n');
+        out.append("stageAgeMs=").append(NativeControlBridge.channelAgeMs()).append('\n');
+
         out.append("\n[hook]\n");
         out.append("state=").append(nativeHook.state()).append('\n');
         out.append("fresh=").append(nativeHook.fresh()).append('\n');
