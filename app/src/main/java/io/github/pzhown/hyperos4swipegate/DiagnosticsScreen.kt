@@ -57,6 +57,7 @@ private data class DiagnosticUiSnapshot(
     val thresholdDp: Int,
     val launcherVersion: String,
     val launcherInScope: Boolean,
+    val systemUiInScope: Boolean,
     val hyosRuntimeDetected: Boolean,
     val hyosSpawnerPresent: Boolean,
     val lsposedSupported: Boolean,
@@ -174,8 +175,9 @@ internal fun DiagnosticsScreen(
             item { SmallTitle("目标与配置") }
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
-                    DiagnosticValueRow("Launcher", conciseLauncherVersion(current.launcherVersion))
-                    DiagnosticValueRow("作用域", if (current.launcherInScope) "已包含" else "未包含")
+                    DiagnosticValueRow("Launcher", current.launcherVersion.ifBlank { "未知" })
+                    DiagnosticValueRow("系统桌面作用域", if (current.launcherInScope) "已包含" else "未包含")
+                    DiagnosticValueRow("系统界面作用域", if (current.systemUiInScope) "已包含" else "未包含")
                     DiagnosticValueRow("目标状态", targetStateLabel(current.targetState, current.launcherLoaded))
                     DiagnosticValueRow("触发距离", "${current.thresholdDp} dp")
                     if (!current.nativeHealthy && current.nativeDetail.isNotBlank() && current.nativeProfile.isNotBlank()) {
@@ -359,8 +361,6 @@ private fun DiagnosticValueRow(label: String, value: String) {
             modifier = Modifier.weight(1f),
             fontSize = 13.sp,
             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.End,
         )
     }
@@ -391,6 +391,7 @@ private fun collectDiagnosticUiSnapshot(context: Context): DiagnosticUiSnapshot 
         thresholdDp = service.thresholdDp(),
         launcherVersion = DiagnosticsCollector.readLauncherVersion(context),
         launcherInScope = runtime.launcherInScope(),
+        systemUiInScope = runtime.systemUiInScope(),
         hyosRuntimeDetected = runtime.hyosRuntimeDetected(),
         hyosSpawnerPresent = runtime.hyosSpawnerPresent(),
         lsposedSupported = runtime.lsposedSupported(),
@@ -435,11 +436,6 @@ private fun nativeLogSummary(log: String): String {
     if (trimmed == "日志记录已关闭。") return "已关闭"
     val lines = trimmed.lineSequence().count()
     return "$lines 行"
-}
-
-private fun conciseLauncherVersion(version: String): String {
-    if (version.isBlank()) return "未知"
-    return Regex("\\d+\\.\\d+\\.\\d+\\.\\d+").find(version)?.value ?: version
 }
 
 private fun diagnosticPagePadding(contentPadding: PaddingValues): PaddingValues = PaddingValues(
