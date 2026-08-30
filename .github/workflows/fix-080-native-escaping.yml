@@ -1,0 +1,50 @@
+name: Fix 0.8.0 native escaping
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/fix-080-native-escaping.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - name: Normalize generated native source
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path('native/src/main.cpp')
+          s = p.read_text()
+          start = s.find(r'\nusing HapticFeedbackFn')
+          end = s.find('\nfloat gateHorizontalDistance', start)
+          if start < 0 or end < 0:
+              raise SystemExit(f'main.cpp generated helper block not found start={start} end={end}')
+          block = s[start:end]
+          block = block.replace(r'\n', '\n')
+          s = s[:start] + block + s[end:]
+          p.write_text(s)
+
+          p = Path('native/src/swipe_hook_entry.S')
+          s = p.read_text()
+          start = s.find(r'\n\n// Haptic lifecycle hooks')
+          if start < 0:
+              raise SystemExit('assembly generated block not found')
+          s = s[:start] + s[start:].replace(r'\n', '\n')
+          p.write_text(s)
+          PY
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add native/src/main.cpp native/src/swipe_hook_entry.S
+          git commit -m "fix: normalize generated haptic native source"
+          git push origin HEAD:dev
