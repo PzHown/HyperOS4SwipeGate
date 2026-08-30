@@ -255,7 +255,7 @@ private fun SwipeGateManager() {
                         listState = homeListState,
                         scrollBehavior = homeScrollBehavior,
                     )
-                    MainTab.Diagnostics -> DiagnosticsPage(
+                    MainTab.Diagnostics -> DiagnosticsScreen(
                         contentPadding = innerPadding,
                         listState = diagnosticsListState,
                         scrollBehavior = diagnosticsScrollBehavior,
