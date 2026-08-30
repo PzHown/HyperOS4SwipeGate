@@ -468,7 +468,169 @@ int readThresholdDp() {
     }
     return thresholdDp;
 }
-\nusing HapticFeedbackFn = void (*)(void *, int32_t);\n\nvoid hapticFeedbackCaptureHook(void *storage, int32_t constant) {\n    if (storage != nullptr) {\n        uintptr_t arc = 0;\n        std::memcpy(&arc, storage, sizeof(arc));\n        arc &= kPointerTagMask;\n        if (arc >= 0x10000u) {\n            gCapturedHapticArc.store(arc, std::memory_order_release);\n            gHapticUnavailableLogged.store(false, std::memory_order_release);\n        }\n    }\n\n    const auto original = reinterpret_cast<HapticFeedbackFn>(\n            gOriginalHapticFeedback.load(std::memory_order_acquire));\n    if (original != nullptr) original(storage, constant);\n}\n\nbool installHapticCaptureHookFromHandle(void *handle) {\n    if (handle == nullptr || gHookFunction == nullptr || !isLauncherProcess()) return false;\n    if (gHapticCaptureHookInstalled.load(std::memory_order_acquire)) return true;\n\n    bool expected = false;\n    if (!gHapticInstallInProgress.compare_exchange_strong(\n            expected, true, std::memory_order_acq_rel)) {\n        return gHapticCaptureHookInstalled.load(std::memory_order_acquire);\n    }\n\n    // LSPosed's native loader callback supplies this already-loaded handle.\n    // Never call dlopen/RTLD_DEFAULT here: that was the lock-order hazard in 0.8.0 v1.\n    void *target = dlsym(handle, kHapticSymbol);\n    void *standard = dlsym(handle, kStandardHapticSymbol);\n    if (target == nullptr) {\n        logLine(ANDROID_LOG_WARN,\n                "HAPTIC_V2 symbol unavailable lib=%s symbol=%s handle=%p",\n                kHapticLibrary, kHapticSymbol, handle);\n        gHapticInstallInProgress.store(false, std::memory_order_release);\n        return false;\n    }\n\n    void *backup = nullptr;\n    const int rc = gHookFunction(\n            target, reinterpret_cast<void *>(hapticFeedbackCaptureHook), &backup);\n    if (rc != 0 || backup == nullptr) {\n        logLine(ANDROID_LOG_ERROR,\n                "HAPTIC_V2 capture hook failed rc=%d target=%p backup=%p",\n                rc, target, backup);\n        gHapticInstallInProgress.store(false, std::memory_order_release);\n        return false;\n    }\n\n    gOriginalHapticFeedback.store(backup, std::memory_order_release);\n    gStandardHapticFeedback.store(standard, std::memory_order_release);\n    gHapticCaptureHookInstalled.store(true, std::memory_order_release);\n    gHapticInstallInProgress.store(false, std::memory_order_release);\n    logLine(ANDROID_LOG_INFO,\n            "HAPTIC_V2 capture hook ready target=%p standard=%p policy=loader-handle-only watchdog=off",\n            target, standard);\n    return true;\n}\n\nbool performNativeHaptic(const char *stage, bool light) {\n    const auto original = reinterpret_cast<HapticFeedbackFn>(\n            gOriginalHapticFeedback.load(std::memory_order_acquire));\n    const uintptr_t arc = gCapturedHapticArc.load(std::memory_order_acquire);\n    if (original == nullptr || arc < 0x10000u) {\n        bool expected = false;\n        if (gHapticUnavailableLogged.compare_exchange_strong(expected, true)) {\n            logLine(ANDROID_LOG_WARN,\n                    "HAPTIC_V2 skipped stage=%s reason=%s hook=%d arc=%p",\n                    stage == nullptr ? "unknown" : stage,\n                    original == nullptr ? "capture-hook-not-ready" : "runtime-arc-not-captured",\n                    original == nullptr ? 0 : 1, reinterpret_cast<void *>(arc));\n        }\n        return false;\n    }\n\n    void *storage = reinterpret_cast<void *>(arc);\n    if (light) {\n        const auto standard = reinterpret_cast<HapticFeedbackFn>(\n                gStandardHapticFeedback.load(std::memory_order_acquire));\n        if (standard != nullptr) {\n            standard(&storage, kReadyHapticConstant);\n            logLine(ANDROID_LOG_INFO,\n                    "HAPTIC_V2 feedback stage=%s kind=light constant=%d",\n                    stage == nullptr ? "unknown" : stage, kReadyHapticConstant);\n            return true;\n        }\n    }\n\n    original(&storage, kCommitHapticConstant);\n    logLine(ANDROID_LOG_INFO,\n            "HAPTIC_V2 feedback stage=%s kind=%s constant=%d",\n            stage == nullptr ? "unknown" : stage, light ? "light-fallback" : "commit",\n            kCommitHapticConstant);\n    return true;\n}\n\nuintptr_t resolveUniqueAuxPattern(const LibraryInfo &library,\n                                  const uint8_t *bytes, size_t size) {\n    if (bytes == nullptr || size == 0) return 0;\n    uintptr_t found = 0;\n    for (size_t rangeIndex = 0; rangeIndex < library.executableRangeCount; ++rangeIndex) {\n        const ExecutableRange &range = library.executableRanges[rangeIndex];\n        if (range.start == 0 || range.size < size) continue;\n        const uintptr_t start = (range.start + 3u) & ~static_cast<uintptr_t>(3u);\n        const uintptr_t last = range.start + range.size - size;\n        for (uintptr_t cursor = start; cursor <= last; cursor += 4u) {\n            if (std::memcmp(reinterpret_cast<const void *>(cursor), bytes, size) != 0) continue;\n            if (found != 0 && found != cursor) return 0;\n            found = cursor;\n        }\n    }\n    return found;\n}\n\nuintptr_t resolveBackInvokeTarget(const LibraryInfo &library) {\n    if (std::strcmp(gActivePatternName, "8.01.02.5459-v1") == 0) {\n        return resolveUniqueAuxPattern(\n                library, kOnBackInvokePatternV1, sizeof(kOnBackInvokePatternV1));\n    }\n    if (std::strcmp(gActivePatternName, "8.01.02.6174-v2") == 0) {\n        return resolveUniqueAuxPattern(\n                library, kOnBackInvokePatternV2, sizeof(kOnBackInvokePatternV2));\n    }\n    return 0;\n}\n\nbool installBackInvokeHapticHook(const LibraryInfo &library) {\n    if (library.base == 0 || gHookFunction == nullptr) return false;\n    const uintptr_t target = resolveBackInvokeTarget(library);\n    if (target == 0) {\n        logLine(ANDROID_LOG_WARN,\n                "HAPTIC_V2 commit hook unresolved profile=%s; ready haptic remains available",\n                gActivePatternName);\n        return false;\n    }\n    if (gBackInvokeHookInstalled.load(std::memory_order_acquire)\n            && gBackInvokeTarget.load(std::memory_order_acquire) == target) {\n        return true;\n    }\n\n    void *backup = nullptr;\n    const int rc = gHookFunction(\n            reinterpret_cast<void *>(target),\n            reinterpret_cast<void *>(swipegate_on_back_invoke_hook), &backup);\n    if (rc != 0 || backup == nullptr) {\n        logLine(ANDROID_LOG_ERROR,\n                "HAPTIC_V2 commit hook failed rc=%d target=%p backup=%p",\n                rc, reinterpret_cast<void *>(target), backup);\n        return false;\n    }\n\n    __atomic_store_n(&gSwipeGateOriginalOnBackInvoke, backup, __ATOMIC_RELEASE);\n    gBackInvokeTarget.store(target, std::memory_order_release);\n    gBackInvokeHookInstalled.store(true, std::memory_order_release);\n    logLine(ANDROID_LOG_INFO,\n            "HAPTIC_V2 commit hook ready profile=%s target=%p watchdog=off",\n            gActivePatternName, reinterpret_cast<void *>(target));\n    return true;\n}\n
+
+using HapticFeedbackFn = void (*)(void *, int32_t);
+
+void hapticFeedbackCaptureHook(void *storage, int32_t constant) {
+    if (storage != nullptr) {
+        uintptr_t arc = 0;
+        std::memcpy(&arc, storage, sizeof(arc));
+        arc &= kPointerTagMask;
+        if (arc >= 0x10000u) {
+            gCapturedHapticArc.store(arc, std::memory_order_release);
+            gHapticUnavailableLogged.store(false, std::memory_order_release);
+        }
+    }
+
+    const auto original = reinterpret_cast<HapticFeedbackFn>(
+            gOriginalHapticFeedback.load(std::memory_order_acquire));
+    if (original != nullptr) original(storage, constant);
+}
+
+bool installHapticCaptureHookFromHandle(void *handle) {
+    if (handle == nullptr || gHookFunction == nullptr || !isLauncherProcess()) return false;
+    if (gHapticCaptureHookInstalled.load(std::memory_order_acquire)) return true;
+
+    bool expected = false;
+    if (!gHapticInstallInProgress.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+        return gHapticCaptureHookInstalled.load(std::memory_order_acquire);
+    }
+
+    // LSPosed's native loader callback supplies this already-loaded handle.
+    // Never call dlopen/RTLD_DEFAULT here: that was the lock-order hazard in 0.8.0 v1.
+    void *target = dlsym(handle, kHapticSymbol);
+    void *standard = dlsym(handle, kStandardHapticSymbol);
+    if (target == nullptr) {
+        logLine(ANDROID_LOG_WARN,
+                "HAPTIC_V2 symbol unavailable lib=%s symbol=%s handle=%p",
+                kHapticLibrary, kHapticSymbol, handle);
+        gHapticInstallInProgress.store(false, std::memory_order_release);
+        return false;
+    }
+
+    void *backup = nullptr;
+    const int rc = gHookFunction(
+            target, reinterpret_cast<void *>(hapticFeedbackCaptureHook), &backup);
+    if (rc != 0 || backup == nullptr) {
+        logLine(ANDROID_LOG_ERROR,
+                "HAPTIC_V2 capture hook failed rc=%d target=%p backup=%p",
+                rc, target, backup);
+        gHapticInstallInProgress.store(false, std::memory_order_release);
+        return false;
+    }
+
+    gOriginalHapticFeedback.store(backup, std::memory_order_release);
+    gStandardHapticFeedback.store(standard, std::memory_order_release);
+    gHapticCaptureHookInstalled.store(true, std::memory_order_release);
+    gHapticInstallInProgress.store(false, std::memory_order_release);
+    logLine(ANDROID_LOG_INFO,
+            "HAPTIC_V2 capture hook ready target=%p standard=%p policy=loader-handle-only watchdog=off",
+            target, standard);
+    return true;
+}
+
+bool performNativeHaptic(const char *stage, bool light) {
+    const auto original = reinterpret_cast<HapticFeedbackFn>(
+            gOriginalHapticFeedback.load(std::memory_order_acquire));
+    const uintptr_t arc = gCapturedHapticArc.load(std::memory_order_acquire);
+    if (original == nullptr || arc < 0x10000u) {
+        bool expected = false;
+        if (gHapticUnavailableLogged.compare_exchange_strong(expected, true)) {
+            logLine(ANDROID_LOG_WARN,
+                    "HAPTIC_V2 skipped stage=%s reason=%s hook=%d arc=%p",
+                    stage == nullptr ? "unknown" : stage,
+                    original == nullptr ? "capture-hook-not-ready" : "runtime-arc-not-captured",
+                    original == nullptr ? 0 : 1, reinterpret_cast<void *>(arc));
+        }
+        return false;
+    }
+
+    void *storage = reinterpret_cast<void *>(arc);
+    if (light) {
+        const auto standard = reinterpret_cast<HapticFeedbackFn>(
+                gStandardHapticFeedback.load(std::memory_order_acquire));
+        if (standard != nullptr) {
+            standard(&storage, kReadyHapticConstant);
+            logLine(ANDROID_LOG_INFO,
+                    "HAPTIC_V2 feedback stage=%s kind=light constant=%d",
+                    stage == nullptr ? "unknown" : stage, kReadyHapticConstant);
+            return true;
+        }
+    }
+
+    original(&storage, kCommitHapticConstant);
+    logLine(ANDROID_LOG_INFO,
+            "HAPTIC_V2 feedback stage=%s kind=%s constant=%d",
+            stage == nullptr ? "unknown" : stage, light ? "light-fallback" : "commit",
+            kCommitHapticConstant);
+    return true;
+}
+
+uintptr_t resolveUniqueAuxPattern(const LibraryInfo &library,
+                                  const uint8_t *bytes, size_t size) {
+    if (bytes == nullptr || size == 0) return 0;
+    uintptr_t found = 0;
+    for (size_t rangeIndex = 0; rangeIndex < library.executableRangeCount; ++rangeIndex) {
+        const ExecutableRange &range = library.executableRanges[rangeIndex];
+        if (range.start == 0 || range.size < size) continue;
+        const uintptr_t start = (range.start + 3u) & ~static_cast<uintptr_t>(3u);
+        const uintptr_t last = range.start + range.size - size;
+        for (uintptr_t cursor = start; cursor <= last; cursor += 4u) {
+            if (std::memcmp(reinterpret_cast<const void *>(cursor), bytes, size) != 0) continue;
+            if (found != 0 && found != cursor) return 0;
+            found = cursor;
+        }
+    }
+    return found;
+}
+
+uintptr_t resolveBackInvokeTarget(const LibraryInfo &library) {
+    if (std::strcmp(gActivePatternName, "8.01.02.5459-v1") == 0) {
+        return resolveUniqueAuxPattern(
+                library, kOnBackInvokePatternV1, sizeof(kOnBackInvokePatternV1));
+    }
+    if (std::strcmp(gActivePatternName, "8.01.02.6174-v2") == 0) {
+        return resolveUniqueAuxPattern(
+                library, kOnBackInvokePatternV2, sizeof(kOnBackInvokePatternV2));
+    }
+    return 0;
+}
+
+bool installBackInvokeHapticHook(const LibraryInfo &library) {
+    if (library.base == 0 || gHookFunction == nullptr) return false;
+    const uintptr_t target = resolveBackInvokeTarget(library);
+    if (target == 0) {
+        logLine(ANDROID_LOG_WARN,
+                "HAPTIC_V2 commit hook unresolved profile=%s; ready haptic remains available",
+                gActivePatternName);
+        return false;
+    }
+    if (gBackInvokeHookInstalled.load(std::memory_order_acquire)
+            && gBackInvokeTarget.load(std::memory_order_acquire) == target) {
+        return true;
+    }
+
+    void *backup = nullptr;
+    const int rc = gHookFunction(
+            reinterpret_cast<void *>(target),
+            reinterpret_cast<void *>(swipegate_on_back_invoke_hook), &backup);
+    if (rc != 0 || backup == nullptr) {
+        logLine(ANDROID_LOG_ERROR,
+                "HAPTIC_V2 commit hook failed rc=%d target=%p backup=%p",
+                rc, reinterpret_cast<void *>(target), backup);
+        return false;
+    }
+
+    __atomic_store_n(&gSwipeGateOriginalOnBackInvoke, backup, __ATOMIC_RELEASE);
+    gBackInvokeTarget.store(target, std::memory_order_release);
+    gBackInvokeHookInstalled.store(true, std::memory_order_release);
+    logLine(ANDROID_LOG_INFO,
+            "HAPTIC_V2 commit hook ready profile=%s target=%p watchdog=off",
+            gActivePatternName, reinterpret_cast<void *>(target));
+    return true;
+}
+
 float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDistancePx) {
     const int configuredDp = readThresholdDp();
     const int effectiveDp = configuredDp == 0 ? kStockBoundaryDp : std::max(configuredDp, kStockBoundaryDp);
