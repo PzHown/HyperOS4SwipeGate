@@ -132,19 +132,19 @@ internal fun HomeScreen(
     }
     val primaryLabel = when (snapshot.state) {
         HomeHookState.Active -> "运行正常"
-        HomeHookState.Repairing -> "正在更新"
-        HomeHookState.Error -> "异常"
-        HomeHookState.Inactive -> "未激活"
-        HomeHookState.Unknown -> "状态未知"
-        HomeHookState.Loading -> "检测中"
+        HomeHookState.Repairing -> "正在重新加载"
+        HomeHookState.Error -> "运行异常"
+        HomeHookState.Inactive -> "模块未激活"
+        HomeHookState.Unknown -> "状态待确认"
+        HomeHookState.Loading -> "正在检测"
     }
     val secondaryLabel = when (snapshot.state) {
-        HomeHookState.Active -> "系统桌面已加载"
-        HomeHookState.Repairing -> "模块更新中"
-        HomeHookState.Error -> "模块需要检查"
-        HomeHookState.Inactive -> "模块未加载"
-        HomeHookState.Unknown -> "等待运行状态"
-        HomeHookState.Loading -> "正在检测"
+        HomeHookState.Active -> "模块已加载至系统桌面"
+        HomeHookState.Repairing -> "正在同步运行状态"
+        HomeHookState.Error -> "请查看诊断信息"
+        HomeHookState.Inactive -> "模块尚未加载至系统桌面"
+        HomeHookState.Unknown -> "等待运行状态确认"
+        HomeHookState.Loading -> "正在读取运行状态"
     }
 
     LazyColumn(
@@ -263,7 +263,7 @@ internal fun HomeScreen(
             }
         }
 
-        item { SmallTitle("关于") }
+        item { SmallTitle("产品信息") }
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Row(
@@ -283,15 +283,15 @@ internal fun HomeScreen(
                         Text("SwipeGate", fontSize = 19.sp, fontWeight = FontWeight.Bold)
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = "${BuildConfig.VERSION_NAME} · HyperOS 4 · Launcher 8.0+",
+                            text = "版本 ${BuildConfig.VERSION_NAME} · HyperOS 4 · Launcher 8.0+",
                             fontSize = 13.sp,
                             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                         )
                     }
                 }
                 ArrowPreference(
-                    title = "GitHub 项目",
-                    summary = "PzHown/HyperOS4SwipeGate",
+                    title = "项目主页",
+                    summary = "GitHub · PzHown/HyperOS4SwipeGate",
                     onClick = {
                         context.startActivity(
                             Intent(
@@ -302,15 +302,15 @@ internal fun HomeScreen(
                     },
                 )
                 ArrowPreference(
-                    title = "开发者",
-                    summary = "PzHown · GitHub",
+                    title = "开发者主页",
+                    summary = "GitHub · PzHown",
                     onClick = {
                         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/PzHown")))
                     },
                 )
                 ArrowPreference(
-                    title = "酷安",
-                    summary = "PzHown",
+                    title = "社区主页",
+                    summary = "酷安 · PzHown",
                     onClick = {
                         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.coolapk.com/u/464418")))
                     },
@@ -396,7 +396,7 @@ private fun collectHomeStatusSnapshot(context: Context): HomeStatusSnapshot {
         )
     }
     if (!runtime.lsposedSupported()) {
-        return status(HomeHookState.Error, "LSPosed 版本不满足要求。")
+        return status(HomeHookState.Error, "当前 LSPosed 版本不受支持。")
     }
     if (!runtime.hyosSpawnerPresent()) {
         return status(HomeHookState.Error, "未检测到 HyOS Runtime。")
@@ -405,15 +405,15 @@ private fun collectHomeStatusSnapshot(context: Context): HomeStatusSnapshot {
         return status(HomeHookState.Inactive, "系统桌面未加入模块作用域。")
     }
     if (!runtime.zygiskNextSupported()) {
-        return status(HomeHookState.Error, "当前运行环境不支持 HyOS Runtime。")
+        return status(HomeHookState.Error, "当前运行环境不满足 HyOS Runtime 要求。")
     }
     if (!service.launcherLoaded()) {
-        return status(HomeHookState.Inactive, "系统桌面尚未加载模块。")
+        return status(HomeHookState.Inactive, "模块尚未加载至系统桌面。")
     }
 
     return when (service.targetState()) {
-        "RELOADING" -> status(HomeHookState.Repairing, "模块代码正在重新加载。")
-        "FAILED" -> status(HomeHookState.Error, "目标进程模块更新失败。")
+        "RELOADING" -> status(HomeHookState.Repairing, "模块正在重新加载。")
+        "FAILED" -> status(HomeHookState.Error, "目标进程模块加载失败。")
         else -> status(HomeHookState.Active)
     }
 }
