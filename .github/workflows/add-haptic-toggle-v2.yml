@@ -1,0 +1,96 @@
+name: Add native haptic toggle v2
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/add-haptic-toggle-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - name: Patch haptic toggle
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def sub(path, old, new, count=1):
+              p = Path(path)
+              s = p.read_text()
+              if s.count(old) < count:
+                  raise SystemExit(f'missing pattern in {path}: {old[:100]!r}')
+              p.write_text(s.replace(old, new, count))
+
+          cfg='app/src/main/java/io/github/pzhown/hyperos4swipegate/ConfigBridge.java'
+          sub(cfg,'    public static final String PREF_KEY_LOG_LEVEL = "native_log_level";\n',
+              '    public static final String PREF_KEY_LOG_LEVEL = "native_log_level";\n    public static final String PREF_KEY_HAPTIC_ENABLED = "haptic_feedback_enabled";\n    public static final boolean DEFAULT_HAPTIC_ENABLED = false;\n')
+          sub(cfg,'    public static void applyLogLevelAsync(Context context, int logLevel, Callback callback) {\n',
+              '    public static void applyHapticEnabledAsync(Context context, boolean enabled, Callback callback) {\n        Context app = context.getApplicationContext();\n        localPreferences(app).edit().putBoolean(PREF_KEY_HAPTIC_ENABLED, enabled).apply();\n        NativeControlBridge.initialize(app);\n        NativeControlBridge.requestConfigRefresh();\n        Result result = new Result(true, enabled ? 1 : 0, "ok");\n        MAIN.post(() -> callback.onResult(result));\n    }\n\n    public static void applyLogLevelAsync(Context context, int logLevel, Callback callback) {\n')
+
+          settings='app/src/main/java/io/github/pzhown/hyperos4swipegate/SettingsScreen.kt'
+          sub(settings,'    var launcherIconHidden by remember { mutableStateOf(isLauncherIconHidden(context)) }\n',
+              '    var launcherIconHidden by remember { mutableStateOf(isLauncherIconHidden(context)) }\n    var hapticEnabled by remember {\n        mutableStateOf(prefs.getBoolean(ConfigBridge.PREF_KEY_HAPTIC_ENABLED, ConfigBridge.DEFAULT_HAPTIC_ENABLED))\n    }\n')
+          sub(settings,'        item { SmallTitle("外观") }\n',
+              '        item { SmallTitle("功能") }\n        item {\n            Card(modifier = Modifier.fillMaxWidth()) {\n                SwitchPreference(\n                    checked = hapticEnabled,\n                    onCheckedChange = { enabled ->\n                        hapticEnabled = enabled\n                        ConfigBridge.applyHapticEnabledAsync(context, enabled) { result ->\n                            if (!result.success()) {\n                                hapticEnabled = !enabled\n                                Toast.makeText(context, "触感反馈同步失败", Toast.LENGTH_SHORT).show()\n                            }\n                        }\n                    },\n                    title = "触感反馈",\n                    summary = if (hapticEnabled) "达到阈值与确认返回时提供震动反馈" else "不添加额外震动反馈",\n                )\n            }\n        }\n\n        item { SmallTitle("外观") }\n')
+
+          bridge='app/src/main/java/io/github/pzhown/hyperos4swipegate/NativeControlBridge.java'
+          sub(bridge,'    public static void requestSync() {\n',
+              '    public static void requestConfigRefresh() {\n        PENDING_NONCE.set(0L);\n        unansweredSinceElapsedMs = 0L;\n        requestSync();\n    }\n\n    public static void requestSync() {\n')
+          sub(bridge,'        try {\n            Intent query = new Intent(SystemUiBridgeModule.ACTION_APP_QUERY)\n',
+              '        boolean hapticEnabled = ConfigBridge.localPreferences(context).getBoolean(\n                ConfigBridge.PREF_KEY_HAPTIC_ENABLED, ConfigBridge.DEFAULT_HAPTIC_ENABLED);\n\n        try {\n            Intent query = new Intent(SystemUiBridgeModule.ACTION_APP_QUERY)\n')
+          sub(bridge,'                    .putExtra(SystemUiBridgeModule.EXTRA_LOG_LEVEL, logLevel)\n                    .putExtra(SystemUiBridgeModule.EXTRA_SENDER_UID, Process.myUid());\n',
+              '                    .putExtra(SystemUiBridgeModule.EXTRA_LOG_LEVEL, logLevel)\n                    .putExtra(SystemUiBridgeModule.EXTRA_HAPTIC_ENABLED, hapticEnabled)\n                    .putExtra(SystemUiBridgeModule.EXTRA_SENDER_UID, Process.myUid());\n')
+
+          sysui='app/src/main/java/io/github/pzhown/hyperos4swipegate/SystemUiBridgeModule.java'
+          sub(sysui,'    static final String EXTRA_LOG_LEVEL = "swipegate_log_level";\n',
+              '    static final String EXTRA_LOG_LEVEL = "swipegate_log_level";\n    static final String EXTRA_HAPTIC_ENABLED = "swipegate_haptic_enabled";\n')
+          sub(sysui,'            final int logLevel = intent.getIntExtra(\n                    EXTRA_LOG_LEVEL, ConfigBridge.DEFAULT_LOG_LEVEL);\n',
+              '            final int logLevel = intent.getIntExtra(\n                    EXTRA_LOG_LEVEL, ConfigBridge.DEFAULT_LOG_LEVEL);\n            final boolean hapticEnabled = intent.getBooleanExtra(\n                    EXTRA_HAPTIC_ENABLED, ConfigBridge.DEFAULT_HAPTIC_ENABLED);\n')
+          sub(sysui,'                        .putExtra(EXTRA_LOG_LEVEL, logLevel)\n                        .putExtra(EXTRA_SENDER_UID, Process.myUid());\n',
+              '                        .putExtra(EXTRA_LOG_LEVEL, logLevel)\n                        .putExtra(EXTRA_HAPTIC_ENABLED, hapticEnabled)\n                        .putExtra(EXTRA_SENDER_UID, Process.myUid());\n')
+          sub(sysui,'                        .putExtra(EXTRA_LOG_LEVEL,\n                                intent.getIntExtra(EXTRA_LOG_LEVEL,\n                                        ConfigBridge.DEFAULT_LOG_LEVEL))\n',
+              '                        .putExtra(EXTRA_LOG_LEVEL,\n                                intent.getIntExtra(EXTRA_LOG_LEVEL,\n                                        ConfigBridge.DEFAULT_LOG_LEVEL))\n                        .putExtra(EXTRA_HAPTIC_ENABLED,\n                                intent.getBooleanExtra(EXTRA_HAPTIC_ENABLED,\n                                        ConfigBridge.DEFAULT_HAPTIC_ENABLED))\n')
+
+          hdr='native/include/control_channel.h'
+          sub(hdr,'int swipegate_control_log_level();\n','int swipegate_control_log_level();\nint swipegate_control_haptic_enabled();\n')
+
+          cc='native/src/control_channel.cpp'
+          sub(cc,'constexpr const char *kLogLevelExtra = "swipegate_log_level";\n',
+              'constexpr const char *kLogLevelExtra = "swipegate_log_level";\nconstexpr const char *kHapticEnabledExtra = "swipegate_haptic_enabled";\n')
+          sub(cc,'int gLogLevel = -1;\n','int gLogLevel = -1;\nint gHapticEnabled = -1;\n')
+          sub(cc,'    int logLevel;\n    std::string pattern;\n','    int logLevel;\n    int hapticEnabled;\n    std::string pattern;\n')
+          sub(cc,'        logLevel = gLogLevel;\n        pattern = gPattern.substr(0, kMaxPatternBytes);\n',
+              '        logLevel = gLogLevel;\n        hapticEnabled = gHapticEnabled;\n        pattern = gPattern.substr(0, kMaxPatternBytes);\n')
+          sub(cc,'            || !addBundleI32(extras, kLogLevelExtra, logLevel)\n            || !addBundleI32(extras, kSenderUidExtra, static_cast<int32_t>(getuid()))\n',
+              '            || !addBundleI32(extras, kLogLevelExtra, logLevel)\n            || !addBundleBool(extras, kHapticEnabledExtra, hapticEnabled > 0)\n            || !addBundleI32(extras, kSenderUidExtra, static_cast<int32_t>(getuid()))\n')
+          sub(cc,'    int32_t logLevel = -1;\n    int64_t nonce = 0;\n','    int32_t logLevel = -1;\n    bool hapticEnabled = false;\n    int64_t nonce = 0;\n')
+          sub(cc,'            || !readNativeI32(extras, kLogLevelExtra, &logLevel)\n            || nonce <= 0 || !verifyPackageUid(kSystemUiPackage, senderUid)\n',
+              '            || !readNativeI32(extras, kLogLevelExtra, &logLevel)\n            || !readNativeBool(extras, kHapticEnabledExtra, &hapticEnabled)\n            || nonce <= 0 || !verifyPackageUid(kSystemUiPackage, senderUid)\n')
+          sub(cc,'    bool thresholdChanged;\n    bool logLevelChanged;\n','    bool thresholdChanged;\n    bool logLevelChanged;\n    bool hapticChanged;\n')
+          sub(cc,'        logLevelChanged = gLogLevel != logLevel;\n        gThresholdDp = thresholdDp;\n        gLogLevel = logLevel;\n',
+              '        logLevelChanged = gLogLevel != logLevel;\n        hapticChanged = gHapticEnabled != (hapticEnabled ? 1 : 0);\n        gThresholdDp = thresholdDp;\n        gLogLevel = logLevel;\n        gHapticEnabled = hapticEnabled ? 1 : 0;\n')
+          sub(cc,'extern "C" void swipegate_control_on_log(int, const char *text) {\n',
+              'extern "C" int swipegate_control_haptic_enabled() {\n    SpinGuard guard;\n    return gHapticEnabled;\n}\n\nextern "C" void swipegate_control_on_log(int, const char *text) {\n')
+
+          main='native/src/main.cpp'
+          sub(main,'#include "native_api.h"\n#include "swipe_semantic_resolver.h"\n',
+              '#include "native_api.h"\n#include "swipe_semantic_resolver.h"\n#include "control_channel.h"\n')
+          sub(main,'bool performNativeHaptic(const char *stage, bool light) {\n    const auto original = reinterpret_cast<HapticFeedbackFn>(\n',
+              'bool performNativeHaptic(const char *stage, bool light) {\n    swipegate_control_sync_if_due();\n    if (swipegate_control_haptic_enabled() != 1) return false;\n\n    const auto original = reinterpret_cast<HapticFeedbackFn>(\n')
+
+          Path('.github/workflows/add-haptic-toggle-v2.yml').unlink()
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: add haptic feedback toggle"
+          git push origin dev
