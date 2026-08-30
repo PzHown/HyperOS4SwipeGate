@@ -153,7 +153,10 @@ std::atomic<bool> gHapticInstallInProgress{false};
 std::atomic<bool> gHapticCaptureHookInstalled{false};
 std::atomic<bool> gHapticUnavailableLogged{false};
 std::atomic<int64_t> gLastHapticFeatureResolveMs{0};
-std::atomic<bool> gReadyHapticLatched{false};
+// Haptic segment state is independent from the Launcher hook health state.
+// 0 = outside/idle, 1 = first segment (Back, below custom threshold),
+// 2 = second segment (custom threshold reached). Only entering segment 1 is replayed.
+std::atomic<int> gHapticGestureSegment{0};
 std::atomic<uintptr_t> gBackInvokeTarget{0};
 std::atomic<bool> gBackInvokeHookInstalled{false};
 
@@ -859,18 +862,20 @@ float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDi
         gPassthroughCount.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // Custom thresholds use the custom boundary. Stock mode follows Launcher
-    // readyFinish. Trigger only on the false -> true boundary and re-arm after
-    // the gesture leaves ready state. No mutex or symbol lookup occurs here.
-    const bool hapticReady = delayBeyondStock ? userGateReached : readyFinish;
-    if (hapticReady) {
-        bool expected = false;
-        if (gReadyHapticLatched.compare_exchange_strong(
-                expected, true, std::memory_order_acq_rel)) {
-            performNativeHaptic("ready", true);
-        }
-    } else {
-        gReadyHapticLatched.store(false, std::memory_order_release);
+    // The module only fills the missing first-segment feedback. Xiaomi owns the
+    // second-segment/commit feedback, so crossing into >= userGatePx must not replay
+    // another vibration here. readyFinish identifies that the Back (first) segment is
+    // actually armed; userGateReached separates the custom second segment.
+    int hapticSegment = 0;
+    if (delayBeyondStock && userGateReached) {
+        hapticSegment = 2;
+    } else if (readyFinish) {
+        hapticSegment = 1;
+    }
+    const int previousHapticSegment = gHapticGestureSegment.exchange(
+            hapticSegment, std::memory_order_acq_rel);
+    if (hapticSegment == 1 && previousHapticSegment != 1) {
+        performNativeHaptic(previousHapticSegment == 2 ? "return-first" : "first", true);
     }
 
     const int64_t now = monotonicMs();
@@ -961,7 +966,7 @@ bool installFreshHookLocked(const LibraryInfo &library, uintptr_t target,
             densityDpi > 0 ? dpToPx(effectiveDp, densityDpi) : 0.0f,
             probeHex(patchedHead).c_str(),
             static_cast<unsigned long long>(gRepairCount.load(std::memory_order_relaxed)));
-    installBackInvokeHapticHook(library);
+    // No module commit hook: preserve Xiaomi's native second-segment/commit haptic exactly once.
     return true;
 }
 
@@ -1225,8 +1230,9 @@ __attribute__((visibility("hidden"))) void swipegate_hook_exit() {
 }
 
 __attribute__((visibility("hidden"))) void swipegate_haptic_on_back_invoke() {
-    const bool wasReady = gReadyHapticLatched.exchange(false, std::memory_order_acq_rel);
-    if (wasReady) performNativeHaptic("commit", false);
+    // Kept ABI-compatible with the assembly shim, but dev.8 no longer installs this hook.
+    // If a stale in-process hook ever reaches it, only reset segment state; never replay commit.
+    gHapticGestureSegment.store(0, std::memory_order_release);
 }
 }
 
@@ -1267,7 +1273,7 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
             reinterpret_cast<void *>(entries->hook_func), reinterpret_cast<void *>(entries->unhook_func),
             static_cast<long long>(kHookHealthIntervalMs));
     logLine(ANDROID_LOG_INFO,
-            "HAPTIC_V2 enabled policy=loaded-elf-dynamic-feature-primary provider-loader-fallback no-apk-open no-haptic-dlopen no-hook-mutex ready=ext-fallback commit=ext-0");
+            "HAPTIC_V2 enabled policy=loaded-elf-dynamic-feature-primary provider-loader-fallback first-segment-only no-module-second no-module-commit no-apk-open no-haptic-dlopen no-hook-mutex");
 
     const LibraryInfo library = findLauncherLibrary();
     if (library.base != 0) {
