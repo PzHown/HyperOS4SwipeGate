@@ -61,6 +61,7 @@ constexpr int64_t kHookIdleWaitMs = 120;
 constexpr int64_t kPatternRescanIntervalMs = 5000;
 constexpr size_t kHookProbeSize = 16;
 constexpr size_t kMaxExecutableRanges = 12;
+constexpr size_t kMaxLoadRanges = 16;
 
 constexpr uintptr_t kReferenceOnSwipeProcessOffset = 0x816fc4;
 
@@ -96,9 +97,9 @@ struct PatternSpec {
 };
 
 constexpr PatternSpec kOnSwipeProcessPatterns[] = {
-        {"8.01.02.5459-v1", kOnSwipeProcessPatternV1, kOnSwipeProcessMaskV1,
+        {"gesture-frame-v1", kOnSwipeProcessPatternV1, kOnSwipeProcessMaskV1,
          sizeof(kOnSwipeProcessPatternV1)},
-        {"8.01.02.6174-v2", kOnSwipeProcessPatternV2, kOnSwipeProcessMaskV2,
+        {"gesture-frame-v2", kOnSwipeProcessPatternV2, kOnSwipeProcessMaskV2,
          sizeof(kOnSwipeProcessPatternV2)},
 };
 
@@ -142,9 +143,9 @@ std::atomic<uint64_t> gRepairCount{0};
 std::atomic<uint64_t> gClampedCount{0};
 std::atomic<uint64_t> gPassthroughCount{0};
 
-// Haptic V2 is deliberately isolated from gHookMutex and the hook-health watchdog.
-// The haptic library is never dlopen'ed by this module: LSPosed gives us the handle
-// after the library is loaded and we resolve symbols exactly once from that handle.
+// Haptic V2 is deliberately isolated from gHookMutex. Primary discovery follows the
+// production Android hook-library pattern used by xHook/ByteHook/xDL: inspect the already
+// loaded Launcher's PT_DYNAMIC metadata in memory. No APK path open and no haptic dlopen.
 std::atomic<void *> gOriginalHapticFeedback{nullptr};
 std::atomic<void *> gStandardHapticFeedback{nullptr};
 std::atomic<uintptr_t> gCapturedHapticArc{0};
@@ -240,8 +241,12 @@ struct ExecutableRange {
 struct LibraryInfo {
     uintptr_t base = 0;
     std::string path;
+    const ElfW(Phdr) *programHeaders = nullptr;
+    ElfW(Half) programHeaderCount = 0;
     std::array<ExecutableRange, kMaxExecutableRanges> executableRanges{};
     size_t executableRangeCount = 0;
+    std::array<ExecutableRange, kMaxLoadRanges> loadRanges{};
+    size_t loadRangeCount = 0;
 };
 
 int libraryCallback(dl_phdr_info *info, size_t, void *data) {
@@ -252,12 +257,21 @@ int libraryCallback(dl_phdr_info *info, size_t, void *data) {
     auto *result = static_cast<LibraryInfo *>(data);
     result->base = static_cast<uintptr_t>(info->dlpi_addr);
     result->path = path;
+    result->programHeaders = info->dlpi_phdr;
+    result->programHeaderCount = info->dlpi_phnum;
     result->executableRangeCount = 0;
+    result->loadRangeCount = 0;
 
     for (ElfW(Half) i = 0; i < info->dlpi_phnum; ++i) {
         const ElfW(Phdr) &phdr = info->dlpi_phdr[i];
-        if (phdr.p_type != PT_LOAD || (phdr.p_flags & PF_X) == 0 || phdr.p_memsz == 0) continue;
-        if (result->executableRangeCount >= result->executableRanges.size()) break;
+        if (phdr.p_type != PT_LOAD || phdr.p_memsz == 0) continue;
+        if (result->loadRangeCount < result->loadRanges.size()) {
+            auto &load = result->loadRanges[result->loadRangeCount++];
+            load.start = result->base + static_cast<uintptr_t>(phdr.p_vaddr);
+            load.size = static_cast<size_t>(phdr.p_memsz);
+        }
+        if ((phdr.p_flags & PF_X) == 0
+                || result->executableRangeCount >= result->executableRanges.size()) continue;
         auto &range = result->executableRanges[result->executableRangeCount++];
         range.start = result->base + static_cast<uintptr_t>(phdr.p_vaddr);
         range.size = static_cast<size_t>(phdr.p_memsz);
@@ -271,101 +285,155 @@ LibraryInfo findLauncherLibrary() {
     return result;
 }
 
-bool preadExactMain(int fd, void *buffer, size_t size, off_t offset) {
-    auto *bytes = static_cast<uint8_t *>(buffer);
-    size_t done = 0;
-    while (done < size) {
-        const ssize_t result = pread(fd, bytes + done, size - done,
-                                     offset + static_cast<off_t>(done));
-        if (result <= 0) return false;
-        done += static_cast<size_t>(result);
+bool rangeContains(const ExecutableRange &range, uintptr_t address, size_t size) {
+    if (range.start == 0 || range.size == 0 || address == 0 || size == 0) return false;
+    if (address < range.start) return false;
+    const uintptr_t rangeEnd = range.start + range.size;
+    const uintptr_t addressEnd = address + size;
+    if (rangeEnd < range.start || addressEnd < address) return false;
+    return addressEnd <= rangeEnd;
+}
+
+bool libraryContainsRange(const LibraryInfo &library, uintptr_t address, size_t size) {
+    for (size_t i = 0; i < library.loadRangeCount; ++i) {
+        if (rangeContains(library.loadRanges[i], address, size)) return true;
     }
-    return true;
+    return false;
+}
+
+uintptr_t resolveLoadedElfPointer(const LibraryInfo &library, ElfW(Addr) value, size_t size) {
+    if (value == 0 || size == 0) return 0;
+    if (value <= UINTPTR_MAX - library.base) {
+        const uintptr_t relative = library.base + static_cast<uintptr_t>(value);
+        if (libraryContainsRange(library, relative, size)) return relative;
+    }
+    const uintptr_t absolute = static_cast<uintptr_t>(value);
+    if (libraryContainsRange(library, absolute, size)) return absolute;
+    return 0;
 }
 
 struct ImportedFunctionResolution {
     uintptr_t slot = 0;
     void *target = nullptr;
     size_t matches = 0;
+    const char *relocationKind = nullptr;
 };
+
+bool dynStringEquals(const LibraryInfo &library, uintptr_t strtab, size_t strsz,
+                     size_t offset, const char *expected) {
+    if (expected == nullptr || strtab == 0 || offset >= strsz) return false;
+    const size_t remaining = strsz - offset;
+    const uintptr_t address = strtab + offset;
+    if (address < strtab || !libraryContainsRange(library, address, remaining)) return false;
+    const char *candidate = reinterpret_cast<const char *>(address);
+    const size_t length = strnlen(candidate, remaining);
+    return length < remaining && std::strlen(expected) == length
+            && std::memcmp(candidate, expected, length) == 0;
+}
 
 ImportedFunctionResolution resolveImportedFunction(const LibraryInfo &library,
                                                    const char *symbolName) {
     ImportedFunctionResolution result{};
-    if (library.base == 0 || library.path.empty() || symbolName == nullptr) return result;
+    if (library.base == 0 || library.programHeaders == nullptr
+            || library.programHeaderCount == 0 || symbolName == nullptr) return result;
 
-    const int fd = open(library.path.c_str(), O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return result;
+    const ElfW(Phdr) *dynamicHeader = nullptr;
+    for (ElfW(Half) i = 0; i < library.programHeaderCount; ++i) {
+        const ElfW(Phdr) &phdr = library.programHeaders[i];
+        if (phdr.p_type == PT_DYNAMIC && phdr.p_memsz >= sizeof(ElfW(Dyn))) {
+            dynamicHeader = &phdr;
+            break;
+        }
+    }
+    if (dynamicHeader == nullptr) return result;
 
-    Elf64_Ehdr header{};
-    if (!preadExactMain(fd, &header, sizeof(header), 0)
-            || std::memcmp(header.e_ident, ELFMAG, SELFMAG) != 0
-            || header.e_ident[EI_CLASS] != ELFCLASS64
-            || header.e_machine != EM_AARCH64
-            || header.e_shentsize != sizeof(Elf64_Shdr)
-            || header.e_shnum == 0 || header.e_shnum > 4096) {
-        close(fd);
-        return result;
+    const uintptr_t dynamicAddress = resolveLoadedElfPointer(
+            library, dynamicHeader->p_vaddr, static_cast<size_t>(dynamicHeader->p_memsz));
+    if (dynamicAddress == 0) return result;
+    const auto *dynamic = reinterpret_cast<const ElfW(Dyn) *>(dynamicAddress);
+    const size_t dynamicCount = static_cast<size_t>(dynamicHeader->p_memsz / sizeof(ElfW(Dyn)));
+
+    ElfW(Addr) symtabValue = 0;
+    ElfW(Addr) strtabValue = 0;
+    ElfW(Addr) jmprelValue = 0;
+    ElfW(Addr) relaValue = 0;
+    size_t strsz = 0;
+    size_t pltrelsz = 0;
+    size_t relasz = 0;
+    size_t syment = sizeof(ElfW(Sym));
+    size_t relaent = sizeof(ElfW(Rela));
+    ElfW(Sxword) pltrelType = DT_RELA;
+
+    for (size_t i = 0; i < dynamicCount; ++i) {
+        const ElfW(Dyn) &entry = dynamic[i];
+        if (entry.d_tag == DT_NULL) break;
+        switch (entry.d_tag) {
+            case DT_SYMTAB: symtabValue = entry.d_un.d_ptr; break;
+            case DT_STRTAB: strtabValue = entry.d_un.d_ptr; break;
+            case DT_STRSZ: strsz = static_cast<size_t>(entry.d_un.d_val); break;
+            case DT_SYMENT: syment = static_cast<size_t>(entry.d_un.d_val); break;
+            case DT_JMPREL: jmprelValue = entry.d_un.d_ptr; break;
+            case DT_PLTRELSZ: pltrelsz = static_cast<size_t>(entry.d_un.d_val); break;
+            case DT_PLTREL: pltrelType = entry.d_un.d_val; break;
+            case DT_RELA: relaValue = entry.d_un.d_ptr; break;
+            case DT_RELASZ: relasz = static_cast<size_t>(entry.d_un.d_val); break;
+            case DT_RELAENT: relaent = static_cast<size_t>(entry.d_un.d_val); break;
+            default: break;
+        }
     }
 
-    std::vector<Elf64_Shdr> sections(header.e_shnum);
-    if (!preadExactMain(fd, sections.data(), sections.size() * sizeof(Elf64_Shdr),
-                        static_cast<off_t>(header.e_shoff))) {
-        close(fd);
-        return result;
-    }
+    if (symtabValue == 0 || strtabValue == 0 || strsz == 0
+            || syment != sizeof(ElfW(Sym)) || relaent != sizeof(ElfW(Rela))) return result;
 
-    for (const Elf64_Shdr &relocations : sections) {
-        if (relocations.sh_type != SHT_RELA || relocations.sh_entsize != sizeof(Elf64_Rela)
-                || relocations.sh_link >= sections.size() || relocations.sh_size == 0) continue;
-        const Elf64_Shdr &symbols = sections[relocations.sh_link];
-        if ((symbols.sh_type != SHT_DYNSYM && symbols.sh_type != SHT_SYMTAB)
-                || symbols.sh_entsize != sizeof(Elf64_Sym)
-                || symbols.sh_link >= sections.size() || symbols.sh_size == 0) continue;
-        const Elf64_Shdr &strings = sections[symbols.sh_link];
-        if (strings.sh_size == 0 || strings.sh_size > 64 * 1024 * 1024
-                || symbols.sh_size > 64 * 1024 * 1024
-                || relocations.sh_size > 64 * 1024 * 1024) continue;
+    const uintptr_t symtab = resolveLoadedElfPointer(library, symtabValue, sizeof(ElfW(Sym)));
+    const uintptr_t strtab = resolveLoadedElfPointer(library, strtabValue, strsz);
+    if (symtab == 0 || strtab == 0) return result;
 
-        std::vector<char> stringTable(static_cast<size_t>(strings.sh_size));
-        std::vector<Elf64_Sym> symbolTable(
-                static_cast<size_t>(symbols.sh_size / sizeof(Elf64_Sym)));
-        std::vector<Elf64_Rela> relocationTable(
-                static_cast<size_t>(relocations.sh_size / sizeof(Elf64_Rela)));
-        if (!preadExactMain(fd, stringTable.data(), stringTable.size(),
-                            static_cast<off_t>(strings.sh_offset))
-                || !preadExactMain(fd, symbolTable.data(), symbolTable.size() * sizeof(Elf64_Sym),
-                                   static_cast<off_t>(symbols.sh_offset))
-                || !preadExactMain(fd, relocationTable.data(), relocationTable.size() * sizeof(Elf64_Rela),
-                                   static_cast<off_t>(relocations.sh_offset))) continue;
-
-        for (const Elf64_Rela &relocation : relocationTable) {
+    auto scanRela = [&](uintptr_t tableAddress, size_t tableSize, const char *kind) {
+        if (tableAddress == 0 || tableSize < sizeof(ElfW(Rela))
+                || tableSize % sizeof(ElfW(Rela)) != 0) return;
+        if (!libraryContainsRange(library, tableAddress, tableSize)) return;
+        const auto *relocations = reinterpret_cast<const ElfW(Rela) *>(tableAddress);
+        const size_t count = tableSize / sizeof(ElfW(Rela));
+        for (size_t i = 0; i < count; ++i) {
+            const ElfW(Rela) &relocation = relocations[i];
             const uint32_t type = ELF64_R_TYPE(relocation.r_info);
             if (type != R_AARCH64_JUMP_SLOT && type != R_AARCH64_GLOB_DAT) continue;
             const size_t symbolIndex = static_cast<size_t>(ELF64_R_SYM(relocation.r_info));
-            if (symbolIndex >= symbolTable.size()) continue;
-            const Elf64_Sym &symbol = symbolTable[symbolIndex];
-            if (symbol.st_name >= stringTable.size()) continue;
-            const char *candidate = stringTable.data() + symbol.st_name;
-            if (std::strcmp(candidate, symbolName) != 0) continue;
-
-            const uintptr_t slot = library.base + static_cast<uintptr_t>(relocation.r_offset);
+            if (symbolIndex > (SIZE_MAX / sizeof(ElfW(Sym)))) continue;
+            const uintptr_t symbolAddress = symtab + symbolIndex * sizeof(ElfW(Sym));
+            if (symbolAddress < symtab
+                    || !libraryContainsRange(library, symbolAddress, sizeof(ElfW(Sym)))) continue;
+            const auto &symbol = *reinterpret_cast<const ElfW(Sym) *>(symbolAddress);
+            if (!dynStringEquals(library, strtab, strsz,
+                                 static_cast<size_t>(symbol.st_name), symbolName)) continue;
+            const uintptr_t slot = resolveLoadedElfPointer(
+                    library, relocation.r_offset, sizeof(void *));
+            if (slot == 0) continue;
             void *target = nullptr;
             std::memcpy(&target, reinterpret_cast<const void *>(slot), sizeof(target));
             if (reinterpret_cast<uintptr_t>(target) < 0x10000u) continue;
-
             if (result.matches == 0) {
                 result.slot = slot;
                 result.target = target;
                 result.matches = 1;
-            } else if (result.slot != slot || result.target != target) {
-                ++result.matches;
-                close(fd);
-                return result;
+                result.relocationKind = kind;
+            } else if (result.target != target) {
+                result.matches = 2;
+                result.relocationKind = "ambiguous";
+                return;
             }
         }
+    };
+
+    if (jmprelValue != 0 && pltrelsz != 0 && pltrelType == DT_RELA) {
+        const uintptr_t jmprel = resolveLoadedElfPointer(library, jmprelValue, pltrelsz);
+        scanRela(jmprel, pltrelsz, "DT_JMPREL");
     }
-    close(fd);
+    if (result.matches <= 1 && relaValue != 0 && relasz != 0) {
+        const uintptr_t rela = resolveLoadedElfPointer(library, relaValue, relasz);
+        scanRela(rela, relasz, "DT_RELA");
+    }
     return result;
 }
 
@@ -634,14 +702,15 @@ bool installHapticCaptureHookFromLauncherImport(const LibraryInfo &library, cons
     const ImportedFunctionResolution resolution = resolveImportedFunction(library, kHapticSymbol);
     if (resolution.matches != 1 || resolution.target == nullptr) {
         logLine(ANDROID_LOG_WARN,
-                "HAPTIC_V2 feature import unresolved source=%s symbol=%s matches=%zu launcher=%s",
+                "HAPTIC_V2 loaded-elf import unresolved source=%s symbol=%s matches=%zu launcher=%s",
                 source == nullptr ? "unknown" : source, kHapticSymbol,
                 resolution.matches, library.path.c_str());
         return false;
     }
     logLine(ANDROID_LOG_INFO,
-            "HAPTIC_V2 feature import resolved source=%s symbol=%s got=%p target=%p launcher=%s",
+            "HAPTIC_V2 loaded-elf import resolved source=%s symbol=%s reloc=%s got=%p target=%p launcher=%s",
             source == nullptr ? "unknown" : source, kHapticSymbol,
+            resolution.relocationKind == nullptr ? "unknown" : resolution.relocationKind,
             reinterpret_cast<void *>(resolution.slot), resolution.target, library.path.c_str());
     return installHapticCaptureHookTarget(resolution.target, nullptr, "launcher-import-feature");
 }
@@ -1198,7 +1267,7 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
             reinterpret_cast<void *>(entries->hook_func), reinterpret_cast<void *>(entries->unhook_func),
             static_cast<long long>(kHookHealthIntervalMs));
     logLine(ANDROID_LOG_INFO,
-            "HAPTIC_V2 enabled policy=launcher-import-feature-primary provider-loader-fallback no-dlopen no-hook-mutex ready=ext-fallback commit=ext-0");
+            "HAPTIC_V2 enabled policy=loaded-elf-dynamic-feature-primary provider-loader-fallback no-apk-open no-haptic-dlopen no-hook-mutex ready=ext-fallback commit=ext-0");
 
     const LibraryInfo library = findLauncherLibrary();
     if (library.base != 0) {
