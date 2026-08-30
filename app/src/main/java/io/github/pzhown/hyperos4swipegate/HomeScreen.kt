@@ -3,6 +3,7 @@ package io.github.pzhown.hyperos4swipegate
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -54,6 +55,7 @@ import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.SliderPreference
+import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import kotlin.math.roundToInt
 
@@ -85,6 +87,14 @@ internal fun HomeScreen(
             loadAndMigrateThresholdDp(context)
                 .coerceIn(ConfigBridge.STOCK_THRESHOLD_DP, ConfigBridge.MAX_THRESHOLD_DP)
                 .toFloat(),
+        )
+    }
+    var hapticEnabled by remember {
+        mutableStateOf(
+            prefs.getBoolean(
+                ConfigBridge.PREF_KEY_HAPTIC_ENABLED,
+                ConfigBridge.DEFAULT_HAPTIC_ENABLED,
+            ),
         )
     }
     var applyStatus by remember { mutableStateOf("") }
@@ -260,6 +270,24 @@ internal fun HomeScreen(
                         color = MiuixTheme.colorScheme.error,
                     )
                 }
+                SwitchPreference(
+                    checked = hapticEnabled,
+                    onCheckedChange = { enabled ->
+                        hapticEnabled = enabled
+                        ConfigBridge.applyHapticEnabledAsync(context, enabled) { result ->
+                            if (!result.success()) {
+                                hapticEnabled = !enabled
+                                Toast.makeText(context, "触感反馈同步失败", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    title = "触感反馈",
+                    summary = if (hapticEnabled) {
+                        "达到阈值与确认返回时提供震动反馈"
+                    } else {
+                        "不添加额外震动反馈"
+                    },
+                )
             }
         }
 

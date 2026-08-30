@@ -52,11 +52,7 @@ internal fun SettingsScreen(
     onLiquidGlassChanged: (Boolean) -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val prefs = remember { ConfigBridge.localPreferences(context) }
     var launcherIconHidden by remember { mutableStateOf(isLauncherIconHidden(context)) }
-    var hapticEnabled by remember {
-        mutableStateOf(prefs.getBoolean(ConfigBridge.PREF_KEY_HAPTIC_ENABLED, ConfigBridge.DEFAULT_HAPTIC_ENABLED))
-    }
     var logLevel by remember {
         mutableIntStateOf(
             ConfigBridge.sanitizeLogLevel(
@@ -103,26 +99,6 @@ internal fun SettingsScreen(
                     } else {
                         "从系统桌面隐藏 SwipeGate"
                     },
-                )
-            }
-        }
-
-        item { SmallTitle("功能") }
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                SwitchPreference(
-                    checked = hapticEnabled,
-                    onCheckedChange = { enabled ->
-                        hapticEnabled = enabled
-                        ConfigBridge.applyHapticEnabledAsync(context, enabled) { result ->
-                            if (!result.success()) {
-                                hapticEnabled = !enabled
-                                Toast.makeText(context, "触感反馈同步失败", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    },
-                    title = "触感反馈",
-                    summary = if (hapticEnabled) "达到阈值与确认返回时提供震动反馈" else "不添加额外震动反馈",
                 )
             }
         }

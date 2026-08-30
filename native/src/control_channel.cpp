@@ -612,17 +612,25 @@ void handleControlCarrier(void *intent) {
     int32_t logLevel = -1;
     bool hapticEnabled = false;
     int64_t nonce = 0;
+    const bool hapticFieldPresent = readNativeBool(extras, kHapticEnabledExtra, &hapticEnabled);
     if (!readNativeBool(extras, kMarkerExtra, &marker) || !marker
             || !readNativeI32(extras, kSenderUidExtra, &senderUid)
             || !readNativeI64(extras, kNonceExtra, &nonce)
             || !readNativeI32(extras, kThresholdExtra, &thresholdDp)
             || !readNativeI32(extras, kLogLevelExtra, &logLevel)
-            || !readNativeBool(extras, kHapticEnabledExtra, &hapticEnabled)
             || nonce <= 0 || !verifyPackageUid(kSystemUiPackage, senderUid)
             || thresholdDp < kMinThresholdDp || thresholdDp > kMaxThresholdDp
             || logLevel < kMinLogLevel || logLevel > kMaxLogLevel) {
         bridgeLog(ANDROID_LOG_WARN, "Rejected malformed or unauthenticated SystemUI carrier");
         return;
+    }
+    if (!hapticFieldPresent) {
+        {
+            SpinGuard guard;
+            hapticEnabled = gHapticEnabled == 1;
+        }
+        bridgeLog(ANDROID_LOG_WARN,
+                  "SystemUI carrier missing haptic field; preserving previous/default state");
     }
 
     bool thresholdChanged;
