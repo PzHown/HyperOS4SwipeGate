@@ -54,7 +54,6 @@ import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.SliderPreference
-import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import kotlin.math.roundToInt
 
@@ -88,14 +87,6 @@ internal fun HomeScreen(
                 .toFloat(),
         )
     }
-    var hapticEnabled by remember {
-        mutableStateOf(
-            prefs.getBoolean(
-                ConfigBridge.PREF_KEY_HAPTIC_FEEDBACK,
-                ConfigBridge.DEFAULT_HAPTIC_FEEDBACK,
-            ),
-        )
-    }
     var applyStatus by remember { mutableStateOf("") }
     var showThresholdInput by remember { mutableStateOf(false) }
     var thresholdInput by remember { mutableStateOf(TextFieldValue(thresholdDp.roundToInt().toString())) }
@@ -107,15 +98,6 @@ internal fun HomeScreen(
         prefs.edit().putInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, applied).apply()
         ConfigBridge.applyThresholdDpAsync(context, applied) { result ->
             applyStatus = if (!result.success()) "应用失败：${result.message()}" else ""
-        }
-    }
-
-    fun applyHapticFeedback(enabled: Boolean) {
-        hapticEnabled = enabled
-        ConfigBridge.applyHapticFeedbackAsync(context, enabled) { result ->
-            if (!result.success()) {
-                applyStatus = "震动反馈同步失败：${result.message()}"
-            }
         }
     }
 
@@ -278,17 +260,6 @@ internal fun HomeScreen(
                         color = MiuixTheme.colorScheme.error,
                     )
                 }
-            }
-        }
-
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                SwitchPreference(
-                    checked = hapticEnabled,
-                    onCheckedChange = ::applyHapticFeedback,
-                    title = "返回震动反馈",
-                    summary = "达到可返回状态时震动，确认返回时再次震动",
-                )
             }
         }
 
