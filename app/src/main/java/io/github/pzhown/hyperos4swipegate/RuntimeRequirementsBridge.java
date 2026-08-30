@@ -4,6 +4,7 @@ import android.content.Context;
 
 import java.io.File;
 import java.util.List;
+import java.util.Set;
 
 import io.github.libxposed.service.HookedTarget;
 import io.github.libxposed.service.XposedService;
@@ -18,7 +19,7 @@ import io.github.libxposed.service.XposedService;
  * Zygisk Next keeps its exact installed version below /data/adb, which a normal app cannot
  * read without root. Prefer direct HYOS target evidence from LSPosed API 102; when a HYOS-only
  * child is not exposed through getRunningTargets(), fall back to the complete capability chain:
- * supported LSPosed + Launcher scope + Xiaomi hyos_spawner. This avoids reporting a false
+ * supported LSPosed + required scopes + Xiaomi hyos_spawner. This avoids reporting a false
  * negative on working HYOS Runtime installations while keeping the App rootless.
  */
 public final class RuntimeRequirementsBridge {
@@ -26,6 +27,7 @@ public final class RuntimeRequirementsBridge {
     public static final String MIN_ZYGISK_NEXT_VERSION = "1.5.0";
 
     private static final String TARGET_PACKAGE = "com.miui.home";
+    private static final String SYSTEM_UI_PACKAGE = "com.android.systemui";
     private static final String HYOS_SPAWNER = "/system_ext/bin/hyos_spawner";
 
     private RuntimeRequirementsBridge() {}
@@ -41,16 +43,21 @@ public final class RuntimeRequirementsBridge {
             boolean hyosRuntimeDetected,
             boolean zygiskNextSupported,
             boolean launcherInScope,
+            boolean systemUiInScope,
             String evidence,
             String error
-    ) {}
+    ) {
+        public boolean requiredScopesReady() {
+            return launcherInScope && systemUiInScope;
+        }
+    }
 
     public static Snapshot snapshot(Context context) {
         XposedService current = XposedServiceBridge.currentService(context);
         if (current == null) {
             return new Snapshot(false, 0, "", "", 0L,
                     false, new File(HYOS_SPAWNER).exists(), false, false,
-                    false, "serviceConnected=false", XposedServiceBridge.currentServiceError());
+                    false, false, "serviceConnected=false", XposedServiceBridge.currentServiceError());
         }
 
         try {
@@ -60,7 +67,9 @@ public final class RuntimeRequirementsBridge {
             final long frameworkVersionCode = current.getFrameworkVersionCode();
             final boolean lsposedSupported = frameworkVersionCode >= MIN_LSPOSED_VERSION_CODE;
             final boolean hyosSpawnerPresent = new File(HYOS_SPAWNER).exists();
-            final boolean launcherInScope = current.getScope().contains(TARGET_PACKAGE);
+            final Set<String> scope = current.getScope();
+            final boolean launcherInScope = scope.contains(TARGET_PACKAGE);
+            final boolean systemUiInScope = scope.contains(SYSTEM_UI_PACKAGE);
             final int launcherUid = resolveLauncherUid(context);
 
             boolean directHyosRuntimeDetected = false;
@@ -85,13 +94,14 @@ public final class RuntimeRequirementsBridge {
             }
 
             // HYOS native children are not guaranteed to appear in getRunningTargets().
-            // If the framework is new enough, Launcher is in scope and the device exposes
-            // Xiaomi's HYOS spawner, treat the runtime capability as available instead of
-            // producing a false negative solely because the native child was omitted.
+            // If the framework is new enough, both required LSPosed scopes are enabled and the
+            // device exposes Xiaomi's HYOS spawner, treat the runtime capability as available
+            // instead of producing a false negative solely because the native child was omitted.
             final boolean capabilityFallback = !directHyosRuntimeDetected
                     && api >= XposedService.API_102
                     && lsposedSupported
                     && launcherInScope
+                    && systemUiInScope
                     && hyosSpawnerPresent;
             final boolean hyosRuntimeDetected = directHyosRuntimeDetected || capabilityFallback;
             final boolean zygiskNextSupported = hyosRuntimeDetected;
@@ -102,6 +112,7 @@ public final class RuntimeRequirementsBridge {
             final String evidence = "frameworkVersionCode=" + frameworkVersionCode
                     + " api=" + api
                     + " launcherInScope=" + launcherInScope
+                    + " systemUiInScope=" + systemUiInScope
                     + " hyosSpawnerPresent=" + hyosSpawnerPresent
                     + " directHyosRuntimeDetected=" + directHyosRuntimeDetected
                     + " hyosRuntimeDetected=" + hyosRuntimeDetected
@@ -110,13 +121,13 @@ public final class RuntimeRequirementsBridge {
 
             return new Snapshot(true, api, frameworkName, frameworkVersion, frameworkVersionCode,
                     lsposedSupported, hyosSpawnerPresent, hyosRuntimeDetected,
-                    zygiskNextSupported, launcherInScope, evidence, "");
+                    zygiskNextSupported, launcherInScope, systemUiInScope, evidence, "");
         } catch (Throwable t) {
             String message = t.getMessage();
             if (message == null || message.isBlank()) message = t.getClass().getSimpleName();
             return new Snapshot(true, 0, "", "", 0L,
                     false, new File(HYOS_SPAWNER).exists(), false, false,
-                    false, "status check failed", message);
+                    false, false, "status check failed", message);
         }
     }
 
