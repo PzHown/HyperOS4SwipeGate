@@ -1,0 +1,51 @@
+name: Fix haptic v2 source newlines
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/fix-haptic-v2-newlines.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - name: Fix escaped helper block
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path('native/src/main.cpp')
+          s = p.read_text()
+          start = s.find(r'\nusing HapticFeedbackFn')
+          end_marker = r'\n\nfloat gateHorizontalDistance'
+          end = s.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit(f'escaped helper block not found: start={start} end={end}')
+          end += len(r'\n\n')
+          block = s[start:end]
+          fixed = block.replace(r'\n', '\n')
+          s = s[:start] + fixed + s[end:]
+          p.write_text(s)
+
+          # Sanity: no literal escaped newlines may remain around the helper declaration.
+          check = p.read_text()
+          if r'\nusing HapticFeedbackFn' in check:
+              raise SystemExit('literal escaped newline still present before HapticFeedbackFn')
+
+          Path('.github/workflows/fix-haptic-v2-newlines.yml').unlink()
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: restore native haptic helper source newlines"
+          git push origin dev
