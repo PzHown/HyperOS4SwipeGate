@@ -1,3 +1,4 @@
+#include "control_channel.h"
 #include "native_api.h"
 #include "swipe_semantic_resolver.h"
 

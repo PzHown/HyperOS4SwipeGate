@@ -65,15 +65,11 @@ swipegate_on_swipe_process_hook:
 
 
 // Haptic lifecycle hooks. Preserve opaque call arguments and forward to the LSPosed trampoline.
-.macro SWIPEGATE_EVENT_HOOK name, helper, original
-.global 
-ame
-.hidden 
-ame
-.type 
-ame, %function
 
-ame:
+.global swipegate_on_swipe_start_hook
+.hidden swipegate_on_swipe_start_hook
+.type swipegate_on_swipe_start_hook, %function
+swipegate_on_swipe_start_hook:
     sub sp, sp, #0x110
     stp x0, x1, [sp, #0x00]
     stp x2, x3, [sp, #0x10]
@@ -85,7 +81,7 @@ ame:
     stp q2, q3, [sp, #0x70]
     stp q4, q5, [sp, #0x90]
     stp q6, q7, [sp, #0xb0]
-    bl \helper
+    bl swipegate_haptic_on_swipe_start
     ldp q0, q1, [sp, #0x50]
     ldp q2, q3, [sp, #0x70]
     ldp q4, q5, [sp, #0x90]
@@ -95,20 +91,85 @@ ame:
     ldp x4, x5, [sp, #0x20]
     ldp x6, x7, [sp, #0x30]
     ldr x8, [sp, #0x40]
-    adrp x17, \original
-    add x17, x17, :lo12:\original
+    adrp x17, gSwipeGateOriginalOnSwipeStart
+    add x17, x17, :lo12:gSwipeGateOriginalOnSwipeStart
     ldar x16, [x17]
-    cbz x16, 9f
+    cbz x16, .Lswipe_start_done
     blr x16
-9:
+.Lswipe_start_done:
     ldr x30, [sp, #0x48]
     add sp, sp, #0x110
     ret
-.size 
-ame, .-
-ame
-.endm
+.size swipegate_on_swipe_start_hook, .-swipegate_on_swipe_start_hook
 
-SWIPEGATE_EVENT_HOOK swipegate_on_swipe_start_hook, swipegate_haptic_on_swipe_start, gSwipeGateOriginalOnSwipeStart
-SWIPEGATE_EVENT_HOOK swipegate_on_back_invoke_hook, swipegate_haptic_on_back_invoke, gSwipeGateOriginalOnBackInvoke
-SWIPEGATE_EVENT_HOOK swipegate_on_back_cancelled_hook, swipegate_haptic_on_back_cancelled, gSwipeGateOriginalOnBackCancelled
+.global swipegate_on_back_invoke_hook
+.hidden swipegate_on_back_invoke_hook
+.type swipegate_on_back_invoke_hook, %function
+swipegate_on_back_invoke_hook:
+    sub sp, sp, #0x110
+    stp x0, x1, [sp, #0x00]
+    stp x2, x3, [sp, #0x10]
+    stp x4, x5, [sp, #0x20]
+    stp x6, x7, [sp, #0x30]
+    str x8, [sp, #0x40]
+    str x30, [sp, #0x48]
+    stp q0, q1, [sp, #0x50]
+    stp q2, q3, [sp, #0x70]
+    stp q4, q5, [sp, #0x90]
+    stp q6, q7, [sp, #0xb0]
+    bl swipegate_haptic_on_back_invoke
+    ldp q0, q1, [sp, #0x50]
+    ldp q2, q3, [sp, #0x70]
+    ldp q4, q5, [sp, #0x90]
+    ldp q6, q7, [sp, #0xb0]
+    ldp x0, x1, [sp, #0x00]
+    ldp x2, x3, [sp, #0x10]
+    ldp x4, x5, [sp, #0x20]
+    ldp x6, x7, [sp, #0x30]
+    ldr x8, [sp, #0x40]
+    adrp x17, gSwipeGateOriginalOnBackInvoke
+    add x17, x17, :lo12:gSwipeGateOriginalOnBackInvoke
+    ldar x16, [x17]
+    cbz x16, .Lback_invoke_done
+    blr x16
+.Lback_invoke_done:
+    ldr x30, [sp, #0x48]
+    add sp, sp, #0x110
+    ret
+.size swipegate_on_back_invoke_hook, .-swipegate_on_back_invoke_hook
+
+.global swipegate_on_back_cancelled_hook
+.hidden swipegate_on_back_cancelled_hook
+.type swipegate_on_back_cancelled_hook, %function
+swipegate_on_back_cancelled_hook:
+    sub sp, sp, #0x110
+    stp x0, x1, [sp, #0x00]
+    stp x2, x3, [sp, #0x10]
+    stp x4, x5, [sp, #0x20]
+    stp x6, x7, [sp, #0x30]
+    str x8, [sp, #0x40]
+    str x30, [sp, #0x48]
+    stp q0, q1, [sp, #0x50]
+    stp q2, q3, [sp, #0x70]
+    stp q4, q5, [sp, #0x90]
+    stp q6, q7, [sp, #0xb0]
+    bl swipegate_haptic_on_back_cancelled
+    ldp q0, q1, [sp, #0x50]
+    ldp q2, q3, [sp, #0x70]
+    ldp q4, q5, [sp, #0x90]
+    ldp q6, q7, [sp, #0xb0]
+    ldp x0, x1, [sp, #0x00]
+    ldp x2, x3, [sp, #0x10]
+    ldp x4, x5, [sp, #0x20]
+    ldp x6, x7, [sp, #0x30]
+    ldr x8, [sp, #0x40]
+    adrp x17, gSwipeGateOriginalOnBackCancelled
+    add x17, x17, :lo12:gSwipeGateOriginalOnBackCancelled
+    ldar x16, [x17]
+    cbz x16, .Lback_cancelled_done
+    blr x16
+.Lback_cancelled_done:
+    ldr x30, [sp, #0x48]
+    add sp, sp, #0x110
+    ret
+.size swipegate_on_back_cancelled_hook, .-swipegate_on_back_cancelled_hook
