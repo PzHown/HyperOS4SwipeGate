@@ -1,0 +1,30 @@
+name: Apply dev.8 haptic patch
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - 'tools/patch_first_segment_haptic_dev8.py'
+      - '.github/workflows/apply-dev8-haptic.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - name: Apply patch
+        run: python3 tools/patch_first_segment_haptic_dev8.py
+      - name: Commit dev.8
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add native/src/main.cpp app/build.gradle.kts
+          git diff --cached --check
+          git commit -m "fix: move haptic feedback to first gesture segment"
+          git push origin HEAD:dev
