@@ -10,6 +10,9 @@ extern "C" {
 int swipegate_control_threshold_dp();
 int swipegate_control_log_level();
 int swipegate_control_haptic_enabled();
+// Request one haptic pulse through the authenticated HyOS Runtime -> SystemUI bridge.
+// kind: 0 = threshold/ready tick, 1 = committed back action. Returns 1 when queued.
+int swipegate_control_request_haptic(int kind);
 
 // Feed every Native log line into the runtime control plane. Hook state is parsed regardless of
 // the user-facing App log level; App log retention remains controlled by log_level.

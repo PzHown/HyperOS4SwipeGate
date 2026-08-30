@@ -36,12 +36,15 @@ constexpr const char *kBroadcastPrivateName = "libhyper_os_broadcast_private.dyl
 constexpr const char *kCarrierAction = "com.android.systemui.fsgesture";
 constexpr const char *kNativeReplyAction =
         "io.github.pzhown.hyperos4swipegate.action.NATIVE_RUNTIME_REPLY";
+constexpr const char *kNativeHapticAction =
+        "io.github.pzhown.hyperos4swipegate.action.NATIVE_HAPTIC_REQUEST";
 
 constexpr const char *kMarkerExtra = "swipegate_control";
 constexpr const char *kNonceExtra = "swipegate_nonce";
 constexpr const char *kThresholdExtra = "swipegate_threshold_dp";
 constexpr const char *kLogLevelExtra = "swipegate_log_level";
 constexpr const char *kHapticEnabledExtra = "swipegate_haptic_enabled";
+constexpr const char *kHapticKindExtra = "swipegate_haptic_kind";
 constexpr const char *kHookStateExtra = "swipegate_hook_state";
 constexpr const char *kPatternExtra = "swipegate_pattern";
 constexpr const char *kDetailExtra = "swipegate_detail";
@@ -624,6 +627,55 @@ bool sendNativeReply(int64_t nonce) {
     return isNativeSuccess(result);
 }
 
+bool sendNativeHapticRequest(int32_t kind) {
+    if (kind < 0 || kind > 1) return false;
+    void *runtime = gCapturedRuntime.load(std::memory_order_acquire);
+    if (reinterpret_cast<uintptr_t>(runtime) < 0x100000000ull) return false;
+
+    const auto intentDefault = resolveLauncherSymbol<IntentDefaultFn>("Intent_default");
+    const auto intentDrop = resolveLauncherSymbol<IntentDropFn>("Intent_drop");
+    const auto setAction = resolveLauncherSymbol<IntentSetStringFn>("Intent_set_action");
+    const auto setPackage = resolveLauncherSymbol<IntentSetStringFn>("Intent_set_package");
+    const auto setExtras = resolveLauncherSymbol<IntentSetExtrasFn>("Intent_set_extras");
+    const auto bundleDefault = resolveLauncherSymbol<BundleDefaultFn>("Bundle_default");
+    const auto send = resolveLauncherSymbol<BroadcastSendFn>("Broadcast_send_broadcast");
+    const auto inc = resolveLauncherSymbol<RuntimeStrongFn>("Runtime_inc_strong");
+    const auto dec = resolveLauncherSymbol<RuntimeStrongFn>("Runtime_dec_strong");
+    if (intentDefault == nullptr || intentDrop == nullptr || setAction == nullptr
+            || setPackage == nullptr || setExtras == nullptr || bundleDefault == nullptr
+            || send == nullptr || inc == nullptr || dec == nullptr || rStringVtable() == nullptr) {
+        return false;
+    }
+
+    void *extras = bundleDefault();
+    if (extras == nullptr
+            || !addBundleBool(extras, kMarkerExtra, true)
+            || !addBundleI32(extras, kHapticKindExtra, kind)
+            || !addBundleI32(extras, kSenderUidExtra, static_cast<int32_t>(getuid()))) {
+        return false;
+    }
+
+    void *intent = intentDefault();
+    if (intent == nullptr) return false;
+    ROptionRString action{};
+    ROptionRString package{};
+    if (!makeOwnedROptionString(kNativeHapticAction, &action)
+            || !makeOwnedROptionString(kSystemUiPackage, &package)) {
+        intentDrop(intent);
+        return false;
+    }
+    setAction(intent, &action);
+    setPackage(intent, &package);
+    setExtras(intent, extras);
+
+    inc(runtime);
+    void *sharedRuntime = runtime;
+    const NativeResult result = send(&sharedRuntime, intent);
+    dec(runtime);
+    intentDrop(intent);
+    return isNativeSuccess(result);
+}
+
 void handleControlCarrier(void *intent) {
     const auto getExtras = resolveLauncherSymbol<IntentGetExtrasFn>("Intent_get_extras");
     if (intent == nullptr || getExtras == nullptr
@@ -814,6 +866,10 @@ extern "C" int swipegate_control_haptic_enabled() {
         return gHapticEnabled;
     }
     return 0;
+}
+
+extern "C" int swipegate_control_request_haptic(int kind) {
+    return sendNativeHapticRequest(static_cast<int32_t>(kind)) ? 1 : 0;
 }
 
 extern "C" void swipegate_control_on_log(int, const char *text) {

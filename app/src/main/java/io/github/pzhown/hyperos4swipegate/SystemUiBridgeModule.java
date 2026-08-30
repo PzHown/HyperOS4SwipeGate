@@ -6,6 +6,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.os.Process;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+import android.os.VibratorManager;
 
 import androidx.annotation.NonNull;
 
@@ -32,6 +35,7 @@ public final class SystemUiBridgeModule extends XposedModule {
     static final String ACTION_APP_QUERY = MODULE_PACKAGE + ".action.RUNTIME_QUERY";
     static final String ACTION_APP_REPLY = MODULE_PACKAGE + ".action.RUNTIME_REPLY";
     static final String ACTION_NATIVE_REPLY = MODULE_PACKAGE + ".action.NATIVE_RUNTIME_REPLY";
+    static final String ACTION_NATIVE_HAPTIC = MODULE_PACKAGE + ".action.NATIVE_HAPTIC_REQUEST";
     static final String ACTION_HYOS_CARRIER = "com.android.systemui.fsgesture";
 
     static final String EXTRA_MARKER = "swipegate_control";
@@ -39,6 +43,7 @@ public final class SystemUiBridgeModule extends XposedModule {
     static final String EXTRA_THRESHOLD_DP = "swipegate_threshold_dp";
     static final String EXTRA_LOG_LEVEL = "swipegate_log_level";
     static final String EXTRA_HAPTIC_ENABLED = "swipegate_haptic_enabled";
+    static final String EXTRA_HAPTIC_KIND = "swipegate_haptic_kind";
     static final String EXTRA_HOOK_STATE = "swipegate_hook_state";
     static final String EXTRA_PATTERN = "swipegate_pattern";
     static final String EXTRA_DETAIL = "swipegate_detail";
@@ -94,6 +99,9 @@ public final class SystemUiBridgeModule extends XposedModule {
 
         IntentFilter nativeReply = new IntentFilter(ACTION_NATIVE_REPLY);
         context.registerReceiver(nativeReplyReceiver, nativeReply, Context.RECEIVER_EXPORTED);
+
+        IntentFilter nativeHaptic = new IntentFilter(ACTION_NATIVE_HAPTIC);
+        context.registerReceiver(nativeHapticReceiver, nativeHaptic, Context.RECEIVER_EXPORTED);
 
         log(android.util.Log.INFO, "HyperOS4SwipeGateSystemUI",
                 "SystemUI runtime bridge ready uid=" + Process.myUid());
@@ -156,6 +164,50 @@ public final class SystemUiBridgeModule extends XposedModule {
                 log(android.util.Log.ERROR, "HyperOS4SwipeGateSystemUI",
                         "Runtime carrier send failed", t);
                 sendAppStage(context, nonce, "CARRIER_SEND_FAILED");
+            }
+        }
+    };
+
+    private final BroadcastReceiver nativeHapticReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (!ACTION_NATIVE_HAPTIC.equals(intent.getAction())) return;
+            final int senderUid = getSentFromUid();
+            final int claimedLauncherUid = intent.getIntExtra(EXTRA_SENDER_UID, -1);
+            final boolean marker = intent.getBooleanExtra(EXTRA_MARKER, false);
+            final int kind = intent.getIntExtra(EXTRA_HAPTIC_KIND, -1);
+            if (!marker || kind < 0 || kind > 1
+                    || senderUid == Process.INVALID_UID
+                    || senderUid != claimedLauncherUid
+                    || !isUidOwner(context, senderUid, LAUNCHER_PACKAGE)) {
+                log(android.util.Log.WARN, "HyperOS4SwipeGateSystemUI",
+                        "Rejected native haptic senderUid=" + senderUid
+                                + " claimedUid=" + claimedLauncherUid + " kind=" + kind);
+                return;
+            }
+
+            try {
+                Vibrator vibrator = null;
+                VibratorManager manager = (VibratorManager) context.getSystemService(
+                        Context.VIBRATOR_MANAGER_SERVICE);
+                if (manager != null) vibrator = manager.getDefaultVibrator();
+                if (vibrator == null) {
+                    vibrator = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
+                }
+                if (vibrator == null || !vibrator.hasVibrator()) {
+                    log(android.util.Log.WARN, "HyperOS4SwipeGateSystemUI",
+                            "Native haptic unavailable: vibrator missing kind=" + kind);
+                    return;
+                }
+                final int effectId = kind == 0
+                        ? VibrationEffect.EFFECT_TICK
+                        : VibrationEffect.EFFECT_CLICK;
+                vibrator.vibrate(VibrationEffect.createPredefined(effectId));
+                log(android.util.Log.INFO, "HyperOS4SwipeGateSystemUI",
+                        "Native haptic performed kind=" + kind + " effect=" + effectId);
+            } catch (Throwable t) {
+                log(android.util.Log.ERROR, "HyperOS4SwipeGateSystemUI",
+                        "Native haptic execution failed kind=" + kind, t);
             }
         }
     };

@@ -628,6 +628,11 @@ bool ensureHapticCaptureHook() {
 
 bool performReturnHaptic(const char *stage, bool light) {
     if (swipegate_control_haptic_enabled() != 1) return false;
+    if (swipegate_control_request_haptic(light ? 0 : 1) == 1) {
+        logLine(ANDROID_LOG_INFO, "HAPTIC feedback stage=%s kind=systemui",
+                stage == nullptr ? "unknown" : stage);
+        return true;
+    }
     const auto original = reinterpret_cast<HapticFeedbackFn>(gOriginalHapticFeedback.load(std::memory_order_acquire));
     const uintptr_t arc = gCapturedHapticArc.load(std::memory_order_acquire);
     if (original == nullptr || arc < 0x10000u) {
