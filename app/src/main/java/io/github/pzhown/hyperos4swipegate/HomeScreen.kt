@@ -401,8 +401,14 @@ private fun collectHomeStatusSnapshot(context: Context): HomeStatusSnapshot {
     if (!runtime.hyosSpawnerPresent()) {
         return status(HomeHookState.Error, "未检测到 HyOS Runtime。")
     }
+    if (!runtime.launcherInScope() && !runtime.systemUiInScope()) {
+        return status(HomeHookState.Inactive, "模块作用域不完整：请勾选系统桌面和系统界面。")
+    }
     if (!runtime.launcherInScope()) {
         return status(HomeHookState.Inactive, "系统桌面未加入模块作用域。")
+    }
+    if (!runtime.systemUiInScope()) {
+        return status(HomeHookState.Inactive, "系统界面未加入模块作用域。")
     }
     if (!runtime.zygiskNextSupported()) {
         return status(HomeHookState.Error, "当前运行环境不支持 HyOS Runtime。")

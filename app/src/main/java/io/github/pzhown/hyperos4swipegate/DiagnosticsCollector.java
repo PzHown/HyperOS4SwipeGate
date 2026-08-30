@@ -36,6 +36,8 @@ public final class DiagnosticsCollector {
             }
         }
         out.append("launcherInScope=").append(runtime.launcherInScope()).append('\n');
+        out.append("systemUiInScope=").append(runtime.systemUiInScope()).append('\n');
+        out.append("requiredScopesReady=").append(runtime.requiredScopesReady()).append('\n');
         out.append("hyosRuntime=").append(runtime.hyosRuntimeDetected()).append('\n');
         if (!service.error().isBlank()) {
             out.append("error=").append(service.error()).append('\n');
