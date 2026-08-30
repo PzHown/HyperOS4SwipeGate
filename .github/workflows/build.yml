@@ -231,6 +231,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if [[ "$VERSION_NAME" != *-* ]]; then
+            DEV_PREFIX="${VERSION_CODE}-${VERSION_NAME}-dev."
+            gh release list --limit 100 --json tagName --jq '.[].tagName' | while read -r TAG; do
+              case "$TAG" in
+                "$DEV_PREFIX"*) gh release delete "$TAG" --yes --cleanup-tag ;;
+              esac
+            done
+          fi
           gh release delete release-latest --yes --cleanup-tag || true
           gh release delete "$RELEASE_TAG" --yes --cleanup-tag || true
           gh release create "$RELEASE_TAG" \
@@ -252,6 +260,15 @@ jobs:
 
           gh auth status
           RELEASE_NOTES=$'1. 新增「丰富侧滑震动反馈」Beta：进入返回阶段、从侧边栏阶段退回时补充轻震反馈，默认关闭\n2. 日志级别「关闭 / 精简 / 详细」现在严格生效，精简模式减少轮询与手势高频日志\n3. 优化 HyperOS 4 Launcher 原生触感兼容与运行稳定性\n4. 优化侧滑阈值动态同步、模块状态回包与 Native Hook 健康检测'
+
+          if [[ "$VERSION_NAME" != *-* ]]; then
+            DEV_PREFIX="${VERSION_CODE}-${VERSION_NAME}-dev."
+            gh release list --repo "$LSPOSED_REPO" --limit 100 --json tagName --jq '.[].tagName' | while read -r TAG; do
+              case "$TAG" in
+                "$DEV_PREFIX"*) gh release delete "$TAG" --repo "$LSPOSED_REPO" --yes --cleanup-tag ;;
+              esac
+            done
+          fi
 
           if gh release view "$RELEASE_TAG" --repo "$LSPOSED_REPO" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" \
