@@ -1,0 +1,75 @@
+name: Fix 0.8.0 haptic watchdog target
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/fix-080-haptic-watchdog-v3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - name: Keep cached commit target for watchdog
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import textwrap
+          p = Path('native/src/main.cpp')
+          s = p.read_text()
+          old = textwrap.dedent('''\
+              bool installAuxGestureHapticHooks(const LibraryInfo &library) {
+                  if (library.base == 0 || gHookFunction == nullptr) return false;
+                  const uintptr_t invokeTarget = resolveAuxForActiveProfile(
+                          library, kOnBackInvokePatternV1, sizeof(kOnBackInvokePatternV1),
+                          kOnBackInvokePatternV2, sizeof(kOnBackInvokePatternV2));
+                  if (invokeTarget == 0) {
+                      logLine(ANDROID_LOG_WARN, "HAPTIC commit hook unresolved profile=%s", gActivePatternName);
+                      return false;
+                  }
+
+                  AuxHookHealth &health = gBackInvokeHapticHookHealth;
+                  if (health.target != 0 && health.target != invokeTarget) {
+                      health = AuxHookHealth{};
+                      __atomic_store_n(&gSwipeGateOriginalOnBackInvoke, nullptr, __ATOMIC_RELEASE);
+                  }
+              ''')
+          new = textwrap.dedent('''\
+              bool installAuxGestureHapticHooks(const LibraryInfo &library) {
+                  if (library.base == 0 || gHookFunction == nullptr) return false;
+                  AuxHookHealth &health = gBackInvokeHapticHookHealth;
+                  const uintptr_t trackedBase = gAuxGestureScannedBase.load(std::memory_order_acquire);
+                  if (trackedBase != 0 && trackedBase != library.base) {
+                      health = AuxHookHealth{};
+                      gAuxGestureScannedBase.store(0, std::memory_order_release);
+                      __atomic_store_n(&gSwipeGateOriginalOnBackInvoke, nullptr, __ATOMIC_RELEASE);
+                  }
+
+                  uintptr_t invokeTarget = health.target;
+                  if (invokeTarget == 0) {
+                      invokeTarget = resolveAuxForActiveProfile(
+                              library, kOnBackInvokePatternV1, sizeof(kOnBackInvokePatternV1),
+                              kOnBackInvokePatternV2, sizeof(kOnBackInvokePatternV2));
+                      if (invokeTarget == 0) {
+                          logLine(ANDROID_LOG_WARN, "HAPTIC commit hook unresolved profile=%s", gActivePatternName);
+                          return false;
+                      }
+                  }
+              ''')
+          if s.count(old) != 1:
+              raise SystemExit(f'watchdog target block mismatch: {s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add native/src/main.cpp
+          git commit -m 'fix: keep haptic commit target under watchdog'
+          git push origin HEAD:dev
