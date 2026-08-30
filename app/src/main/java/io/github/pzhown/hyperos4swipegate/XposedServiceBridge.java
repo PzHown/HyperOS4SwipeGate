@@ -321,16 +321,16 @@ public final class XposedServiceBridge {
                 } else if ("RELOADING".equals(frameworkTargetState)) {
                     targetState = "RELOADING";
                 } else if (!nativeHookStatus.fresh()) {
-                    // Unknown/stale status is not an update. Keep it distinct so the UI can show
-                    // "状态待确认" instead of an endless loading state.
-                    targetState = "STALE";
+                    // Keep the existing short loading window while the app waits for the first
+                    // Native reply. NativeControlBridge turns a prolonged no-reply condition into
+                    // FAILED after its fail-closed timeout, so this can no longer loop forever.
+                    targetState = "RELOADING";
                 } else {
                     targetState = switch (nativeState) {
                         case "HEALTHY" -> frameworkTargetState;
-                        case "REPAIRING", "WAITING" -> "RELOADING";
                         case "FAILED" -> "FAILED";
-                        case "UNKNOWN" -> "STALE";
-                        default -> "STALE";
+                        case "REPAIRING", "WAITING", "UNKNOWN" -> "RELOADING";
+                        default -> "RELOADING";
                     };
                 }
             }
