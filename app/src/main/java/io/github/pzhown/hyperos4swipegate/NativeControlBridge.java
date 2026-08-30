@@ -91,8 +91,6 @@ public final class NativeControlBridge {
 
         if (created) {
             setChannelStage("APP_QUERY_SENT");
-        } else if (now - unansweredSinceElapsedMs >= STATUS_REPLY_TIMEOUT_MS) {
-            setChannelStage("CHANNEL_TIMEOUT");
         }
 
         int threshold = ConfigBridge.localPreferences(context)
@@ -136,10 +134,9 @@ public final class NativeControlBridge {
         if (!current.fresh()
                 && unansweredSince > 0L
                 && now - unansweredSince >= STATUS_REPLY_TIMEOUT_MS) {
-            setChannelStage("CHANNEL_TIMEOUT");
             String detail = lastError.isBlank()
-                    ? "Native 状态通道超时；Hook 本身尚未确认失败。stage=" + channelStage
-                    : "Native 状态通道异常：" + lastError + "；stage=" + channelStage;
+                    ? "Native 状态通道超时；Hook 本身尚未确认失败。lastStage=" + channelStage
+                    : "Native 状态通道异常：" + lastError + "；lastStage=" + channelStage;
             return new Snapshot("CHANNEL_ERROR", current.pattern(), detail,
                     current.receivedAtElapsedMs());
         }
@@ -166,7 +163,6 @@ public final class NativeControlBridge {
             case "APP_NATIVE_REPLY_RECEIVED" -> "App 已收到并验证 Native 回包";
             case "APP_SEND_ERROR" -> "App 无法向 SystemUI 发送状态查询";
             case "APP_RECEIVER_ERROR" -> "App 无法注册状态回包接收器";
-            case "CHANNEL_TIMEOUT" -> "状态查询持续重试但尚未收到 Native 回包";
             default -> channelStage;
         };
     }
@@ -195,7 +191,7 @@ public final class NativeControlBridge {
         if (level <= ConfigBridge.LOG_LEVEL_OFF) return "日志记录已关闭。";
         if (!lastError.isBlank()) {
             return "HyOS Runtime 通道异常：" + lastError
-                    + "\nstage=" + channelStage + " · " + channelDetail();
+                    + "\nlastStage=" + channelStage + " · " + channelDetail();
         }
         Snapshot effective = snapshot();
         if ("CHANNEL_ERROR".equals(effective.state())) {
