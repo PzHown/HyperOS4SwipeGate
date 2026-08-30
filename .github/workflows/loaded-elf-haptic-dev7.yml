@@ -5,6 +5,7 @@ on:
     branches: [dev]
     paths:
       - '.github/workflows/loaded-elf-haptic-dev7.yml'
+      - 'tools/patch_loaded_elf_haptic_dev7.py'
 
 permissions:
   contents: write
