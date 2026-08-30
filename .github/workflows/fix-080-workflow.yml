@@ -1,0 +1,38 @@
+name: Fix 0.8.0 implementation workflow
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/fix-080-workflow.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - name: Fix patch cardinality and retrigger
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/implement-080-haptics.yml')
+          s = p.read_text()
+          old = "                '                                + \" haptic=\" + hapticEnabled);\\n')\n"
+          new = "                '                                + \" haptic=\" + hapticEnabled);\\n', 2)\n"
+          if old not in s:
+              raise SystemExit('target patch call not found')
+          p.write_text(s.replace(old, new, 1))
+          Path('.github/workflows/fix-080-workflow.yml').unlink()
+          PY
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "chore: fix 0.8.0 implementation workflow"
+          git push origin HEAD:dev
