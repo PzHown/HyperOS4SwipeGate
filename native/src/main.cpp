@@ -592,18 +592,23 @@ uintptr_t resolveAuxForActiveProfile(const LibraryInfo &library, const uint8_t *
 
 bool installAuxGestureHapticHooks(const LibraryInfo &library) {
     if (library.base == 0 || gHookFunction == nullptr) return false;
-    const uintptr_t invokeTarget = resolveAuxForActiveProfile(
-            library, kOnBackInvokePatternV1, sizeof(kOnBackInvokePatternV1),
-            kOnBackInvokePatternV2, sizeof(kOnBackInvokePatternV2));
-    if (invokeTarget == 0) {
-        logLine(ANDROID_LOG_WARN, "HAPTIC commit hook unresolved profile=%s", gActivePatternName);
-        return false;
+    AuxHookHealth &health = gBackInvokeHapticHookHealth;
+    const uintptr_t trackedBase = gAuxGestureScannedBase.load(std::memory_order_acquire);
+    if (trackedBase != 0 && trackedBase != library.base) {
+        health = AuxHookHealth{};
+        gAuxGestureScannedBase.store(0, std::memory_order_release);
+        __atomic_store_n(&gSwipeGateOriginalOnBackInvoke, nullptr, __ATOMIC_RELEASE);
     }
 
-    AuxHookHealth &health = gBackInvokeHapticHookHealth;
-    if (health.target != 0 && health.target != invokeTarget) {
-        health = AuxHookHealth{};
-        __atomic_store_n(&gSwipeGateOriginalOnBackInvoke, nullptr, __ATOMIC_RELEASE);
+    uintptr_t invokeTarget = health.target;
+    if (invokeTarget == 0) {
+        invokeTarget = resolveAuxForActiveProfile(
+                library, kOnBackInvokePatternV1, sizeof(kOnBackInvokePatternV1),
+                kOnBackInvokePatternV2, sizeof(kOnBackInvokePatternV2));
+        if (invokeTarget == 0) {
+            logLine(ANDROID_LOG_WARN, "HAPTIC commit hook unresolved profile=%s", gActivePatternName);
+            return false;
+        }
     }
 
     if (health.target == invokeTarget && health.patchReady) {
