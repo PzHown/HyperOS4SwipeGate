@@ -46,6 +46,7 @@ constexpr const char *kTargetLibrary = "libapp_launcher.so";
 constexpr const char *kHapticLibraryNeedle = "libhyper_os_background_tasks_public";
 constexpr const char *kHapticSymbol = "HapticFeedback_perform_ext_haptic_feedback";
 constexpr const char *kStandardHapticSymbol = "HapticFeedback_perform_haptic_feedback";
+constexpr int64_t kHapticFeatureResolveIntervalMs = 5000;
 constexpr int32_t kReadyHapticConstant = 27;
 constexpr int32_t kCommitHapticConstant = 0;
 constexpr uintptr_t kPointerTagMask = 0x00ffffffffffffffull;
@@ -63,11 +64,10 @@ constexpr size_t kMaxExecutableRanges = 12;
 
 constexpr uintptr_t kReferenceOnSwipeProcessOffset = 0x816fc4;
 
-// Exact patterns remain authoritative compatibility profiles for builds we have
-// already validated. The semantic resolver is allowed to corroborate them, but
-// an experimental semantic disagreement must never regress a known-good build.
-// On an unknown build with no exact profile, semantic resolution may take over
-// only when it proves exactly one candidate.
+// These byte patterns are feature fingerprints, not version gates. A newer Launcher may
+// reuse the same gesture implementation and is compatible when the fingerprint still matches.
+// Semantic resolution may corroborate a known fingerprint; on a changed implementation it may
+// take over only when it proves exactly one candidate.
 constexpr uint8_t kOnSwipeProcessPatternV1[] = {
         0xff, 0x83, 0x05, 0xd1, 0xea, 0x7b, 0x00, 0xfd,
         0xe9, 0xa3, 0x0f, 0x6d, 0xfd, 0xfb, 0x10, 0xa9,
@@ -151,6 +151,7 @@ std::atomic<uintptr_t> gCapturedHapticArc{0};
 std::atomic<bool> gHapticInstallInProgress{false};
 std::atomic<bool> gHapticCaptureHookInstalled{false};
 std::atomic<bool> gHapticUnavailableLogged{false};
+std::atomic<int64_t> gLastHapticFeatureResolveMs{0};
 std::atomic<bool> gReadyHapticLatched{false};
 std::atomic<uintptr_t> gBackInvokeTarget{0};
 std::atomic<bool> gBackInvokeHookInstalled{false};
@@ -267,6 +268,104 @@ int libraryCallback(dl_phdr_info *info, size_t, void *data) {
 LibraryInfo findLauncherLibrary() {
     LibraryInfo result;
     dl_iterate_phdr(libraryCallback, &result);
+    return result;
+}
+
+bool preadExactMain(int fd, void *buffer, size_t size, off_t offset) {
+    auto *bytes = static_cast<uint8_t *>(buffer);
+    size_t done = 0;
+    while (done < size) {
+        const ssize_t result = pread(fd, bytes + done, size - done,
+                                     offset + static_cast<off_t>(done));
+        if (result <= 0) return false;
+        done += static_cast<size_t>(result);
+    }
+    return true;
+}
+
+struct ImportedFunctionResolution {
+    uintptr_t slot = 0;
+    void *target = nullptr;
+    size_t matches = 0;
+};
+
+ImportedFunctionResolution resolveImportedFunction(const LibraryInfo &library,
+                                                   const char *symbolName) {
+    ImportedFunctionResolution result{};
+    if (library.base == 0 || library.path.empty() || symbolName == nullptr) return result;
+
+    const int fd = open(library.path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return result;
+
+    Elf64_Ehdr header{};
+    if (!preadExactMain(fd, &header, sizeof(header), 0)
+            || std::memcmp(header.e_ident, ELFMAG, SELFMAG) != 0
+            || header.e_ident[EI_CLASS] != ELFCLASS64
+            || header.e_machine != EM_AARCH64
+            || header.e_shentsize != sizeof(Elf64_Shdr)
+            || header.e_shnum == 0 || header.e_shnum > 4096) {
+        close(fd);
+        return result;
+    }
+
+    std::vector<Elf64_Shdr> sections(header.e_shnum);
+    if (!preadExactMain(fd, sections.data(), sections.size() * sizeof(Elf64_Shdr),
+                        static_cast<off_t>(header.e_shoff))) {
+        close(fd);
+        return result;
+    }
+
+    for (const Elf64_Shdr &relocations : sections) {
+        if (relocations.sh_type != SHT_RELA || relocations.sh_entsize != sizeof(Elf64_Rela)
+                || relocations.sh_link >= sections.size() || relocations.sh_size == 0) continue;
+        const Elf64_Shdr &symbols = sections[relocations.sh_link];
+        if ((symbols.sh_type != SHT_DYNSYM && symbols.sh_type != SHT_SYMTAB)
+                || symbols.sh_entsize != sizeof(Elf64_Sym)
+                || symbols.sh_link >= sections.size() || symbols.sh_size == 0) continue;
+        const Elf64_Shdr &strings = sections[symbols.sh_link];
+        if (strings.sh_size == 0 || strings.sh_size > 64 * 1024 * 1024
+                || symbols.sh_size > 64 * 1024 * 1024
+                || relocations.sh_size > 64 * 1024 * 1024) continue;
+
+        std::vector<char> stringTable(static_cast<size_t>(strings.sh_size));
+        std::vector<Elf64_Sym> symbolTable(
+                static_cast<size_t>(symbols.sh_size / sizeof(Elf64_Sym)));
+        std::vector<Elf64_Rela> relocationTable(
+                static_cast<size_t>(relocations.sh_size / sizeof(Elf64_Rela)));
+        if (!preadExactMain(fd, stringTable.data(), stringTable.size(),
+                            static_cast<off_t>(strings.sh_offset))
+                || !preadExactMain(fd, symbolTable.data(), symbolTable.size() * sizeof(Elf64_Sym),
+                                   static_cast<off_t>(symbols.sh_offset))
+                || !preadExactMain(fd, relocationTable.data(), relocationTable.size() * sizeof(Elf64_Rela),
+                                   static_cast<off_t>(relocations.sh_offset))) continue;
+
+        for (const Elf64_Rela &relocation : relocationTable) {
+            const uint32_t type = ELF64_R_TYPE(relocation.r_info);
+            if (type != R_AARCH64_JUMP_SLOT && type != R_AARCH64_GLOB_DAT) continue;
+            const size_t symbolIndex = static_cast<size_t>(ELF64_R_SYM(relocation.r_info));
+            if (symbolIndex >= symbolTable.size()) continue;
+            const Elf64_Sym &symbol = symbolTable[symbolIndex];
+            if (symbol.st_name >= stringTable.size()) continue;
+            const char *candidate = stringTable.data() + symbol.st_name;
+            if (std::strcmp(candidate, symbolName) != 0) continue;
+
+            const uintptr_t slot = library.base + static_cast<uintptr_t>(relocation.r_offset);
+            void *target = nullptr;
+            std::memcpy(&target, reinterpret_cast<const void *>(slot), sizeof(target));
+            if (reinterpret_cast<uintptr_t>(target) < 0x10000u) continue;
+
+            if (result.matches == 0) {
+                result.slot = slot;
+                result.target = target;
+                result.matches = 1;
+            } else if (result.slot != slot || result.target != target) {
+                ++result.matches;
+                close(fd);
+                return result;
+            }
+        }
+    }
+    close(fd);
     return result;
 }
 
@@ -488,8 +587,8 @@ void hapticFeedbackCaptureHook(void *storage, int32_t constant) {
     if (original != nullptr) original(storage, constant);
 }
 
-bool installHapticCaptureHookFromHandle(void *handle) {
-    if (handle == nullptr || gHookFunction == nullptr || !isLauncherProcess()) return false;
+bool installHapticCaptureHookTarget(void *target, void *standard, const char *source) {
+    if (target == nullptr || gHookFunction == nullptr || !isLauncherProcess()) return false;
     if (gHapticCaptureHookInstalled.load(std::memory_order_acquire)) return true;
 
     bool expected = false;
@@ -498,25 +597,13 @@ bool installHapticCaptureHookFromHandle(void *handle) {
         return gHapticCaptureHookInstalled.load(std::memory_order_acquire);
     }
 
-    // LSPosed's native loader callback supplies this already-loaded handle.
-    // Never call dlopen/RTLD_DEFAULT here: that was the lock-order hazard in 0.8.0 v1.
-    void *target = dlsym(handle, kHapticSymbol);
-    void *standard = dlsym(handle, kStandardHapticSymbol);
-    if (target == nullptr) {
-        logLine(ANDROID_LOG_WARN,
-                "HAPTIC_V2 symbol unavailable needle=%s symbol=%s handle=%p",
-                kHapticLibraryNeedle, kHapticSymbol, handle);
-        gHapticInstallInProgress.store(false, std::memory_order_release);
-        return false;
-    }
-
     void *backup = nullptr;
     const int rc = gHookFunction(
             target, reinterpret_cast<void *>(hapticFeedbackCaptureHook), &backup);
     if (rc != 0 || backup == nullptr) {
         logLine(ANDROID_LOG_ERROR,
-                "HAPTIC_V2 capture hook failed rc=%d target=%p backup=%p",
-                rc, target, backup);
+                "HAPTIC_V2 capture hook failed source=%s rc=%d target=%p backup=%p",
+                source == nullptr ? "unknown" : source, rc, target, backup);
         gHapticInstallInProgress.store(false, std::memory_order_release);
         return false;
     }
@@ -525,10 +612,38 @@ bool installHapticCaptureHookFromHandle(void *handle) {
     gStandardHapticFeedback.store(standard, std::memory_order_release);
     gHapticCaptureHookInstalled.store(true, std::memory_order_release);
     gHapticInstallInProgress.store(false, std::memory_order_release);
+    gHapticUnavailableLogged.store(false, std::memory_order_release);
     logLine(ANDROID_LOG_INFO,
-            "HAPTIC_V2 capture hook ready target=%p standard=%p policy=loader-handle-only watchdog=off",
-            target, standard);
+            "HAPTIC_V2 capture hook ready source=%s target=%p standard=%p feature=%s watchdog=off no-dlopen=1",
+            source == nullptr ? "unknown" : source, target, standard, kHapticSymbol);
     return true;
+}
+
+bool installHapticCaptureHookFromHandle(void *handle) {
+    if (handle == nullptr || gHookFunction == nullptr || !isLauncherProcess()) return false;
+    void *target = dlsym(handle, kHapticSymbol);
+    void *standard = dlsym(handle, kStandardHapticSymbol);
+    if (target == nullptr) return false;
+    return installHapticCaptureHookTarget(target, standard, "provider-loader-fallback");
+}
+
+bool installHapticCaptureHookFromLauncherImport(const LibraryInfo &library, const char *source) {
+    if (library.base == 0 || gHookFunction == nullptr || !isLauncherProcess()) return false;
+    if (gHapticCaptureHookInstalled.load(std::memory_order_acquire)) return true;
+
+    const ImportedFunctionResolution resolution = resolveImportedFunction(library, kHapticSymbol);
+    if (resolution.matches != 1 || resolution.target == nullptr) {
+        logLine(ANDROID_LOG_WARN,
+                "HAPTIC_V2 feature import unresolved source=%s symbol=%s matches=%zu launcher=%s",
+                source == nullptr ? "unknown" : source, kHapticSymbol,
+                resolution.matches, library.path.c_str());
+        return false;
+    }
+    logLine(ANDROID_LOG_INFO,
+            "HAPTIC_V2 feature import resolved source=%s symbol=%s got=%p target=%p launcher=%s",
+            source == nullptr ? "unknown" : source, kHapticSymbol,
+            reinterpret_cast<void *>(resolution.slot), resolution.target, library.path.c_str());
+    return installHapticCaptureHookTarget(resolution.target, nullptr, "launcher-import-feature");
 }
 
 bool performNativeHaptic(const char *stage, bool light) {
@@ -589,25 +704,41 @@ uintptr_t resolveUniqueAuxPattern(const LibraryInfo &library,
     return found;
 }
 
-uintptr_t resolveBackInvokeTarget(const LibraryInfo &library) {
-    if (std::strcmp(gActivePatternName, "8.01.02.5459-v1") == 0) {
-        return resolveUniqueAuxPattern(
-                library, kOnBackInvokePatternV1, sizeof(kOnBackInvokePatternV1));
+uintptr_t resolveBackInvokeTarget(const LibraryInfo &library, const char **featureName) {
+    struct BackInvokeFeature {
+        const char *name;
+        const uint8_t *bytes;
+        size_t size;
+    };
+    const BackInvokeFeature features[] = {
+            {"back-invoke-frame-v1", kOnBackInvokePatternV1, sizeof(kOnBackInvokePatternV1)},
+            {"back-invoke-frame-v2", kOnBackInvokePatternV2, sizeof(kOnBackInvokePatternV2)},
+    };
+
+    uintptr_t found = 0;
+    const char *matched = nullptr;
+    for (const BackInvokeFeature &feature : features) {
+        const uintptr_t candidate = resolveUniqueAuxPattern(library, feature.bytes, feature.size);
+        if (candidate == 0) continue;
+        if (found != 0 && found != candidate) {
+            if (featureName != nullptr) *featureName = "ambiguous";
+            return 0;
+        }
+        found = candidate;
+        matched = feature.name;
     }
-    if (std::strcmp(gActivePatternName, "8.01.02.6174-v2") == 0) {
-        return resolveUniqueAuxPattern(
-                library, kOnBackInvokePatternV2, sizeof(kOnBackInvokePatternV2));
-    }
-    return 0;
+    if (featureName != nullptr) *featureName = matched;
+    return found;
 }
 
 bool installBackInvokeHapticHook(const LibraryInfo &library) {
     if (library.base == 0 || gHookFunction == nullptr) return false;
-    const uintptr_t target = resolveBackInvokeTarget(library);
+    const char *featureName = nullptr;
+    const uintptr_t target = resolveBackInvokeTarget(library, &featureName);
     if (target == 0) {
         logLine(ANDROID_LOG_WARN,
-                "HAPTIC_V2 commit hook unresolved profile=%s; ready haptic remains available",
-                gActivePatternName);
+                "HAPTIC_V2 commit hook unresolved feature=%s activeProfile=%s; ready haptic remains available",
+                featureName == nullptr ? "none" : featureName, gActivePatternName);
         return false;
     }
     if (gBackInvokeHookInstalled.load(std::memory_order_acquire)
@@ -630,8 +761,9 @@ bool installBackInvokeHapticHook(const LibraryInfo &library) {
     gBackInvokeTarget.store(target, std::memory_order_release);
     gBackInvokeHookInstalled.store(true, std::memory_order_release);
     logLine(ANDROID_LOG_INFO,
-            "HAPTIC_V2 commit hook ready profile=%s target=%p watchdog=off",
-            gActivePatternName, reinterpret_cast<void *>(target));
+            "HAPTIC_V2 commit hook ready feature=%s activeProfile=%s target=%p watchdog=off",
+            featureName == nullptr ? "unknown" : featureName, gActivePatternName,
+            reinterpret_cast<void *>(target));
     return true;
 }
 
@@ -950,6 +1082,15 @@ void hookWatchdogWorker() {
         if (library.base != 0) {
             missingPolls = 0;
             ensureHook(library, "watchdog");
+            if (!gHapticCaptureHookInstalled.load(std::memory_order_acquire)) {
+                const int64_t now = monotonicMs();
+                int64_t last = gLastHapticFeatureResolveMs.load(std::memory_order_relaxed);
+                if (now - last >= kHapticFeatureResolveIntervalMs
+                        && gLastHapticFeatureResolveMs.compare_exchange_strong(
+                                last, now, std::memory_order_relaxed)) {
+                    installHapticCaptureHookFromLauncherImport(library, "watchdog-feature-probe");
+                }
+            }
         } else {
             ++missingPolls;
             if (missingPolls == 12) {
@@ -989,7 +1130,10 @@ void onLibraryLoaded(const char *name, void *handle) {
         const LibraryInfo library = findLauncherLibrary();
         if (library.base != 0) {
             ensureHook(library, "loader-callback");
-            if (isLauncherProcess()) ensureWorkerStarted();
+            if (isLauncherProcess()) {
+                installHapticCaptureHookFromLauncherImport(library, "launcher-loader-callback");
+                ensureWorkerStarted();
+            }
         }
     }
 }
@@ -1054,13 +1198,14 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
             reinterpret_cast<void *>(entries->hook_func), reinterpret_cast<void *>(entries->unhook_func),
             static_cast<long long>(kHookHealthIntervalMs));
     logLine(ANDROID_LOG_INFO,
-            "HAPTIC_V2 enabled policy=loader-handle-only library-needle=libhyper_os_background_tasks_public no-dlopen no-watchdog no-hook-mutex ready=standard-27 commit=ext-0");
+            "HAPTIC_V2 enabled policy=launcher-import-feature-primary provider-loader-fallback no-dlopen no-hook-mutex ready=ext-fallback commit=ext-0");
 
     const LibraryInfo library = findLauncherLibrary();
     if (library.base != 0) {
         logLine(ANDROID_LOG_INFO, "DP_GATE native_init backfill found %s base=%p process=%s",
                 kTargetLibrary, reinterpret_cast<void *>(library.base), processName.c_str());
         ensureHook(library, "native-init-backfill");
+        if (launcherProcess) installHapticCaptureHookFromLauncherImport(library, "native-init-feature-probe");
     } else {
         logLine(ANDROID_LOG_INFO, "DP_GATE native_init waiting for %s process=%s",
                 kTargetLibrary, processName.c_str());

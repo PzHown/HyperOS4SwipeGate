@@ -61,11 +61,6 @@ constexpr size_t kMaxPatternBytes = 128;
 constexpr size_t kMaxDetailBytes = 768;
 constexpr size_t kMaxAppLogBytes = 12 * 1024;
 
-// Verified directly from RELEASE-8.01.02.6174-260818-08281208-R's
-// libapp_launcher.so. The value is the Rust String vtable used at the
-// Bundle_insert_string and Intent_set_action callsites; do not reuse it for an unknown profile.
-constexpr uintptr_t kRStringVtableOffset6174 = 0xe116c8u;
-
 constexpr const char *kBroadcastReceiverOnReceiveSymbol =
         "_RNvMs3_NtNtCslLvADlVgqlk_26hyper_os_broadcast_private13dyn_"
         "broadcast23BroadcastReceiver_traitINtB5_20BroadcastReceiver_TOINtNtNtNt"
@@ -142,8 +137,12 @@ std::atomic<bool> gInstallerStarted{false};
 std::atomic<bool> gChildProbeStarted{false};
 std::atomic<bool> gReceiverHookInstalled{false};
 std::atomic<bool> gSendCaptureHookInstalled{false};
+std::atomic<bool> gRStringVtableCaptureHookInstalled{false};
 std::atomic<void *> gOriginalReceiver{nullptr};
+std::atomic<void *> gOriginalIntentSetAction{nullptr};
 std::atomic<void *> gCapturedRuntime{nullptr};
+std::atomic<void *> gCapturedRStringVtable{nullptr};
+std::atomic<int64_t> gLastAcceptedCarrierNonce{0};
 
 int gThresholdDp = -1;
 int gLogLevel = -1;
@@ -448,15 +447,7 @@ bool verifyPackageUid(const char *packageName, int32_t claimedUid) {
 }
 
 const void *rStringVtable() {
-    std::string pattern;
-    {
-        SpinGuard guard;
-        pattern = gPattern;
-    }
-    if (pattern.find("8.01.02.6174-v2") == std::string::npos) return nullptr;
-    const LoadedImage launcher = findLoadedImage(kLauncherLibrary);
-    if (launcher.base == 0) return nullptr;
-    return reinterpret_cast<const void *>(launcher.base + kRStringVtableOffset6174);
+    return gCapturedRStringVtable.load(std::memory_order_acquire);
 }
 
 bool makeOwnedRString(const std::string &source, RString *output) {
@@ -527,9 +518,38 @@ bool intentSenderEquals(void *intent, const char *expected) {
     return borrowedEquals(getSender(intent), expected);
 }
 
+void hookIntentSetActionCapture(void *intent, ROptionRString *value) {
+    if (value != nullptr && value->tag == 0u
+            && value->value.vtable != nullptr
+            && reinterpret_cast<uintptr_t>(value->value.vtable) >= 0x10000u
+            && value->value.length <= 4096u) {
+        void *expected = nullptr;
+        void *captured = const_cast<void *>(value->value.vtable);
+        if (gCapturedRStringVtable.compare_exchange_strong(
+                expected, captured, std::memory_order_acq_rel)) {
+            char line[192]{};
+            std::snprintf(line, sizeof(line),
+                          "RSTRING_VTABLE captured feature=Intent_set_action vtable=%p",
+                          captured);
+            bridgeLog(ANDROID_LOG_INFO, line);
+        }
+    }
+
+    const auto original = reinterpret_cast<IntentSetStringFn>(
+            gOriginalIntentSetAction.load(std::memory_order_acquire));
+    if (original != nullptr) original(intent, value);
+}
+
 bool sendNativeReply(int64_t nonce) {
     void *runtime = gCapturedRuntime.load(std::memory_order_acquire);
-    if (reinterpret_cast<uintptr_t>(runtime) < 0x100000000ull) return false;
+    if (reinterpret_cast<uintptr_t>(runtime) < 0x100000000ull) {
+        bridgeLog(ANDROID_LOG_WARN, "NATIVE_REPLY waiting reason=runtime-not-captured");
+        return false;
+    }
+    if (rStringVtable() == nullptr) {
+        bridgeLog(ANDROID_LOG_WARN, "NATIVE_REPLY waiting reason=rstring-vtable-not-captured");
+        return false;
+    }
 
     const auto intentDefault = resolveLauncherSymbol<IntentDefaultFn>("Intent_default");
     const auto intentDrop = resolveLauncherSymbol<IntentDropFn>("Intent_drop");
@@ -542,7 +562,8 @@ bool sendNativeReply(int64_t nonce) {
     const auto dec = resolveLauncherSymbol<RuntimeStrongFn>("Runtime_dec_strong");
     if (intentDefault == nullptr || intentDrop == nullptr || setAction == nullptr
             || setPackage == nullptr || setExtras == nullptr || bundleDefault == nullptr
-            || send == nullptr || inc == nullptr || dec == nullptr || rStringVtable() == nullptr) {
+            || send == nullptr || inc == nullptr || dec == nullptr) {
+        bridgeLog(ANDROID_LOG_WARN, "NATIVE_REPLY waiting reason=runtime-symbols-unavailable");
         return false;
     }
 
@@ -675,6 +696,16 @@ void handleControlCarrier(void *intent) {
                   "CONTROL_CARRIER haptic field missing; preserving previous/default state");
     }
 
+    const int64_t previousNonce = gLastAcceptedCarrierNonce.exchange(
+            nonce, std::memory_order_acq_rel);
+    if (previousNonce == nonce) {
+        std::snprintf(carrierLog, sizeof(carrierLog),
+                      "CONTROL_CARRIER duplicate nonce=%lld; state unchanged, reply retry=%d",
+                      static_cast<long long>(nonce), sendNativeReply(nonce) ? 1 : 0);
+        bridgeLog(ANDROID_LOG_DEBUG, carrierLog);
+        return;
+    }
+
     bool thresholdChanged;
     bool logLevelChanged;
     bool hapticChanged;
@@ -731,6 +762,19 @@ void *installerMain(void *) {
                     bridgeLog(ANDROID_LOG_INFO, "HyOS private broadcast runtime capture installed");
                 }
             }
+            if (!gRStringVtableCaptureHookInstalled.load(std::memory_order_acquire)) {
+                const auto targetFn = resolveLauncherSymbol<IntentSetStringFn>("Intent_set_action");
+                void *target = reinterpret_cast<void *>(targetFn);
+                void *backup = nullptr;
+                if (target != nullptr
+                        && hook(target, reinterpret_cast<void *>(hookIntentSetActionCapture),
+                                &backup) == 0 && backup != nullptr) {
+                    gOriginalIntentSetAction.store(backup, std::memory_order_release);
+                    gRStringVtableCaptureHookInstalled.store(true, std::memory_order_release);
+                    bridgeLog(ANDROID_LOG_INFO,
+                              "RSTRING_VTABLE capture hook installed feature=Intent_set_action");
+                }
+            }
             if (!gReceiverHookInstalled.load(std::memory_order_acquire)) {
                 void *target = resolveExactFileSymbol(broadcastImage,
                                                        kBroadcastReceiverOnReceiveSymbol);
@@ -744,7 +788,8 @@ void *installerMain(void *) {
                 }
             }
             if (gSendCaptureHookInstalled.load(std::memory_order_acquire)
-                    && gReceiverHookInstalled.load(std::memory_order_acquire)) {
+                    && gReceiverHookInstalled.load(std::memory_order_acquire)
+                    && gRStringVtableCaptureHookInstalled.load(std::memory_order_acquire)) {
                 gInstallerStarted.store(false, std::memory_order_release);
                 return nullptr;
             }
@@ -760,7 +805,8 @@ void *installerMain(void *) {
 void startInstallerIfLauncher() {
     if (!isLauncherProcess() || gHookFunction.load(std::memory_order_acquire) == nullptr) return;
     if (gReceiverHookInstalled.load(std::memory_order_acquire)
-            && gSendCaptureHookInstalled.load(std::memory_order_acquire)) return;
+            && gSendCaptureHookInstalled.load(std::memory_order_acquire)
+            && gRStringVtableCaptureHookInstalled.load(std::memory_order_acquire)) return;
     bool expected = false;
     if (!gInstallerStarted.compare_exchange_strong(
                 expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) return;
@@ -804,8 +850,12 @@ void resetAfterFork() {
     gChildProbeStarted.store(false, std::memory_order_release);
     gReceiverHookInstalled.store(false, std::memory_order_release);
     gSendCaptureHookInstalled.store(false, std::memory_order_release);
+    gRStringVtableCaptureHookInstalled.store(false, std::memory_order_release);
     gOriginalReceiver.store(nullptr, std::memory_order_release);
+    gOriginalIntentSetAction.store(nullptr, std::memory_order_release);
     gCapturedRuntime.store(nullptr, std::memory_order_release);
+    gCapturedRStringVtable.store(nullptr, std::memory_order_release);
+    gLastAcceptedCarrierNonce.store(0, std::memory_order_release);
     startChildProbeAfterFork();
 }
 
