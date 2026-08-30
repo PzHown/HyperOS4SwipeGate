@@ -17,11 +17,12 @@ jobs:
         with:
           ref: dev
           fetch-depth: 0
-      - name: Fix native include and explicit event wrappers
+      - name: Fix native include and event wrappers
         shell: bash
         run: |
           python3 <<'PY'
           from pathlib import Path
+          import base64
 
           p = Path('native/src/main.cpp')
           s = p.read_text()
@@ -37,118 +38,8 @@ jobs:
           idx = s.find(marker)
           if idx < 0:
               raise SystemExit('haptic assembly marker not found')
-          prefix = s[:idx]
-          tail = '''// Haptic lifecycle hooks. Preserve opaque call arguments and forward to the LSPosed trampoline.
-
-.global swipegate_on_swipe_start_hook
-.hidden swipegate_on_swipe_start_hook
-.type swipegate_on_swipe_start_hook, %function
-swipegate_on_swipe_start_hook:
-    sub sp, sp, #0x110
-    stp x0, x1, [sp, #0x00]
-    stp x2, x3, [sp, #0x10]
-    stp x4, x5, [sp, #0x20]
-    stp x6, x7, [sp, #0x30]
-    str x8, [sp, #0x40]
-    str x30, [sp, #0x48]
-    stp q0, q1, [sp, #0x50]
-    stp q2, q3, [sp, #0x70]
-    stp q4, q5, [sp, #0x90]
-    stp q6, q7, [sp, #0xb0]
-    bl swipegate_haptic_on_swipe_start
-    ldp q0, q1, [sp, #0x50]
-    ldp q2, q3, [sp, #0x70]
-    ldp q4, q5, [sp, #0x90]
-    ldp q6, q7, [sp, #0xb0]
-    ldp x0, x1, [sp, #0x00]
-    ldp x2, x3, [sp, #0x10]
-    ldp x4, x5, [sp, #0x20]
-    ldp x6, x7, [sp, #0x30]
-    ldr x8, [sp, #0x40]
-    adrp x17, gSwipeGateOriginalOnSwipeStart
-    add x17, x17, :lo12:gSwipeGateOriginalOnSwipeStart
-    ldar x16, [x17]
-    cbz x16, .Lswipe_start_done
-    blr x16
-.Lswipe_start_done:
-    ldr x30, [sp, #0x48]
-    add sp, sp, #0x110
-    ret
-.size swipegate_on_swipe_start_hook, .-swipegate_on_swipe_start_hook
-
-.global swipegate_on_back_invoke_hook
-.hidden swipegate_on_back_invoke_hook
-.type swipegate_on_back_invoke_hook, %function
-swipegate_on_back_invoke_hook:
-    sub sp, sp, #0x110
-    stp x0, x1, [sp, #0x00]
-    stp x2, x3, [sp, #0x10]
-    stp x4, x5, [sp, #0x20]
-    stp x6, x7, [sp, #0x30]
-    str x8, [sp, #0x40]
-    str x30, [sp, #0x48]
-    stp q0, q1, [sp, #0x50]
-    stp q2, q3, [sp, #0x70]
-    stp q4, q5, [sp, #0x90]
-    stp q6, q7, [sp, #0xb0]
-    bl swipegate_haptic_on_back_invoke
-    ldp q0, q1, [sp, #0x50]
-    ldp q2, q3, [sp, #0x70]
-    ldp q4, q5, [sp, #0x90]
-    ldp q6, q7, [sp, #0xb0]
-    ldp x0, x1, [sp, #0x00]
-    ldp x2, x3, [sp, #0x10]
-    ldp x4, x5, [sp, #0x20]
-    ldp x6, x7, [sp, #0x30]
-    ldr x8, [sp, #0x40]
-    adrp x17, gSwipeGateOriginalOnBackInvoke
-    add x17, x17, :lo12:gSwipeGateOriginalOnBackInvoke
-    ldar x16, [x17]
-    cbz x16, .Lback_invoke_done
-    blr x16
-.Lback_invoke_done:
-    ldr x30, [sp, #0x48]
-    add sp, sp, #0x110
-    ret
-.size swipegate_on_back_invoke_hook, .-swipegate_on_back_invoke_hook
-
-.global swipegate_on_back_cancelled_hook
-.hidden swipegate_on_back_cancelled_hook
-.type swipegate_on_back_cancelled_hook, %function
-swipegate_on_back_cancelled_hook:
-    sub sp, sp, #0x110
-    stp x0, x1, [sp, #0x00]
-    stp x2, x3, [sp, #0x10]
-    stp x4, x5, [sp, #0x20]
-    stp x6, x7, [sp, #0x30]
-    str x8, [sp, #0x40]
-    str x30, [sp, #0x48]
-    stp q0, q1, [sp, #0x50]
-    stp q2, q3, [sp, #0x70]
-    stp q4, q5, [sp, #0x90]
-    stp q6, q7, [sp, #0xb0]
-    bl swipegate_haptic_on_back_cancelled
-    ldp q0, q1, [sp, #0x50]
-    ldp q2, q3, [sp, #0x70]
-    ldp q4, q5, [sp, #0x90]
-    ldp q6, q7, [sp, #0xb0]
-    ldp x0, x1, [sp, #0x00]
-    ldp x2, x3, [sp, #0x10]
-    ldp x4, x5, [sp, #0x20]
-    ldp x6, x7, [sp, #0x30]
-    ldr x8, [sp, #0x40]
-    adrp x17, gSwipeGateOriginalOnBackCancelled
-    add x17, x17, :lo12:gSwipeGateOriginalOnBackCancelled
-    ldar x16, [x17]
-    cbz x16, .Lback_cancelled_done
-    blr x16
-.Lback_cancelled_done:
-    ldr x30, [sp, #0x48]
-    add sp, sp, #0x110
-    ret
-.size swipegate_on_back_cancelled_hook, .-swipegate_on_back_cancelled_hook
-'''
-          p.write_text(prefix + tail)
+          encoded = 'Ly8gSGFwdGljIGxpZmVjeWNsZSBob29rcy4gUHJlc2VydmUgb3BhcXVlIGNhbGwgYXJndW1lbnRzIGFuZCBmb3J3YXJkIHRvIHRoZSBMU1Bvc2VkIHRyYW1wb2xpbmUuCgouZ2xvYmFsIHN3aXBlZ2F0ZV9vbl9zd2lwZV9zdGFydF9ob29rCi5oaWRkZW4gc3dpcGVnYXRlX29uX3N3aXBlX3N0YXJ0X2hvb2sKLnR5cGUgc3dpcGVnYXRlX29uX3N3aXBlX3N0YXJ0X2hvb2ssICVmdW5jdGlvbgpzd2lwZWdhdGVfb25fc3dpcGVfc3RhcnRfaG9vazoKICAgIHN1YiBzcCwgc3AsICMweDExMAogICAgc3RwIHgwLCB4MSwgW3NwLCAjMHgwMF0KICAgIHN0cCB4MiwgeDMsIFtzcCwgIzB4MTBdCiAgICBzdHAgeDQsIHg1LCBbc3AsICMweDIwXQogICAgc3RwIHg2LCB4NywgW3NwLCAjMHgzMF0KICAgIHN0ciB4OCwgW3NwLCAjMHg0MF0KICAgIHN0ciB4MzAsIFtzcCwgIzB4NDhdCiAgICBzdHAgcTAsIHExLCBbc3AsICMweDUwXQogICAgc3RwIHEyLCBxMywgW3NwLCAjMHg3MF0KICAgIHN0cCBxNCwgcTUsIFtzcCwgIzB4OTBdCiAgICBzdHAgcTYsIHE3LCBbc3AsICMweGIwXQogICAgYmwgc3dpcGVnYXRlX2hhcHRpY19vbl9zd2lwZV9zdGFydAogICAgbGRwIHEwLCBxMSwgW3NwLCAjMHg1MF0KICAgIGxkcCBxMiwgcTMsIFtzcCwgIzB4NzBdCiAgICBsZHAgcTQsIHE1LCBbc3AsICMweDkwXQogICAgbGRwIHE2LCBxNywgW3NwLCAjMHhiMF0KICAgIGxkcCB4MCwgeDEsIFtzcCwgIzB4MDBdCiAgICBsZHAgeDIsIHgzLCBbc3AsICMweDEwXQogICAgbGRwIHg0LCB4NSwgW3NwLCAjMHgyMF0KICAgIGxkcCB4NiwgeDcsIFtzcCwgIzB4MzBdCiAgICBsZHIgeDgsIFtzcCwgIzB4NDBdCiAgICBhZHJwIHgxNywgZ1N3aXBlR2F0ZU9yaWdpbmFsT25Td2lwZVN0YXJ0CiAgICBhZGQgeDE3LCB4MTcsIDpsbzEyOmdTd2lwZUdhdGVPcmlnaW5hbE9uU3dpcGVTdGFydAogICAgbGRhciB4MTYsIFt4MTddCiAgICBjYnogeDE2LCAuTHN3aXBlX3N0YXJ0X2RvbmUKICAgIGJsciB4MTYKLkxzd2lwZV9zdGFydF9kb25lOgogICAgbGRyIHgzMCwgW3NwLCAjMHg0OF0KICAgIGFkZCBzcCwgc3AsICMweDExMAogICAgcmV0Ci5zaXplIHN3aXBlZ2F0ZV9vbl9zd2lwZV9zdGFydF9ob29rLCAuLXN3aXBlZ2F0ZV9vbl9zd2lwZV9zdGFydF9ob29rCgouZ2xvYmFsIHN3aXBlZ2F0ZV9vbl9iYWNrX2ludm9rZV9ob29rCi5oaWRkZW4gc3dpcGVnYXRlX29uX2JhY2tfaW52b2tlX2hvb2sKLnR5cGUgc3dpcGVnYXRlX29uX2JhY2tfaW52b2tlX2hvb2ssICVmdW5jdGlvbgpzd2lwZWdhdGVfb25fYmFja19pbnZva2VfaG9vazoKICAgIHN1YiBzcCwgc3AsICMweDExMAogICAgc3RwIHgwLCB4MSwgW3NwLCAjMHgwMF0KICAgIHN0cCB4MiwgeDMsIFtzcCwgIzB4MTBdCiAgICBzdHAgeDQsIHg1LCBbc3AsICMweDIwXQogICAgc3RwIHg2LCB4NywgW3NwLCAjMHgzMF0KICAgIHN0ciB4OCwgW3NwLCAjMHg0MF0KICAgIHN0ciB4MzAsIFtzcCwgIzB4NDhdCiAgICBzdHAgcTAsIHExLCBbc3AsICMweDUwXQogICAgc3RwIHEyLCBxMywgW3NwLCAjMHg3MF0KICAgIHN0cCBxNCwgcTUsIFtzcCwgIzB4OTBdCiAgICBzdHAgcTYsIHE3LCBbc3AsICMweGIwXQogICAgYmwgc3dpcGVnYXRlX2hhcHRpY19vbl9iYWNrX2ludm9rZQogICAgbGRwIHEwLCBxMSwgW3NwLCAjMHg1MF0KICAgIGxkcCBxMiwgcTMsIFtzcCwgIzB4NzBdCiAgICBsZHAgcTQsIHE1LCBbc3AsICMweDkwXQogICAgbGRwIHE2LCBxNywgW3NwLCAjMHhiMF0KICAgIGxkcCB4MCwgeDEsIFtzcCwgIzB4MDBdCiAgICBsZHAgeDIsIHgzLCBbc3AsICMweDEwXQogICAgbGRwIHg0LCB4NSwgW3NwLCAjMHgyMF0KICAgIGxkcCB4NiwgeDcsIFtzcCwgIzB4MzBdCiAgICBsZHIgeDgsIFtzcCwgIzB4NDBdCiAgICBhZHJwIHgxNywgZ1N3aXBlR2F0ZU9yaWdpbmFsT25CYWNrSW52b2tlCiAgICBhZGQgeDE3LCB4MTcsIDpsbzEyOmdTd2lwZUdhdGVPcmlnaW5hbE9uQmFja0ludm9rZQogICAgbGRhciB4MTYsIFt4MTddCiAgICBjYnogeDE2LCAuTGJhY2tfaW52b2tlX2RvbmUKICAgIGJsciB4MTYKLkxiYWNrX2ludm9rZV9kb25lOgogICAgbGRyIHgzMCwgW3NwLCAjMHg0OF0KICAgIGFkZCBzcCwgc3AsICMweDExMAogICAgcmV0Ci5zaXplIHN3aXBlZ2F0ZV9vbl9iYWNrX2ludm9rZV9ob29rLCAuLXN3aXBlZ2F0ZV9vbl9iYWNrX2ludm9rZV9ob29rCgouZ2xvYmFsIHN3aXBlZ2F0ZV9vbl9iYWNrX2NhbmNlbGxlZF9ob29rCi5oaWRkZW4gc3dpcGVnYXRlX29uX2JhY2tfY2FuY2VsbGVkX2hvb2sKLnR5cGUgc3dpcGVnYXRlX29uX2JhY2tfY2FuY2VsbGVkX2hvb2ssICVmdW5jdGlvbgpzd2lwZWdhdGVfb25fYmFja19jYW5jZWxsZWRfaG9vazoKICAgIHN1YiBzcCwgc3AsICMweDExMAogICAgc3RwIHgwLCB4MSwgW3NwLCAjMHgwMF0KICAgIHN0cCB4MiwgeDMsIFtzcCwgIzB4MTBdCiAgICBzdHAgeDQsIHg1LCBbc3AsICMweDIwXQogICAgc3RwIHg2LCB4NywgW3NwLCAjMHgzMF0KICAgIHN0ciB4OCwgW3NwLCAjMHg0MF0KICAgIHN0ciB4MzAsIFtzcCwgIzB4NDhdCiAgICBzdHAgcTAsIHExLCBbc3AsICMweDUwXQogICAgc3RwIHEyLCBxMywgW3NwLCAjMHg3MF0KICAgIHN0cCBxNCwgcTUsIFtzcCwgIzB4OTBdCiAgICBzdHAgcTYsIHE3LCBbc3AsICMweGIwXQogICAgYmwgc3dpcGVnYXRlX2hhcHRpY19vbl9iYWNrX2NhbmNlbGxlZAogICAgbGRwIHEwLCBxMSwgW3NwLCAjMHg1MF0KICAgIGxkcCBxMiwgcTMsIFtzcCwgIzB4NzBdCiAgICBsZHAgcTQsIHE1LCBbc3AsICMweDkwXQogICAgbGRwIHE2LCBxNywgW3NwLCAjMHhiMF0KICAgIGxkcCB4MCwgeDEsIFtzcCwgIzB4MDBdCiAgICBsZHAgeDIsIHgzLCBbc3AsICMweDEwXQogICAgbGRwIHg0LCB4NSwgW3NwLCAjMHgyMF0KICAgIGxkcCB4NiwgeDcsIFtzcCwgIzB4MzBdCiAgICBsZHIgeDgsIFtzcCwgIzB4NDBdCiAgICBhZHJwIHgxNywgZ1N3aXBlR2F0ZU9yaWdpbmFsT25CYWNrQ2FuY2VsbGVkCiAgICBhZGQgeDE3LCB4MTcsIDpsbzEyOmdTd2lwZUdhdGVPcmlnaW5hbE9uQmFja0NhbmNlbGxlZAogICAgbGRhciB4MTYsIFt4MTddCiAgICBjYnogeDE2LCAuTGJhY2tfY2FuY2VsbGVkX2RvbmUKICAgIGJsciB4MTYKLkxiYWNrX2NhbmNlbGxlZF9kb25lOgogICAgbGRyIHgzMCwgW3NwLCAjMHg0OF0KICAgIGFkZCBzcCwgc3AsICMweDExMAogICAgcmV0Ci5zaXplIHN3aXBlZ2F0ZV9vbl9iYWNrX2NhbmNlbGxlZF9ob29rLCAuLXN3aXBlZ2F0ZV9vbl9iYWNrX2NhbmNlbGxlZF9ob29rCg=='
+          p.write_text(s[:idx] + base64.b64decode(encoded).decode())
           PY
 
           git config user.name github-actions[bot]
