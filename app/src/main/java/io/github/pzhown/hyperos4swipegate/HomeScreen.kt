@@ -1,6 +1,9 @@
 package io.github.pzhown.hyperos4swipegate
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -30,6 +33,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -47,6 +52,7 @@ import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
+import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.SliderPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import kotlin.math.roundToInt
@@ -254,6 +260,61 @@ internal fun HomeScreen(
                         color = MiuixTheme.colorScheme.error,
                     )
                 }
+            }
+        }
+
+        item { SmallTitle("关于") }
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 22.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    Image(
+                        painter = painterResource(R.drawable.swipegate_logo),
+                        contentDescription = "SwipeGate Logo",
+                        modifier = Modifier.size(48.dp),
+                        contentScale = ContentScale.Fit,
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("SwipeGate", fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "${BuildConfig.VERSION_NAME} · HyperOS 4 · Launcher 8.0+",
+                            fontSize = 13.sp,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        )
+                    }
+                }
+                ArrowPreference(
+                    title = "GitHub 项目",
+                    summary = "PzHown/HyperOS4SwipeGate",
+                    onClick = {
+                        context.startActivity(
+                            Intent(
+                                Intent.ACTION_VIEW,
+                                Uri.parse("https://github.com/PzHown/HyperOS4SwipeGate"),
+                            ),
+                        )
+                    },
+                )
+                ArrowPreference(
+                    title = "开发者",
+                    summary = "PzHown · GitHub",
+                    onClick = {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/PzHown")))
+                    },
+                )
+                ArrowPreference(
+                    title = "酷安",
+                    summary = "PzHown",
+                    onClick = {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.coolapk.com/u/464418")))
+                    },
+                )
             }
         }
     }
