@@ -66,6 +66,12 @@ public final class NativeControlBridge {
         pulse.start();
     }
 
+    public static void requestConfigRefresh() {
+        PENDING_NONCE.set(0L);
+        unansweredSinceElapsedMs = 0L;
+        requestSync();
+    }
+
     public static void requestSync() {
         Context context = appContext;
         if (context == null) return;
@@ -102,12 +108,16 @@ public final class NativeControlBridge {
                         ConfigBridge.PREF_KEY_LOG_LEVEL,
                         ConfigBridge.DEFAULT_LOG_LEVEL));
 
+        boolean hapticEnabled = ConfigBridge.localPreferences(context).getBoolean(
+                ConfigBridge.PREF_KEY_HAPTIC_ENABLED, ConfigBridge.DEFAULT_HAPTIC_ENABLED);
+
         try {
             Intent query = new Intent(SystemUiBridgeModule.ACTION_APP_QUERY)
                     .setPackage(SystemUiBridgeModule.SYSTEM_UI_PACKAGE)
                     .putExtra(SystemUiBridgeModule.EXTRA_NONCE, nonce)
                     .putExtra(SystemUiBridgeModule.EXTRA_THRESHOLD_DP, threshold)
                     .putExtra(SystemUiBridgeModule.EXTRA_LOG_LEVEL, logLevel)
+                    .putExtra(SystemUiBridgeModule.EXTRA_HAPTIC_ENABLED, hapticEnabled)
                     .putExtra(SystemUiBridgeModule.EXTRA_SENDER_UID, Process.myUid());
             context.sendBroadcast(query, null,
                     BroadcastOptions.makeBasic().setShareIdentityEnabled(true).toBundle());

@@ -1,5 +1,6 @@
 #include "native_api.h"
 #include "swipe_semantic_resolver.h"
+#include "control_channel.h"
 
 #include <android/log.h>
 #include <elf.h>
@@ -531,6 +532,9 @@ bool installHapticCaptureHookFromHandle(void *handle) {
 }
 
 bool performNativeHaptic(const char *stage, bool light) {
+    swipegate_control_sync_if_due();
+    if (swipegate_control_haptic_enabled() != 1) return false;
+
     const auto original = reinterpret_cast<HapticFeedbackFn>(
             gOriginalHapticFeedback.load(std::memory_order_acquire));
     const uintptr_t arc = gCapturedHapticArc.load(std::memory_order_acquire);

@@ -41,6 +41,7 @@ constexpr const char *kMarkerExtra = "swipegate_control";
 constexpr const char *kNonceExtra = "swipegate_nonce";
 constexpr const char *kThresholdExtra = "swipegate_threshold_dp";
 constexpr const char *kLogLevelExtra = "swipegate_log_level";
+constexpr const char *kHapticEnabledExtra = "swipegate_haptic_enabled";
 constexpr const char *kHookStateExtra = "swipegate_hook_state";
 constexpr const char *kPatternExtra = "swipegate_pattern";
 constexpr const char *kDetailExtra = "swipegate_detail";
@@ -146,6 +147,7 @@ std::atomic<void *> gCapturedRuntime{nullptr};
 
 int gThresholdDp = -1;
 int gLogLevel = -1;
+int gHapticEnabled = -1;
 HookState gHookState = kHookWaiting;
 std::string gPattern;
 std::string gDetail = "Native 模块已加载，等待 HyOS Runtime / Hook";
@@ -547,6 +549,7 @@ bool sendNativeReply(int64_t nonce) {
     HookState state;
     int threshold;
     int logLevel;
+    int hapticEnabled;
     std::string pattern;
     std::string detail;
     std::string appLog;
@@ -555,6 +558,7 @@ bool sendNativeReply(int64_t nonce) {
         state = gHookState;
         threshold = gThresholdDp;
         logLevel = gLogLevel;
+        hapticEnabled = gHapticEnabled;
         pattern = gPattern.substr(0, kMaxPatternBytes);
         detail = gDetail.substr(0, kMaxDetailBytes);
         appLog = gAppLog.substr(gAppLog.size() > kMaxAppLogBytes
@@ -568,6 +572,7 @@ bool sendNativeReply(int64_t nonce) {
             || !addBundleI32(extras, kHookStateExtra, static_cast<int32_t>(state))
             || !addBundleI32(extras, kThresholdExtra, threshold)
             || !addBundleI32(extras, kLogLevelExtra, logLevel)
+            || !addBundleBool(extras, kHapticEnabledExtra, hapticEnabled > 0)
             || !addBundleI32(extras, kSenderUidExtra, static_cast<int32_t>(getuid()))
             || !addBundleString(extras, kPatternExtra, pattern)
             || !addBundleString(extras, kDetailExtra, detail)
@@ -605,12 +610,14 @@ void handleControlCarrier(void *intent) {
     int32_t senderUid = -1;
     int32_t thresholdDp = -1;
     int32_t logLevel = -1;
+    bool hapticEnabled = false;
     int64_t nonce = 0;
     if (!readNativeBool(extras, kMarkerExtra, &marker) || !marker
             || !readNativeI32(extras, kSenderUidExtra, &senderUid)
             || !readNativeI64(extras, kNonceExtra, &nonce)
             || !readNativeI32(extras, kThresholdExtra, &thresholdDp)
             || !readNativeI32(extras, kLogLevelExtra, &logLevel)
+            || !readNativeBool(extras, kHapticEnabledExtra, &hapticEnabled)
             || nonce <= 0 || !verifyPackageUid(kSystemUiPackage, senderUid)
             || thresholdDp < kMinThresholdDp || thresholdDp > kMaxThresholdDp
             || logLevel < kMinLogLevel || logLevel > kMaxLogLevel) {
@@ -620,12 +627,15 @@ void handleControlCarrier(void *intent) {
 
     bool thresholdChanged;
     bool logLevelChanged;
+    bool hapticChanged;
     {
         SpinGuard guard;
         thresholdChanged = gThresholdDp != thresholdDp;
         logLevelChanged = gLogLevel != logLevel;
+        hapticChanged = gHapticEnabled != (hapticEnabled ? 1 : 0);
         gThresholdDp = thresholdDp;
         gLogLevel = logLevel;
+        gHapticEnabled = hapticEnabled ? 1 : 0;
         if (logLevel <= 0) gAppLog.clear();
     }
     if (thresholdChanged) persistValue(kConfigFileName, thresholdDp);
@@ -764,6 +774,11 @@ extern "C" int swipegate_control_threshold_dp() {
 extern "C" int swipegate_control_log_level() {
     SpinGuard guard;
     return gLogLevel;
+}
+
+extern "C" int swipegate_control_haptic_enabled() {
+    SpinGuard guard;
+    return gHapticEnabled;
 }
 
 extern "C" void swipegate_control_on_log(int, const char *text) {
