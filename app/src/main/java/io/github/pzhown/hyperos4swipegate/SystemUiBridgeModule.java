@@ -6,7 +6,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.os.Process;
-import android.os.SystemClock;
 
 import androidx.annotation.NonNull;
 
@@ -43,6 +42,7 @@ public final class SystemUiBridgeModule extends XposedModule {
     static final String EXTRA_PATTERN = "swipegate_pattern";
     static final String EXTRA_DETAIL = "swipegate_detail";
     static final String EXTRA_NATIVE_LOG = "swipegate_native_log";
+    static final String EXTRA_CHANNEL_STAGE = "swipegate_channel_stage";
     static final String EXTRA_SENDER_UID = "sender_uid";
 
     private static final int MAX_CONTEXT_ATTEMPTS = 80;
@@ -129,7 +129,10 @@ public final class SystemUiBridgeModule extends XposedModule {
                 return;
             }
 
-            pendingNonce.set(nonce);
+            long previousNonce = pendingNonce.getAndSet(nonce);
+            if (previousNonce != nonce) {
+                sendAppStage(context, nonce, "SYSTEMUI_QUERY_RECEIVED");
+            }
             try {
                 Intent carrier = new Intent(ACTION_HYOS_CARRIER)
                         .setPackage(LAUNCHER_PACKAGE)
@@ -142,9 +145,13 @@ public final class SystemUiBridgeModule extends XposedModule {
                 log(android.util.Log.INFO, "HyperOS4SwipeGateSystemUI",
                         "Runtime carrier sent nonce=" + nonce
                                 + " threshold=" + thresholdDp + " logLevel=" + logLevel);
+                if (previousNonce != nonce) {
+                    sendAppStage(context, nonce, "CARRIER_SENT");
+                }
             } catch (Throwable t) {
                 log(android.util.Log.ERROR, "HyperOS4SwipeGateSystemUI",
                         "Runtime carrier send failed", t);
+                sendAppStage(context, nonce, "CARRIER_SEND_FAILED");
             }
         }
     };
@@ -161,6 +168,9 @@ public final class SystemUiBridgeModule extends XposedModule {
                 log(android.util.Log.WARN, "HyperOS4SwipeGateSystemUI",
                         "Rejected native reply nonce=" + nonce + " expected=" + expected
                                 + " launcherUid=" + claimedLauncherUid);
+                if (expected > 0L) {
+                    sendAppStage(context, expected, "NATIVE_REPLY_REJECTED");
+                }
                 return;
             }
 
@@ -180,15 +190,36 @@ public final class SystemUiBridgeModule extends XposedModule {
                         .putExtra(EXTRA_DETAIL, safeString(intent.getStringExtra(EXTRA_DETAIL)))
                         .putExtra(EXTRA_NATIVE_LOG,
                                 safeString(intent.getStringExtra(EXTRA_NATIVE_LOG)))
+                        .putExtra(EXTRA_CHANNEL_STAGE, "NATIVE_REPLY_RELAYED")
                         .putExtra(EXTRA_SENDER_UID, Process.myUid());
                 context.sendBroadcast(reply, null, shareIdentityOptions());
                 pendingNonce.compareAndSet(nonce, 0L);
+                log(android.util.Log.INFO, "HyperOS4SwipeGateSystemUI",
+                        "Native runtime reply relayed nonce=" + nonce);
             } catch (Throwable t) {
                 log(android.util.Log.ERROR, "HyperOS4SwipeGateSystemUI",
                         "Runtime reply relay failed", t);
             }
         }
     };
+
+    private void sendAppStage(Context context, long nonce, String stage) {
+        if (context == null || nonce <= 0L || stage == null || stage.isBlank()) return;
+        try {
+            Intent reply = new Intent(ACTION_APP_REPLY)
+                    .setPackage(MODULE_PACKAGE)
+                    .putExtra(EXTRA_NONCE, nonce)
+                    .putExtra(EXTRA_HOOK_STATE, 0)
+                    .putExtra(EXTRA_CHANNEL_STAGE, stage)
+                    .putExtra(EXTRA_SENDER_UID, Process.myUid());
+            context.sendBroadcast(reply, null, shareIdentityOptions());
+            log(android.util.Log.INFO, "HyperOS4SwipeGateSystemUI",
+                    "Runtime stage ack=" + stage + " nonce=" + nonce);
+        } catch (Throwable t) {
+            log(android.util.Log.ERROR, "HyperOS4SwipeGateSystemUI",
+                    "Runtime stage ack failed stage=" + stage, t);
+        }
+    }
 
     private static Context currentApplication() {
         try {
