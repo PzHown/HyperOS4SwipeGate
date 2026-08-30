@@ -13,8 +13,10 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -121,49 +123,64 @@ internal fun DiagnosticsScreen(
             item { SmallTitle("运行链路") }
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
-                    DiagnosticStatusRow(
-                        label = "LSPosed",
-                        value = when {
-                            !current.serviceConnected -> "未连接"
-                            !current.lsposedSupported -> "版本不支持"
-                            else -> "已连接 · API ${current.apiVersion}"
-                        },
-                        tone = if (current.serviceConnected && current.lsposedSupported) {
-                            DiagnosticTone.Good
-                        } else {
-                            DiagnosticTone.Error
-                        },
-                    )
-                    DiagnosticStatusRow(
-                        label = "HyOS Runtime",
-                        value = if (current.hyosRuntimeDetected) "可用" else "未检测到",
-                        tone = if (current.hyosRuntimeDetected) DiagnosticTone.Good else DiagnosticTone.Error,
-                    )
-                    DiagnosticStatusRow(
-                        label = "Native Hook",
-                        value = nativeHookLabel(current),
-                        tone = nativeHookTone(current),
-                    )
-                }
-            }
-
-            item { SmallTitle("目标与 Hook") }
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    DiagnosticValueRow("目标", if (current.launcherLoaded) "系统桌面 · 已加载" else "系统桌面 · 未加载")
-                    DiagnosticValueRow("Launcher", conciseLauncherVersion(current.launcherVersion))
-                    DiagnosticValueRow("作用域", if (current.launcherInScope) "已包含" else "未包含")
-                    DiagnosticValueRow("Hook 匹配", current.nativeProfile.ifBlank { "未确认" })
-                    if (!current.nativeHealthy && current.nativeDetail.isNotBlank()) {
-                        DiagnosticValueRow("Hook 详情", current.nativeDetail)
+                    Column(modifier = Modifier.padding(vertical = 8.dp)) {
+                        DiagnosticPipelineNode(
+                            label = "LSPosed",
+                            state = when {
+                                !current.serviceConnected -> "未连接"
+                                !current.lsposedSupported -> "版本不支持"
+                                else -> "已连接"
+                            },
+                            detail = when {
+                                !current.serviceConnected -> "等待框架服务"
+                                !current.lsposedSupported -> current.framework.ifBlank { "需要支持的 LSPosed 版本" }
+                                else -> listOf("API ${current.apiVersion}", current.framework)
+                                    .filter { it.isNotBlank() }
+                                    .joinToString(" · ")
+                            },
+                            tone = if (current.serviceConnected && current.lsposedSupported) {
+                                DiagnosticTone.Good
+                            } else {
+                                DiagnosticTone.Error
+                            },
+                            drawConnector = true,
+                        )
+                        DiagnosticPipelineNode(
+                            label = "HyOS Runtime",
+                            state = if (current.hyosRuntimeDetected) "已加载" else "未检测到",
+                            detail = when {
+                                current.hyosRuntimeDetected && current.hyosSpawnerPresent -> "hyos_spawner 可用"
+                                current.hyosRuntimeDetected -> "Runtime 已检测"
+                                else -> "等待 Launcher Runtime"
+                            },
+                            tone = if (current.hyosRuntimeDetected) DiagnosticTone.Good else DiagnosticTone.Error,
+                            drawConnector = true,
+                        )
+                        DiagnosticPipelineNode(
+                            label = "Native Hook",
+                            state = nativeHookLabel(current),
+                            detail = when {
+                                current.nativeProfile.isNotBlank() -> current.nativeProfile
+                                current.nativeDetail.isNotBlank() -> current.nativeDetail
+                                else -> "等待 Hook 状态"
+                            },
+                            tone = nativeHookTone(current),
+                            drawConnector = false,
+                        )
                     }
                 }
             }
 
-            item { SmallTitle("配置") }
+            item { SmallTitle("目标与配置") }
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
+                    DiagnosticValueRow("Launcher", conciseLauncherVersion(current.launcherVersion))
+                    DiagnosticValueRow("作用域", if (current.launcherInScope) "已包含" else "未包含")
+                    DiagnosticValueRow("目标状态", targetStateLabel(current.targetState, current.launcherLoaded))
                     DiagnosticValueRow("触发距离", "${current.thresholdDp} dp")
+                    if (!current.nativeHealthy && current.nativeDetail.isNotBlank() && current.nativeProfile.isNotBlank()) {
+                        DiagnosticValueRow("Hook 详情", current.nativeDetail)
+                    }
                 }
             }
 
@@ -181,7 +198,6 @@ internal fun DiagnosticsScreen(
                         DiagnosticValueRow("Android", "${Build.VERSION.RELEASE} · SDK ${Build.VERSION.SDK_INT}")
                         DiagnosticValueRow("框架", current.framework.ifBlank { "未知" })
                         DiagnosticValueRow("HyOS spawner", if (current.hyosSpawnerPresent) "存在" else "不存在")
-                        DiagnosticValueRow("目标状态", targetStateLabel(current.targetState, current.launcherLoaded))
                     }
                 }
             }
@@ -264,38 +280,67 @@ internal fun DiagnosticsScreen(
 }
 
 @Composable
-private fun DiagnosticStatusRow(
+private fun DiagnosticPipelineNode(
     label: String,
-    value: String,
+    state: String,
+    detail: String,
     tone: DiagnosticTone,
+    drawConnector: Boolean,
 ) {
-    val color = when (tone) {
-        DiagnosticTone.Good -> MiuixTheme.colorScheme.primary
-        DiagnosticTone.Warning -> Color(0xFFD59A00)
-        DiagnosticTone.Error -> MiuixTheme.colorScheme.error
-        DiagnosticTone.Neutral -> MiuixTheme.colorScheme.onSurfaceVariantSummary
-    }
+    val toneColor = diagnosticToneColor(tone)
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 22.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = 22.dp),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Box(
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.width(14.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .padding(top = 7.dp)
+                    .size(10.dp)
+                    .background(toneColor, CircleShape),
+            )
+            if (drawConnector) {
+                Box(
+                    modifier = Modifier
+                        .width(2.dp)
+                        .height(42.dp)
+                        .background(MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.18f)),
+                )
+            }
+        }
+        Column(
             modifier = Modifier
-                .size(8.dp)
-                .background(color, CircleShape),
-        )
-        Text(label, modifier = Modifier.weight(1f), fontSize = 16.sp)
-        Text(
-            text = value,
-            fontSize = 13.sp,
-            color = color,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.End,
-        )
+                .weight(1f)
+                .padding(bottom = if (drawConnector) 8.dp else 12.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(label, modifier = Modifier.weight(1f), fontSize = 16.sp)
+                Text(
+                    text = state,
+                    fontSize = 13.sp,
+                    color = toneColor,
+                    textAlign = TextAlign.End,
+                )
+            }
+            Text(
+                text = detail,
+                modifier = Modifier.padding(top = 2.dp),
+                fontSize = 13.sp,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
@@ -319,6 +364,14 @@ private fun DiagnosticValueRow(label: String, value: String) {
             textAlign = TextAlign.End,
         )
     }
+}
+
+@Composable
+private fun diagnosticToneColor(tone: DiagnosticTone): Color = when (tone) {
+    DiagnosticTone.Good -> MiuixTheme.colorScheme.primary
+    DiagnosticTone.Warning -> Color(0xFFD59A00)
+    DiagnosticTone.Error -> MiuixTheme.colorScheme.error
+    DiagnosticTone.Neutral -> MiuixTheme.colorScheme.onSurfaceVariantSummary
 }
 
 private fun collectDiagnosticUiSnapshot(context: Context): DiagnosticUiSnapshot {
