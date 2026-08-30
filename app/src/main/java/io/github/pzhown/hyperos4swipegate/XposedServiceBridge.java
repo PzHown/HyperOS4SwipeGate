@@ -13,6 +13,7 @@ import io.github.libxposed.service.XposedServiceHelper;
 
 public final class XposedServiceBridge {
     private static final String TARGET_PACKAGE = "com.miui.home";
+    private static final String SYSTEM_UI_PACKAGE = "com.android.systemui";
     private static final String HYOS_SPAWNER = "/system_ext/bin/hyos_spawner";
 
     private static final AtomicBoolean INITIALIZED = new AtomicBoolean(false);
@@ -245,6 +246,7 @@ public final class XposedServiceBridge {
             final int launcherUid = resolveLauncherUid(context);
             final boolean hyosSpawnerPresent = new File(HYOS_SPAWNER).exists();
             final boolean launcherInScope = current.getScope().contains(TARGET_PACKAGE);
+            final boolean systemUiInScope = current.getScope().contains(SYSTEM_UI_PACKAGE);
 
             HookedTarget matchedTarget = null;
             String matchMode = "none";
@@ -292,12 +294,12 @@ public final class XposedServiceBridge {
             boolean directRuntimeTarget = matchedTarget != null;
 
             // Some HYOS-enabled LSPosed builds do not expose a native-only child as a Java-style
-            // running target. Scope + the Xiaomi HYOS runtime is still valid activation evidence,
-            // but it is no longer sufficient for a green/active UI state. Native Hook health must
-            // independently arrive through DiagnosticsStreamBridge.
+            // running target. Both required scopes + the Xiaomi HYOS runtime are valid activation
+            // evidence, but activation alone is never enough for a green/active UI state.
             boolean hyosActivationFallback = !directRuntimeTarget
                     && api >= XposedService.API_102
                     && launcherInScope
+                    && systemUiInScope
                     && hyosSpawnerPresent;
 
             boolean launcherLoaded = directRuntimeTarget || hyosActivationFallback;
@@ -308,21 +310,27 @@ public final class XposedServiceBridge {
 
             DiagnosticsStreamBridge.NativeHookStatus nativeHookStatus =
                     DiagnosticsStreamBridge.nativeHookStatus();
+            String nativeState = nativeHookStatus.state();
             String targetState = frameworkTargetState;
             if (launcherLoaded) {
-                if ("FAILED".equals(frameworkTargetState)) {
+                // Failure wins over freshness. A stale FAILED state must stay failed until the
+                // native side reports a newer state; otherwise the UI lies by falling back to
+                // "正在更新" after a known Hook failure.
+                if ("FAILED".equals(frameworkTargetState) || "FAILED".equals(nativeState)) {
                     targetState = "FAILED";
                 } else if ("RELOADING".equals(frameworkTargetState)) {
                     targetState = "RELOADING";
                 } else if (!nativeHookStatus.fresh()) {
-                    // Strict readiness: activation/scope alone must never become Active.
-                    targetState = "RELOADING";
+                    // Unknown/stale status is not an update. Keep it distinct so the UI can show
+                    // "状态待确认" instead of an endless loading state.
+                    targetState = "STALE";
                 } else {
-                    targetState = switch (nativeHookStatus.state()) {
+                    targetState = switch (nativeState) {
                         case "HEALTHY" -> frameworkTargetState;
+                        case "REPAIRING", "WAITING" -> "RELOADING";
                         case "FAILED" -> "FAILED";
-                        case "REPAIRING", "WAITING", "UNKNOWN" -> "RELOADING";
-                        default -> "RELOADING";
+                        case "UNKNOWN" -> "STALE";
+                        default -> "STALE";
                     };
                 }
             }
@@ -330,11 +338,12 @@ public final class XposedServiceBridge {
             runtimeEvidence = "hyosSpawnerPresent=" + hyosSpawnerPresent
                     + " launcherUid=" + launcherUid
                     + " launcherInScope=" + launcherInScope
+                    + " systemUiInScope=" + systemUiInScope
                     + " matchMode=" + matchMode
                     + " activation=" + (directRuntimeTarget
                     ? "running-target"
                     : (hyosActivationFallback ? "scope+hyos-fallback" : "none"))
-                    + " nativeHookState=" + nativeHookStatus.state()
+                    + " nativeHookState=" + nativeState
                     + " nativeHookFresh=" + nativeHookStatus.fresh()
                     + " nativeHookPattern=" + nativeHookStatus.pattern()
                     + " nativeHookDetail=" + nativeHookStatus.detail()
