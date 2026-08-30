@@ -53,6 +53,7 @@ public final class SystemUiBridgeModule extends XposedModule {
 
     private static final int MAX_CONTEXT_ATTEMPTS = 80;
     private static final long CONTEXT_RETRY_MS = 250L;
+    private static final float READY_TICK_SCALE = 0.25f;
 
     private final AtomicBoolean started = new AtomicBoolean(false);
     private final AtomicLong pendingNonce = new AtomicLong(0L);
@@ -199,12 +200,31 @@ public final class SystemUiBridgeModule extends XposedModule {
                             "Native haptic unavailable: vibrator missing kind=" + kind);
                     return;
                 }
-                final int effectId = kind == 0
-                        ? VibrationEffect.EFFECT_TICK
-                        : VibrationEffect.EFFECT_CLICK;
-                vibrator.vibrate(VibrationEffect.createPredefined(effectId));
-                log(android.util.Log.INFO, "HyperOS4SwipeGateSystemUI",
-                        "Native haptic performed kind=" + kind + " effect=" + effectId);
+
+                if (kind == 0) {
+                    final boolean primitiveSupported = vibrator.areAllPrimitivesSupported(
+                            VibrationEffect.Composition.PRIMITIVE_TICK);
+                    if (primitiveSupported) {
+                        vibrator.vibrate(VibrationEffect.startComposition()
+                                .addPrimitive(
+                                        VibrationEffect.Composition.PRIMITIVE_TICK,
+                                        READY_TICK_SCALE)
+                                .compose());
+                        log(android.util.Log.INFO, "HyperOS4SwipeGateSystemUI",
+                                "Native haptic performed kind=0 profile=light-tick scale="
+                                        + READY_TICK_SCALE);
+                    } else {
+                        vibrator.vibrate(VibrationEffect.createPredefined(
+                                VibrationEffect.EFFECT_TICK));
+                        log(android.util.Log.INFO, "HyperOS4SwipeGateSystemUI",
+                                "Native haptic performed kind=0 profile=light-tick fallback=predefined");
+                    }
+                } else {
+                    vibrator.vibrate(VibrationEffect.createPredefined(
+                            VibrationEffect.EFFECT_HEAVY_CLICK));
+                    log(android.util.Log.INFO, "HyperOS4SwipeGateSystemUI",
+                            "Native haptic performed kind=1 profile=strong-confirm effect=heavy-click");
+                }
             } catch (Throwable t) {
                 log(android.util.Log.ERROR, "HyperOS4SwipeGateSystemUI",
                         "Native haptic execution failed kind=" + kind, t);
