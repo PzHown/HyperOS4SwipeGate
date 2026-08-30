@@ -1,0 +1,50 @@
+name: Apply haptic copy update
+
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - name: Update haptic copy
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('app/src/main/java/io/github/pzhown/hyperos4swipegate/HomeScreen.kt')
+          text = path.read_text()
+          replacements = {
+              'Toast.makeText(context, "触感反馈同步失败", Toast.LENGTH_SHORT).show()': 'Toast.makeText(context, "震动反馈同步失败", Toast.LENGTH_SHORT).show()',
+              'title = "触感反馈",': 'title = "丰富侧滑震动反馈",',
+              '"达到阈值与确认返回时提供震动反馈"': '"进入返回阶段，以及从侧边栏阶段退回时补充轻震反馈"',
+              '"不添加额外震动反馈"': '"保持系统原有震动反馈"',
+          }
+          for old, new in replacements.items():
+              if text.count(old) != 1:
+                  raise SystemExit(f'expected exactly one match: {old!r}, got {text.count(old)}')
+              text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+      - name: Commit changes
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/io/github/pzhown/hyperos4swipegate/HomeScreen.kt
+          git commit -m "chore: refresh haptic feedback copy"
+          git push origin HEAD:dev
