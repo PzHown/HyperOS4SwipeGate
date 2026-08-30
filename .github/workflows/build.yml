@@ -151,6 +151,11 @@ jobs:
           printf '%s\n' "$JAVA_ENTRIES" | grep -qx 'io.github.pzhown.hyperos4swipegate.SystemUiBridgeModule'
           test "$(printf '%s\n' "$JAVA_ENTRIES" | grep -cve '^$')" -eq 3
 
+          unzip -p "$APK_PATH" 'classes*.dex' | strings > dex-strings.txt
+          grep -Fq 'Lio/github/pzhown/hyperos4swipegate/ModuleMain;' dex-strings.txt
+          grep -Fq 'Lio/github/pzhown/hyperos4swipegate/NativeErrorReporter;' dex-strings.txt
+          grep -Fq 'Lio/github/pzhown/hyperos4swipegate/SystemUiBridgeModule;' dex-strings.txt
+
           NATIVE_ENTRIES="$(unzip -p "$APK_PATH" META-INF/xposed/native_init.list)"
           printf '%s\n' "$NATIVE_ENTRIES" | grep -qx 'libhyperos4swipegate.so'
           test "$(printf '%s\n' "$NATIVE_ENTRIES" | grep -cve '^$')" -eq 1
@@ -245,7 +250,7 @@ jobs:
             dist/SwipeGate-release.apk \
             --target "$GITHUB_SHA" \
             --title "SwipeGate v${VERSION_NAME}" \
-            --notes $'1. 新增「丰富侧滑震动反馈」Beta：进入返回阶段、从侧边栏阶段退回时补充轻震反馈，默认关闭\n2. 日志级别「关闭 / 精简 / 详细」现在严格生效，精简模式减少轮询与手势高频日志\n3. 优化 HyperOS 4 Launcher 原生触感兼容与运行稳定性\n4. 优化侧滑阈值动态同步、模块状态回包与 Native Hook 健康检测'
+            --notes $'1. 修复 0.8.0 正式版中 LSPosed Java 入口类被 R8 裁剪导致的 ClassNotFoundException\n2. 保留资源与无用代码压缩，同时关闭类名和成员名混淆\n3. 增加 Release DEX 入口类完整性校验，防止同类问题再次发布'
 
       - name: Publish LSPosed prerelease
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -259,7 +264,7 @@ jobs:
           fi
 
           gh auth status
-          RELEASE_NOTES=$'1. 新增「丰富侧滑震动反馈」Beta：进入返回阶段、从侧边栏阶段退回时补充轻震反馈，默认关闭\n2. 日志级别「关闭 / 精简 / 详细」现在严格生效，精简模式减少轮询与手势高频日志\n3. 优化 HyperOS 4 Launcher 原生触感兼容与运行稳定性\n4. 优化侧滑阈值动态同步、模块状态回包与 Native Hook 健康检测'
+          RELEASE_NOTES=$'1. 修复 0.8.0 正式版中 LSPosed Java 入口类被 R8 裁剪导致的 ClassNotFoundException\n2. 保留资源与无用代码压缩，同时关闭类名和成员名混淆\n3. 增加 Release DEX 入口类完整性校验，防止同类问题再次发布'
 
           if [[ "$VERSION_NAME" != *-* ]]; then
             DEV_PREFIX="${VERSION_CODE}-${VERSION_NAME}-dev."
