@@ -1,0 +1,29 @@
+name: Fix 0.8.0 haptic lifecycle
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/fix-080-haptic-lifecycle.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - name: Install full haptic lifecycle hooks
+        shell: bash
+        run: |
+          python3 .github/scripts/patch_haptic_lifecycle.py
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add native/src/main.cpp
+          git commit -m 'fix: install complete haptic gesture lifecycle hooks'
+          git push origin HEAD:dev
