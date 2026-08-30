@@ -277,15 +277,15 @@ internal fun HomeScreen(
                         ConfigBridge.applyHapticEnabledAsync(context, enabled) { result ->
                             if (!result.success()) {
                                 hapticEnabled = !enabled
-                                Toast.makeText(context, "触感反馈同步失败", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "震动反馈同步失败", Toast.LENGTH_SHORT).show()
                             }
                         }
                     },
-                    title = "触感反馈",
+                    title = "丰富侧滑震动反馈",
                     summary = if (hapticEnabled) {
-                        "达到阈值与确认返回时提供震动反馈"
+                        "进入返回阶段，以及从侧边栏阶段退回时补充轻震反馈"
                     } else {
-                        "不添加额外震动反馈"
+                        "保持系统原有震动反馈"
                     },
                 )
             }
