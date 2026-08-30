@@ -26,17 +26,15 @@ jobs:
           p = Path('native/src/main.cpp')
           s = p.read_text()
           start = s.find(r'\nusing HapticFeedbackFn')
-          end_marker = r'\n\nfloat gateHorizontalDistance'
-          end = s.find(end_marker, start)
+          end = s.find('\nfloat gateHorizontalDistance', start)
           if start < 0 or end < 0:
               raise SystemExit(f'escaped helper block not found: start={start} end={end}')
-          end += len(r'\n\n')
+
           block = s[start:end]
           fixed = block.replace(r'\n', '\n')
           s = s[:start] + fixed + s[end:]
           p.write_text(s)
 
-          # Sanity: no literal escaped newlines may remain around the helper declaration.
           check = p.read_text()
           if r'\nusing HapticFeedbackFn' in check:
               raise SystemExit('literal escaped newline still present before HapticFeedbackFn')
