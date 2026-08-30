@@ -1,0 +1,419 @@
+name: Fix Haptic V2 and carrier dev5
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/fix-haptic-v2-bridge-dev5.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Apply fix
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          main = Path('native/src/main.cpp')
+          text = main.read_text()
+
+          old = 'constexpr const char *kHapticLibrary = "libhyper_os_background_tasks_public.so";\n'
+          new = 'constexpr const char *kHapticLibraryNeedle = "libhyper_os_background_tasks_public";\n'
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          marker = '''struct LibraryInfo {\n    uintptr_t base = 0;\n    std::string path;\n    std::array<ExecutableRange, kMaxExecutableRanges> executableRanges{};\n    size_t executableRangeCount = 0;\n};\n\n'''
+          insert = marker + r'''struct LoadedImageInfo {
+    uintptr_t base = 0;
+    std::string path;
+};
+
+struct LoadedImageSearch {
+    const char *needle = nullptr;
+    LoadedImageInfo result;
+};
+
+int loadedImageSearchCallback(dl_phdr_info *info, size_t, void *opaque) {
+    if (info == nullptr || info->dlpi_name == nullptr || opaque == nullptr) return 0;
+    auto *search = static_cast<LoadedImageSearch *>(opaque);
+    const std::string path(info->dlpi_name);
+    if (search->needle == nullptr || path.find(search->needle) == std::string::npos) return 0;
+    search->result.base = static_cast<uintptr_t>(info->dlpi_addr);
+    search->result.path = path;
+    return 1;
+}
+
+LoadedImageInfo findLoadedImageInfo(const char *needle) {
+    LoadedImageSearch search{needle, {}};
+    dl_iterate_phdr(loadedImageSearchCallback, &search);
+    return search.result;
+}
+
+bool preadExactFile(int fd, void *buffer, size_t size, off_t offset) {
+    auto *bytes = static_cast<uint8_t *>(buffer);
+    size_t done = 0;
+    while (done < size) {
+        const ssize_t result = pread(fd, bytes + done, size - done,
+                                     offset + static_cast<off_t>(done));
+        if (result <= 0) return false;
+        done += static_cast<size_t>(result);
+    }
+    return true;
+}
+
+void *resolveLoadedFileSymbol(const LoadedImageInfo &image, const char *name) {
+    if (image.base == 0 || image.path.empty() || name == nullptr) return nullptr;
+    const int fd = open(image.path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return nullptr;
+
+    Elf64_Ehdr header{};
+    if (!preadExactFile(fd, &header, sizeof(header), 0)
+            || std::memcmp(header.e_ident, ELFMAG, SELFMAG) != 0
+            || header.e_ident[EI_CLASS] != ELFCLASS64
+            || header.e_machine != EM_AARCH64
+            || header.e_shentsize != sizeof(Elf64_Shdr)
+            || header.e_shnum == 0 || header.e_shnum > 4096) {
+        close(fd);
+        return nullptr;
+    }
+
+    std::vector<Elf64_Shdr> sections(header.e_shnum);
+    if (!preadExactFile(fd, sections.data(), sections.size() * sizeof(Elf64_Shdr),
+                        static_cast<off_t>(header.e_shoff))) {
+        close(fd);
+        return nullptr;
+    }
+
+    uintptr_t matchedValue = 0;
+    int matches = 0;
+    for (const Elf64_Shdr &symbols : sections) {
+        if ((symbols.sh_type != SHT_DYNSYM && symbols.sh_type != SHT_SYMTAB)
+                || symbols.sh_entsize != sizeof(Elf64_Sym)
+                || symbols.sh_link >= sections.size() || symbols.sh_size == 0) continue;
+        const Elf64_Shdr &strings = sections[symbols.sh_link];
+        if (strings.sh_size == 0 || strings.sh_size > 64 * 1024 * 1024) continue;
+        std::vector<char> stringTable(static_cast<size_t>(strings.sh_size));
+        if (!preadExactFile(fd, stringTable.data(), stringTable.size(),
+                            static_cast<off_t>(strings.sh_offset))) continue;
+        const size_t symbolCount = static_cast<size_t>(symbols.sh_size / sizeof(Elf64_Sym));
+        std::vector<Elf64_Sym> table(symbolCount);
+        if (!preadExactFile(fd, table.data(), table.size() * sizeof(Elf64_Sym),
+                            static_cast<off_t>(symbols.sh_offset))) continue;
+        for (const Elf64_Sym &symbol : table) {
+            if (symbol.st_name >= stringTable.size() || symbol.st_value == 0) continue;
+            const char *candidate = stringTable.data() + symbol.st_name;
+            if (std::strcmp(candidate, name) != 0) continue;
+            matchedValue = static_cast<uintptr_t>(symbol.st_value);
+            ++matches;
+            if (matches > 1) break;
+        }
+        if (matches > 1) break;
+    }
+    close(fd);
+    return matches == 1 ? reinterpret_cast<void *>(image.base + matchedValue) : nullptr;
+}
+
+'''
+          assert text.count(marker) == 1
+          text = text.replace(marker, insert, 1)
+
+          old = r'''bool installHapticCaptureHookFromHandle(void *handle) {
+    if (handle == nullptr || gHookFunction == nullptr || !isLauncherProcess()) return false;
+    if (gHapticCaptureHookInstalled.load(std::memory_order_acquire)) return true;
+
+    bool expected = false;
+    if (!gHapticInstallInProgress.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+        return gHapticCaptureHookInstalled.load(std::memory_order_acquire);
+    }
+
+    // LSPosed's native loader callback supplies this already-loaded handle.
+    // Never call dlopen/RTLD_DEFAULT here: that was the lock-order hazard in 0.8.0 v1.
+    void *target = dlsym(handle, kHapticSymbol);
+    void *standard = dlsym(handle, kStandardHapticSymbol);
+    if (target == nullptr) {
+        logLine(ANDROID_LOG_WARN,
+                "HAPTIC_V2 symbol unavailable lib=%s symbol=%s handle=%p",
+                kHapticLibrary, kHapticSymbol, handle);
+        gHapticInstallInProgress.store(false, std::memory_order_release);
+        return false;
+    }
+
+    void *backup = nullptr;
+    const int rc = gHookFunction(
+            target, reinterpret_cast<void *>(hapticFeedbackCaptureHook), &backup);
+    if (rc != 0 || backup == nullptr) {
+        logLine(ANDROID_LOG_ERROR,
+                "HAPTIC_V2 capture hook failed rc=%d target=%p backup=%p",
+                rc, target, backup);
+        gHapticInstallInProgress.store(false, std::memory_order_release);
+        return false;
+    }
+
+    gOriginalHapticFeedback.store(backup, std::memory_order_release);
+    gStandardHapticFeedback.store(standard, std::memory_order_release);
+    gHapticCaptureHookInstalled.store(true, std::memory_order_release);
+    gHapticInstallInProgress.store(false, std::memory_order_release);
+    logLine(ANDROID_LOG_INFO,
+            "HAPTIC_V2 capture hook ready target=%p standard=%p policy=loader-handle-only watchdog=off",
+            target, standard);
+    return true;
+}
+'''
+          new = r'''bool installHapticCaptureHookResolved(void *target, void *standard, const char *source) {
+    if (target == nullptr || gHookFunction == nullptr || !isLauncherProcess()) return false;
+    if (gHapticCaptureHookInstalled.load(std::memory_order_acquire)) return true;
+
+    bool expected = false;
+    if (!gHapticInstallInProgress.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+        return gHapticCaptureHookInstalled.load(std::memory_order_acquire);
+    }
+
+    void *backup = nullptr;
+    const int rc = gHookFunction(
+            target, reinterpret_cast<void *>(hapticFeedbackCaptureHook), &backup);
+    if (rc != 0 || backup == nullptr) {
+        logLine(ANDROID_LOG_ERROR,
+                "HAPTIC_V2 capture hook failed source=%s rc=%d target=%p backup=%p",
+                source == nullptr ? "unknown" : source, rc, target, backup);
+        gHapticInstallInProgress.store(false, std::memory_order_release);
+        return false;
+    }
+
+    gOriginalHapticFeedback.store(backup, std::memory_order_release);
+    gStandardHapticFeedback.store(standard, std::memory_order_release);
+    gHapticCaptureHookInstalled.store(true, std::memory_order_release);
+    gHapticInstallInProgress.store(false, std::memory_order_release);
+    logLine(ANDROID_LOG_INFO,
+            "HAPTIC_V2 capture hook ready source=%s target=%p standard=%p watchdog=off no-dlopen=1",
+            source == nullptr ? "unknown" : source, target, standard);
+    return true;
+}
+
+bool installHapticCaptureHookFromHandle(void *handle) {
+    if (handle == nullptr || gHookFunction == nullptr || !isLauncherProcess()) return false;
+    // The LSPosed loader callback supplies an already-loaded handle. Resolving from that exact
+    // handle does not require RTLD_DEFAULT or opening another library.
+    void *target = dlsym(handle, kHapticSymbol);
+    void *standard = dlsym(handle, kStandardHapticSymbol);
+    if (target == nullptr) {
+        logLine(ANDROID_LOG_WARN,
+                "HAPTIC_V2 loader symbol unavailable needle=%s symbol=%s handle=%p",
+                kHapticLibraryNeedle, kHapticSymbol, handle);
+        return false;
+    }
+    return installHapticCaptureHookResolved(target, standard, "loader-handle");
+}
+
+bool installHapticCaptureHookBackfill() {
+    if (gHookFunction == nullptr || !isLauncherProcess()) return false;
+    if (gHapticCaptureHookInstalled.load(std::memory_order_acquire)) return true;
+    const LoadedImageInfo image = findLoadedImageInfo(kHapticLibraryNeedle);
+    if (image.base == 0 || image.path.empty()) {
+        logLine(ANDROID_LOG_INFO,
+                "HAPTIC_V2 backfill waiting needle=%s",
+                kHapticLibraryNeedle);
+        return false;
+    }
+    void *target = resolveLoadedFileSymbol(image, kHapticSymbol);
+    void *standard = resolveLoadedFileSymbol(image, kStandardHapticSymbol);
+    if (target == nullptr) {
+        logLine(ANDROID_LOG_WARN,
+                "HAPTIC_V2 backfill symbol unavailable path=%s symbol=%s base=%p",
+                image.path.c_str(), kHapticSymbol, reinterpret_cast<void *>(image.base));
+        return false;
+    }
+    logLine(ANDROID_LOG_INFO,
+            "HAPTIC_V2 backfill resolved path=%s base=%p target=%p standard=%p",
+            image.path.c_str(), reinterpret_cast<void *>(image.base), target, standard);
+    return installHapticCaptureHookResolved(target, standard, "elf-backfill");
+}
+'''
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          old = r'''void onLibraryLoaded(const char *name, void *handle) {
+    if (!isHyosSpawnerProcessFamily() || name == nullptr) return;
+
+    if (std::strstr(name, kHapticLibrary) != nullptr && isLauncherProcess()) {
+        installHapticCaptureHookFromHandle(handle);
+    }
+'''
+          new = r'''void onLibraryLoaded(const char *name, void *handle) {
+    if (!isHyosSpawnerProcessFamily() || name == nullptr) return;
+
+    if (std::strstr(name, kHapticLibraryNeedle) != nullptr && isLauncherProcess()) {
+        logLine(ANDROID_LOG_INFO,
+                "HAPTIC_V2 loader observed name=%s handle=%p",
+                name, handle);
+        installHapticCaptureHookFromHandle(handle);
+    }
+'''
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          old = '''    if (launcherProcess) ensureWorkerStarted();\n    return onLibraryLoaded;\n'''
+          new = '''    if (launcherProcess) {\n        installHapticCaptureHookBackfill();\n        ensureWorkerStarted();\n    }\n    return onLibraryLoaded;\n'''
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          old = '            "HAPTIC_V2 enabled policy=loader-handle-only no-dlopen no-watchdog no-hook-mutex ready=standard-27 commit=ext-0");\n'
+          new = '            "HAPTIC_V2 enabled policy=loader-handle+elf-backfill library-needle=libhyper_os_background_tasks_public no-dlopen no-watchdog no-hook-mutex ready=standard-27 commit=ext-0");\n'
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+          main.write_text(text)
+
+          control = Path('native/src/control_channel.cpp')
+          text = control.read_text()
+          old = r'''void handleControlCarrier(void *intent) {
+    const auto getExtras = resolveLauncherSymbol<IntentGetExtrasFn>("Intent_get_extras");
+    if (intent == nullptr || getExtras == nullptr
+            || !intentActionEquals(intent, kCarrierAction)
+            || !intentSenderEquals(intent, kSystemUiPackage)) return;
+
+    void *extras = getExtras(intent);
+    bool marker = false;
+    int32_t senderUid = -1;
+    int32_t thresholdDp = -1;
+    int32_t logLevel = -1;
+    bool hapticEnabled = false;
+    int64_t nonce = 0;
+    const bool hapticFieldPresent = readNativeBool(extras, kHapticEnabledExtra, &hapticEnabled);
+    if (!readNativeBool(extras, kMarkerExtra, &marker) || !marker
+            || !readNativeI32(extras, kSenderUidExtra, &senderUid)
+            || !readNativeI64(extras, kNonceExtra, &nonce)
+            || !readNativeI32(extras, kThresholdExtra, &thresholdDp)
+            || !readNativeI32(extras, kLogLevelExtra, &logLevel)
+            || nonce <= 0 || !verifyPackageUid(kSystemUiPackage, senderUid)
+            || thresholdDp < kMinThresholdDp || thresholdDp > kMaxThresholdDp
+            || logLevel < kMinLogLevel || logLevel > kMaxLogLevel) {
+        bridgeLog(ANDROID_LOG_WARN, "Rejected malformed or unauthenticated SystemUI carrier");
+        return;
+    }
+    if (!hapticFieldPresent) {
+        {
+            SpinGuard guard;
+            hapticEnabled = gHapticEnabled == 1;
+        }
+        bridgeLog(ANDROID_LOG_WARN,
+                  "SystemUI carrier missing haptic field; preserving previous/default state");
+    }
+'''
+          new = r'''void handleControlCarrier(void *intent) {
+    const auto getExtras = resolveLauncherSymbol<IntentGetExtrasFn>("Intent_get_extras");
+    if (intent == nullptr || getExtras == nullptr || !intentActionEquals(intent, kCarrierAction)) return;
+    // Sender package comes from the HyperOS broadcast runtime, not from an Intent extra. This is
+    // the primary authentication boundary. The claimed sender_uid below is only a compatibility
+    // cross-check because Xiaomi's private PackageManager ABI can be unavailable across builds.
+    if (!intentSenderEquals(intent, kSystemUiPackage)) {
+        bridgeLog(ANDROID_LOG_WARN, "CONTROL_CARRIER rejected reason=runtime-sender-not-systemui");
+        return;
+    }
+
+    void *extras = getExtras(intent);
+    bool marker = false;
+    int32_t senderUid = -1;
+    int32_t thresholdDp = -1;
+    int32_t logLevel = -1;
+    bool hapticEnabled = false;
+    int64_t nonce = 0;
+
+    const bool markerRead = readNativeBool(extras, kMarkerExtra, &marker);
+    const bool senderUidRead = readNativeI32(extras, kSenderUidExtra, &senderUid);
+    const bool nonceRead = readNativeI64(extras, kNonceExtra, &nonce);
+    const bool thresholdRead = readNativeI32(extras, kThresholdExtra, &thresholdDp);
+    const bool logLevelRead = readNativeI32(extras, kLogLevelExtra, &logLevel);
+    const bool hapticFieldPresent = readNativeBool(extras, kHapticEnabledExtra, &hapticEnabled);
+
+    char reject[256]{};
+    if (!markerRead || !marker) {
+        std::snprintf(reject, sizeof(reject),
+                      "CONTROL_CARRIER rejected reason=marker read=%d value=%d",
+                      markerRead ? 1 : 0, marker ? 1 : 0);
+        bridgeLog(ANDROID_LOG_WARN, reject);
+        return;
+    }
+    if (!nonceRead || nonce <= 0) {
+        std::snprintf(reject, sizeof(reject),
+                      "CONTROL_CARRIER rejected reason=nonce read=%d value=%lld",
+                      nonceRead ? 1 : 0, static_cast<long long>(nonce));
+        bridgeLog(ANDROID_LOG_WARN, reject);
+        return;
+    }
+    if (!thresholdRead || thresholdDp < kMinThresholdDp || thresholdDp > kMaxThresholdDp) {
+        std::snprintf(reject, sizeof(reject),
+                      "CONTROL_CARRIER rejected reason=threshold read=%d value=%d range=%d..%d",
+                      thresholdRead ? 1 : 0, thresholdDp, kMinThresholdDp, kMaxThresholdDp);
+        bridgeLog(ANDROID_LOG_WARN, reject);
+        return;
+    }
+    if (!logLevelRead || logLevel < kMinLogLevel || logLevel > kMaxLogLevel) {
+        std::snprintf(reject, sizeof(reject),
+                      "CONTROL_CARRIER rejected reason=log-level read=%d value=%d range=%d..%d",
+                      logLevelRead ? 1 : 0, logLevel, kMinLogLevel, kMaxLogLevel);
+        bridgeLog(ANDROID_LOG_WARN, reject);
+        return;
+    }
+
+    if (senderUidRead) {
+        const bool uidMatches = verifyPackageUid(kSystemUiPackage, senderUid);
+        if (!uidMatches) {
+            std::snprintf(reject, sizeof(reject),
+                          "CONTROL_CARRIER sender_uid cross-check unavailable-or-mismatch claimed=%d; accepted by runtime sender package",
+                          senderUid);
+            bridgeLog(ANDROID_LOG_WARN, reject);
+        }
+    } else {
+        bridgeLog(ANDROID_LOG_WARN,
+                  "CONTROL_CARRIER sender_uid missing; accepted by authenticated runtime sender package");
+    }
+
+    if (!hapticFieldPresent) {
+        {
+            SpinGuard guard;
+            hapticEnabled = gHapticEnabled == 1;
+        }
+        bridgeLog(ANDROID_LOG_WARN,
+                  "CONTROL_CARRIER haptic field missing; preserving previous/default state");
+    }
+'''
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          old = '''    if (!sendNativeReply(nonce)) {\n'''
+          new = '''    {\n        char accepted[256]{};\n        std::snprintf(accepted, sizeof(accepted),\n                      "CONTROL_CARRIER accepted nonce=%lld threshold=%d logLevel=%d haptic=%d senderUidRead=%d",\n                      static_cast<long long>(nonce), thresholdDp, logLevel, hapticEnabled ? 1 : 0,\n                      senderUidRead ? 1 : 0);\n        bridgeLog(ANDROID_LOG_INFO, accepted);\n    }\n\n    if (!sendNativeReply(nonce)) {\n'''
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+          control.write_text(text)
+
+          gradle = Path('app/build.gradle.kts')
+          text = gradle.read_text()
+          assert 'versionCode = 36' in text
+          assert 'versionName = "0.8.0-dev.4"' in text
+          text = text.replace('versionCode = 36', 'versionCode = 37', 1)
+          text = text.replace('versionName = "0.8.0-dev.4"', 'versionName = "0.8.0-dev.5"', 1)
+          gradle.write_text(text)
+          PY
+
+          git diff --check
+          git diff -- native/src/main.cpp native/src/control_channel.cpp app/build.gradle.kts
+
+      - name: Commit fix
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add native/src/main.cpp native/src/control_channel.cpp app/build.gradle.kts
+          git commit -m 'fix: recover haptic capture and harden carrier auth'
+          git push origin HEAD:dev
