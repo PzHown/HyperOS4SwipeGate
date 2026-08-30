@@ -50,14 +50,13 @@ constexpr int64_t kPatternRescanIntervalMs = 5000;
 constexpr size_t kHookProbeSize = 16;
 constexpr size_t kMaxExecutableRanges = 12;
 
-// Reverse-engineering reference only. This offset is deliberately NOT used to
-// locate the hook target anymore. It is kept so diagnostics can show how far a
-// newly resolved target moved from the build that was originally analysed.
 constexpr uintptr_t kReferenceOnSwipeProcessOffset = 0x816fc4;
 
-// Exact patterns remain as a conservative fallback when the semantic resolver
-// cannot prove a unique MotionEvent behavior graph. They are no longer the
-// primary locator.
+// Exact patterns remain authoritative compatibility profiles for builds we have
+// already validated. The semantic resolver is allowed to corroborate them, but
+// an experimental semantic disagreement must never regress a known-good build.
+// On an unknown build with no exact profile, semantic resolution may take over
+// only when it proves exactly one candidate.
 constexpr uint8_t kOnSwipeProcessPatternV1[] = {
         0xff, 0x83, 0x05, 0xd1, 0xea, 0x7b, 0x00, 0xfd,
         0xe9, 0xa3, 0x0f, 0x6d, 0xfd, 0xfb, 0x10, 0xa9,
@@ -92,8 +91,6 @@ constexpr PatternSpec kOnSwipeProcessPatterns[] = {
          sizeof(kOnSwipeProcessPatternV2)},
 };
 
-// Null bytes/mask identify a target whose validity is proved by the runtime
-// semantic resolver instead of an exact entry-byte fingerprint.
 constexpr PatternSpec kSemanticOnSwipeProcessPattern = {
         "semantic-motion-graph", nullptr, nullptr, 0,
 };
@@ -115,7 +112,7 @@ std::atomic<int64_t> gLastSwipeLogMs{0};
 std::atomic<int64_t> gLastHealthyLogMs{0};
 std::atomic<int64_t> gLastRepairAttemptMs{0};
 std::atomic<int64_t> gLastPatternScanMs{0};
-std::atomic<int> gHookHealthState{0}; // 0 unknown, 1 healthy, 2 restored, 3 foreign/error, 4 repairing.
+std::atomic<int> gHookHealthState{0};
 std::atomic<uint32_t> gActiveHookCalls{0};
 std::atomic<uint64_t> gRepairCount{0};
 std::atomic<uint64_t> gClampedCount{0};
@@ -221,9 +218,7 @@ int libraryCallback(dl_phdr_info *info, size_t, void *data) {
 
     for (ElfW(Half) i = 0; i < info->dlpi_phnum; ++i) {
         const ElfW(Phdr) &phdr = info->dlpi_phdr[i];
-        if (phdr.p_type != PT_LOAD || (phdr.p_flags & PF_X) == 0 || phdr.p_memsz == 0) {
-            continue;
-        }
+        if (phdr.p_type != PT_LOAD || (phdr.p_flags & PF_X) == 0 || phdr.p_memsz == 0) continue;
         if (result->executableRangeCount >= result->executableRanges.size()) break;
         auto &range = result->executableRanges[result->executableRangeCount++];
         range.start = result->base + static_cast<uintptr_t>(phdr.p_vaddr);
@@ -262,9 +257,7 @@ std::string probeHex(const std::array<uint8_t, kHookProbeSize> &head) {
 }
 
 bool patternMatchesAt(uintptr_t address, const PatternSpec &pattern) {
-    if (address == 0 || pattern.bytes == nullptr || pattern.mask == nullptr || pattern.size == 0) {
-        return false;
-    }
+    if (address == 0 || pattern.bytes == nullptr || pattern.mask == nullptr || pattern.size == 0) return false;
     const auto *data = reinterpret_cast<const uint8_t *>(address);
     for (size_t i = 0; i < pattern.size; ++i) {
         if (((data[i] ^ pattern.bytes[i]) & pattern.mask[i]) != 0) return false;
@@ -278,9 +271,7 @@ bool isSemanticPattern(const PatternSpec &pattern) {
 
 bool validateResolvedTarget(const LibraryInfo &library, uintptr_t target,
                             const PatternSpec &pattern) {
-    if (isSemanticPattern(pattern)) {
-        return swipe_semantic::ValidateTarget(library.base, target);
-    }
+    if (isSemanticPattern(pattern)) return swipe_semantic::ValidateTarget(library.base, target);
     return patternMatchesAt(target, pattern);
 }
 
@@ -308,14 +299,11 @@ TargetResolution resolveExactOnSwipeProcessTarget(const LibraryInfo &library) {
             const uintptr_t last = range.start + range.size - pattern.size;
             for (uintptr_t cursor = alignedStart; cursor <= last; cursor += 4U) {
                 if (!patternMatchesAt(cursor, pattern)) continue;
-
                 const auto duplicate = std::find_if(matches.begin(), matches.end(),
                         [cursor](const PatternMatch &item) { return item.address == cursor; });
                 if (duplicate == matches.end()) {
                     matches.push_back({cursor, &pattern, nullptr});
-                    if (matches.size() > 1) {
-                        return {{}, matches.size()};
-                    }
+                    if (matches.size() > 1) return {{}, matches.size()};
                 }
             }
         }
@@ -329,20 +317,28 @@ TargetResolution resolveOnSwipeProcessTarget(const LibraryInfo &library) {
     const swipe_semantic::Resolution semantic = swipe_semantic::Resolve(library.base);
     const TargetResolution exact = resolveExactOnSwipeProcessTarget(library);
 
-    if (semantic.candidate_count == 1 && semantic.target != 0) {
-        if (exact.uniqueCandidates == 0) {
-            return {{semantic.target, &kSemanticOnSwipeProcessPattern,
-                     swipe_semantic::FrameShapeName(semantic.shape)}, 1};
+    // A unique exact profile is an already validated compatibility contract.
+    // Semantic resolution may corroborate it, but cannot disable or replace it.
+    // This keeps 5459/6174 safe while the semantic matcher evolves on real devices.
+    if (exact.uniqueCandidates == 1 && exact.match.address != 0 && exact.match.pattern != nullptr) {
+        if (semantic.candidate_count == 1 && semantic.target != 0) {
+            const bool agrees = semantic.target == exact.match.address;
+            return {{exact.match.address, exact.match.pattern,
+                     agrees ? "semantic-corroborated" : "semantic-conflict-exact-authoritative"}, 1};
         }
-        if (exact.uniqueCandidates == 1 && exact.match.address == semantic.target) {
-            return {{semantic.target, &kSemanticOnSwipeProcessPattern,
-                     swipe_semantic::FrameShapeName(semantic.shape)}, 1};
-        }
-        return {{}, std::max<size_t>(2, exact.uniqueCandidates)};
+        return {{exact.match.address, exact.match.pattern, "exact-authoritative"}, 1};
     }
 
-    if (exact.uniqueCandidates == 1) return exact;
-    return {{}, std::max(semantic.candidate_count, exact.uniqueCandidates)};
+    // Multiple exact hits are unsafe even if semantic happens to choose one.
+    if (exact.uniqueCandidates > 1) return {{}, exact.uniqueCandidates};
+
+    // Unknown launcher build: semantic resolution is allowed to take over only
+    // after proving exactly one candidate. Otherwise fail closed.
+    if (semantic.candidate_count == 1 && semantic.target != 0) {
+        return {{semantic.target, &kSemanticOnSwipeProcessPattern,
+                 swipe_semantic::FrameShapeName(semantic.shape)}, 1};
+    }
+    return {{}, semantic.candidate_count};
 }
 
 int parseDensityDpi(const char *text) {
@@ -391,13 +387,11 @@ int readDensityDpi() {
     if (densityDpi <= 0) {
         densityDpi = 0;
         source = "unavailable";
-        logLine(ANDROID_LOG_ERROR,
-                "DP_GATE density unavailable; custom delay disabled, stock passthrough");
+        logLine(ANDROID_LOG_ERROR, "DP_GATE density unavailable; custom delay disabled, stock passthrough");
     } else {
         logLine(ANDROID_LOG_INFO,
                 "DP_GATE density resolved: %ddpi source=%s pxPerDp=%.3f stock88dp=%.2fpx",
-                densityDpi, source,
-                static_cast<float>(densityDpi) / 160.0f,
+                densityDpi, source, static_cast<float>(densityDpi) / 160.0f,
                 static_cast<float>(kStockBoundaryDp * densityDpi) / 160.0f);
     }
 
@@ -441,24 +435,19 @@ int readThresholdDp() {
 
 float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDistancePx) {
     const int configuredDp = readThresholdDp();
-    const int effectiveDp = configuredDp == 0
-            ? kStockBoundaryDp
-            : std::max(configuredDp, kStockBoundaryDp);
+    const int effectiveDp = configuredDp == 0 ? kStockBoundaryDp : std::max(configuredDp, kStockBoundaryDp);
     const int densityDpi = effectiveDp > kStockBoundaryDp ? readDensityDpi() : 0;
     const float stockBoundaryPx = densityDpi > 0 ? dpToPx(kStockBoundaryDp, densityDpi) : 0.0f;
     const float stockGuardPx = stockBoundaryPx > 1.0f ? stockBoundaryPx - 1.0f : 0.0f;
     const float userGatePx = densityDpi > 0 ? dpToPx(effectiveDp, densityDpi) : 0.0f;
     const float absDx = std::fabs(horizontalDistancePx);
 
-    const bool delayBeyondStock = effectiveDp > kStockBoundaryDp
-            && densityDpi > 0
-            && stockGuardPx > 0.0f
-            && userGatePx > stockBoundaryPx;
+    const bool delayBeyondStock = effectiveDp > kStockBoundaryDp && densityDpi > 0
+            && stockGuardPx > 0.0f && userGatePx > stockBoundaryPx;
     const bool userGateReached = !delayBeyondStock || absDx >= userGatePx;
 
     float effectiveDistancePx = horizontalDistancePx;
     bool clamped = false;
-
     if (delayBeyondStock && !userGateReached && absDx > stockGuardPx) {
         effectiveDistancePx = std::copysign(stockGuardPx, horizontalDistancePx);
         clamped = true;
@@ -469,18 +458,14 @@ float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDi
 
     const int64_t now = monotonicMs();
     int64_t last = gLastSwipeLogMs.load(std::memory_order_relaxed);
-    if (now - last >= 1000 && gLastSwipeLogMs.compare_exchange_strong(
-            last, now, std::memory_order_relaxed)) {
+    if (now - last >= 1000 && gLastSwipeLogMs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
         logLine(ANDROID_LOG_INFO,
                 "DP_GATE rawDx=%.2f effectiveDx=%.2f configuredDp=%d effectiveDp=%d densityDpi=%d userGatePx=%.2f stockBoundaryPx=%.2f guardPx=%.2f delayBeyondStock=%d gateReached=%d clamped=%d readyFinish=%d side=%u repairs=%llu",
-                horizontalDistancePx, effectiveDistancePx,
-                configuredDp, effectiveDp, densityDpi, userGatePx,
-                stockBoundaryPx, stockGuardPx,
-                delayBeyondStock ? 1 : 0, userGateReached ? 1 : 0,
-                clamped ? 1 : 0, readyFinish ? 1 : 0, side,
+                horizontalDistancePx, effectiveDistancePx, configuredDp, effectiveDp, densityDpi,
+                userGatePx, stockBoundaryPx, stockGuardPx, delayBeyondStock ? 1 : 0,
+                userGateReached ? 1 : 0, clamped ? 1 : 0, readyFinish ? 1 : 0, side,
                 static_cast<unsigned long long>(gRepairCount.load(std::memory_order_relaxed)));
     }
-
     return effectiveDistancePx;
 }
 
@@ -488,8 +473,7 @@ void ensureWorkerStarted();
 
 bool waitForHookIdle() {
     const int64_t deadline = monotonicMs() + kHookIdleWaitMs;
-    while (gActiveHookCalls.load(std::memory_order_acquire) != 0
-            && monotonicMs() < deadline) {
+    while (gActiveHookCalls.load(std::memory_order_acquire) != 0 && monotonicMs() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     return gActiveHookCalls.load(std::memory_order_acquire) == 0;
@@ -518,13 +502,12 @@ bool installFreshHookLocked(const LibraryInfo &library, uintptr_t target,
     __atomic_store_n(&gSwipeGateOriginalOnSwipeProcess, nullptr, __ATOMIC_RELEASE);
     void *backup = nullptr;
     const int rc = gHookFunction(reinterpret_cast<void *>(target),
-                                 reinterpret_cast<void *>(swipegate_on_swipe_process_hook),
-                                 &backup);
+                                 reinterpret_cast<void *>(swipegate_on_swipe_process_hook), &backup);
     if (rc != 0 || backup == nullptr) {
         gHookInstalled.store(false, std::memory_order_release);
         logLine(ANDROID_LOG_ERROR,
-                "DP_GATE hook_func failed source=%s rc=%d backup=%p target=%p resolver=%s detail=%s",
-                source, rc, backup, reinterpret_cast<void *>(target), pattern.name,
+                "DP_GATE hook_func failed source=%s rc=%d backup=%p target=%p pattern=%s resolver=%s detail=%s",
+                source, rc, backup, reinterpret_cast<void *>(target), pattern.name, pattern.name,
                 gActiveResolverDetail);
         return false;
     }
@@ -549,27 +532,23 @@ bool installFreshHookLocked(const LibraryInfo &library, uintptr_t target,
     gLastHealthyLogMs.store(monotonicMs(), std::memory_order_relaxed);
 
     const int configuredDp = readThresholdDp();
-    const int effectiveDp = configuredDp == 0
-            ? kStockBoundaryDp
-            : std::max(configuredDp, kStockBoundaryDp);
+    const int effectiveDp = configuredDp == 0 ? kStockBoundaryDp : std::max(configuredDp, kStockBoundaryDp);
     const int densityDpi = effectiveDp > kStockBoundaryDp ? readDensityDpi() : 0;
     const uintptr_t resolvedOffset = target - library.base;
     logLine(ANDROID_LOG_INFO,
-            "DP_GATE hook installed source=%s resolver=%s detail=%s base=%p target=%p resolvedOffset=0x%zx referenceOffset=0x%zx configuredDp=%d effectiveDp=%d densityDpi=%d userGatePx=%.2f patchHead=%s repairs=%llu unhookRepair=1 abi=transparent-s0",
-            source, pattern.name, gActiveResolverDetail,
+            "DP_GATE hook installed source=%s pattern=%s resolver=%s detail=%s base=%p target=%p resolvedOffset=0x%zx referenceOffset=0x%zx configuredDp=%d effectiveDp=%d densityDpi=%d userGatePx=%.2f patchHead=%s repairs=%llu unhookRepair=1 abi=transparent-s0",
+            source, pattern.name, pattern.name, gActiveResolverDetail,
             reinterpret_cast<void *>(library.base), reinterpret_cast<void *>(target),
-            static_cast<size_t>(resolvedOffset),
-            static_cast<size_t>(kReferenceOnSwipeProcessOffset), configuredDp, effectiveDp,
-            densityDpi, densityDpi > 0 ? dpToPx(effectiveDp, densityDpi) : 0.0f,
+            static_cast<size_t>(resolvedOffset), static_cast<size_t>(kReferenceOnSwipeProcessOffset),
+            configuredDp, effectiveDp, densityDpi,
+            densityDpi > 0 ? dpToPx(effectiveDp, densityDpi) : 0.0f,
             probeHex(patchedHead).c_str(),
             static_cast<unsigned long long>(gRepairCount.load(std::memory_order_relaxed)));
     return true;
 }
 
 const PatternSpec *findActivePattern() {
-    if (std::strcmp(gActivePatternName, kSemanticOnSwipeProcessPattern.name) == 0) {
-        return &kSemanticOnSwipeProcessPattern;
-    }
+    if (std::strcmp(gActivePatternName, kSemanticOnSwipeProcessPattern.name) == 0) return &kSemanticOnSwipeProcessPattern;
     for (const PatternSpec &pattern : kOnSwipeProcessPatterns) {
         if (std::strcmp(pattern.name, gActivePatternName) == 0) return &pattern;
     }
@@ -586,23 +565,20 @@ bool repairRestoredHookLocked(const LibraryInfo &library, uintptr_t target, cons
     gHookInstalled.store(false, std::memory_order_release);
 
     logLine(ANDROID_LOG_WARN,
-            "HOOK_HEALTH original bytes restored source=%s base=%p target=%p resolver=%s detail=%s currentHead=%s oldPatchHead=%s activeCalls=%u; starting unhook+rehook repair",
+            "HOOK_HEALTH original bytes restored source=%s base=%p target=%p pattern=%s resolver=%s detail=%s currentHead=%s oldPatchHead=%s activeCalls=%u; starting unhook+rehook repair",
             source, reinterpret_cast<void *>(library.base), reinterpret_cast<void *>(target),
-            gActivePatternName, gActiveResolverDetail, probeHex(currentHead).c_str(),
+            gActivePatternName, gActivePatternName, gActiveResolverDetail, probeHex(currentHead).c_str(),
             gInstalledPatchHeadReady ? probeHex(gInstalledPatchHead).c_str() : "<none>",
             gActiveHookCalls.load(std::memory_order_acquire));
 
     if (gUnhookFunction == nullptr) {
-        logLine(ANDROID_LOG_ERROR,
-                "HOOK_HEALTH repair unavailable: LSPosed unhook_func is null");
+        logLine(ANDROID_LOG_ERROR, "HOOK_HEALTH repair unavailable: LSPosed unhook_func is null");
         return false;
     }
-
     if (!waitForHookIdle()) {
         logLine(ANDROID_LOG_WARN,
                 "HOOK_HEALTH repair deferred: hook still active after %lldms activeCalls=%u",
-                static_cast<long long>(kHookIdleWaitMs),
-                gActiveHookCalls.load(std::memory_order_acquire));
+                static_cast<long long>(kHookIdleWaitMs), gActiveHookCalls.load(std::memory_order_acquire));
         return false;
     }
 
@@ -616,7 +592,6 @@ bool repairRestoredHookLocked(const LibraryInfo &library, uintptr_t target, cons
                 unhookRc, reinterpret_cast<void *>(target));
         return false;
     }
-
     logLine(unhookRc == 0 ? ANDROID_LOG_INFO : ANDROID_LOG_WARN,
             "HOOK_HEALTH unhook result rc=%d target=%p headAfterUnhook=%s",
             unhookRc, reinterpret_cast<void *>(target), probeHex(afterUnhook).c_str());
@@ -633,21 +608,19 @@ bool repairRestoredHookLocked(const LibraryInfo &library, uintptr_t target, cons
     if (activePattern == nullptr || !validateResolvedTarget(library, target, *activePattern)) {
         gHookHealthState.store(3, std::memory_order_release);
         logLine(ANDROID_LOG_ERROR,
-                "HOOK_HEALTH repair aborted: active resolver no longer validates target=%p resolver=%s detail=%s",
-                reinterpret_cast<void *>(target), gActivePatternName, gActiveResolverDetail);
+                "HOOK_HEALTH repair aborted: active resolver no longer validates target=%p pattern=%s resolver=%s detail=%s",
+                reinterpret_cast<void *>(target), gActivePatternName, gActivePatternName, gActiveResolverDetail);
         return false;
     }
 
     gInstalledPatchHeadReady = false;
-    if (!installFreshHookLocked(library, target, *activePattern, "repair-after-unhook",
-                                gActiveResolverDetail)) {
+    if (!installFreshHookLocked(library, target, *activePattern, "repair-after-unhook", gActiveResolverDetail)) {
         gHookHealthState.store(2, std::memory_order_release);
         return false;
     }
 
     const uint64_t repairs = gRepairCount.fetch_add(1, std::memory_order_acq_rel) + 1;
-    logLine(ANDROID_LOG_INFO,
-            "HOOK_HEALTH repaired successfully target=%p repairCount=%llu",
+    logLine(ANDROID_LOG_INFO, "HOOK_HEALTH repaired successfully target=%p repairCount=%llu",
             reinterpret_cast<void *>(target), static_cast<unsigned long long>(repairs));
     return true;
 }
@@ -658,8 +631,7 @@ void resetTrackedHookForRemapLocked(uintptr_t newBase) {
     if (oldTarget != 0) {
         logLine(ANDROID_LOG_WARN,
                 "HOOK_HEALTH launcher mapping changed oldBase=%p oldTarget=%p newBase=%p; rescanning executable segments",
-                reinterpret_cast<void *>(oldBase), reinterpret_cast<void *>(oldTarget),
-                reinterpret_cast<void *>(newBase));
+                reinterpret_cast<void *>(oldBase), reinterpret_cast<void *>(oldTarget), reinterpret_cast<void *>(newBase));
     }
     __atomic_store_n(&gSwipeGateOriginalOnSwipeProcess, nullptr, __ATOMIC_RELEASE);
     gHookedBase.store(0, std::memory_order_release);
@@ -671,9 +643,7 @@ void resetTrackedHookForRemapLocked(uintptr_t newBase) {
 }
 
 bool ensureHookLocked(const LibraryInfo &library, const char *source) {
-    if (library.base == 0 || library.executableRangeCount == 0 || gHookFunction == nullptr) {
-        return false;
-    }
+    if (library.base == 0 || library.executableRangeCount == 0 || gHookFunction == nullptr) return false;
 
     const uintptr_t trackedBase = gHookedBase.load(std::memory_order_acquire);
     const uintptr_t trackedTarget = gHookedTarget.load(std::memory_order_acquire);
@@ -688,13 +658,11 @@ bool ensureHookLocked(const LibraryInfo &library, const char *source) {
             const int64_t now = monotonicMs();
             int64_t last = gLastHealthyLogMs.load(std::memory_order_relaxed);
             if (now - last >= kHealthyLogIntervalMs
-                    && gLastHealthyLogMs.compare_exchange_strong(
-                            last, now, std::memory_order_relaxed)) {
+                    && gLastHealthyLogMs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
                 logLine(ANDROID_LOG_INFO,
-                        "HOOK_HEALTH healthy source=%s base=%p target=%p resolver=%s detail=%s configuredDp=%d repairs=%llu",
-                        source, reinterpret_cast<void *>(library.base),
-                        reinterpret_cast<void *>(trackedTarget), gActivePatternName,
-                        gActiveResolverDetail, readThresholdDp(),
+                        "HOOK_HEALTH healthy source=%s base=%p target=%p pattern=%s resolver=%s detail=%s configuredDp=%d repairs=%llu",
+                        source, reinterpret_cast<void *>(library.base), reinterpret_cast<void *>(trackedTarget),
+                        gActivePatternName, gActivePatternName, gActiveResolverDetail, readThresholdDp(),
                         static_cast<unsigned long long>(gRepairCount.load(std::memory_order_relaxed)));
             }
             return true;
@@ -709,17 +677,14 @@ bool ensureHookLocked(const LibraryInfo &library, const char *source) {
         gHookInstalled.store(false, std::memory_order_release);
         if (previousState != 3) {
             logLine(ANDROID_LOG_ERROR,
-                    "HOOK_HEALTH foreign patch detected source=%s base=%p target=%p resolver=%s detail=%s head=%s; refusing unsafe repair",
-                    source, reinterpret_cast<void *>(library.base),
-                    reinterpret_cast<void *>(trackedTarget), gActivePatternName,
-                    gActiveResolverDetail, probeHex(currentHead).c_str());
+                    "HOOK_HEALTH foreign patch detected source=%s base=%p target=%p pattern=%s resolver=%s detail=%s head=%s; refusing unsafe repair",
+                    source, reinterpret_cast<void *>(library.base), reinterpret_cast<void *>(trackedTarget),
+                    gActivePatternName, gActivePatternName, gActiveResolverDetail, probeHex(currentHead).c_str());
         }
         return false;
     }
 
-    if (trackedBase != 0 || trackedTarget != 0) {
-        resetTrackedHookForRemapLocked(library.base);
-    }
+    if (trackedBase != 0 || trackedTarget != 0) resetTrackedHookForRemapLocked(library.base);
 
     const int64_t now = monotonicMs();
     const bool forceScan = std::strcmp(source, "loader-callback") == 0
@@ -729,8 +694,7 @@ bool ensureHookLocked(const LibraryInfo &library, const char *source) {
     gLastPatternScanMs.store(now, std::memory_order_relaxed);
 
     const TargetResolution resolution = resolveOnSwipeProcessTarget(library);
-    if (resolution.uniqueCandidates != 1 || resolution.match.address == 0
-            || resolution.match.pattern == nullptr) {
+    if (resolution.uniqueCandidates != 1 || resolution.match.address == 0 || resolution.match.pattern == nullptr) {
         gHookInstalled.store(false, std::memory_order_release);
         gHookHealthState.store(3, std::memory_order_release);
         logLine(ANDROID_LOG_ERROR,
@@ -742,18 +706,16 @@ bool ensureHookLocked(const LibraryInfo &library, const char *source) {
 
     const uintptr_t target = resolution.match.address;
     const uintptr_t resolvedOffset = target - library.base;
-    const intptr_t delta = static_cast<intptr_t>(resolvedOffset)
-            - static_cast<intptr_t>(kReferenceOnSwipeProcessOffset);
+    const intptr_t delta = static_cast<intptr_t>(resolvedOffset) - static_cast<intptr_t>(kReferenceOnSwipeProcessOffset);
     logLine(ANDROID_LOG_INFO,
-            "HOOK_SCAN resolved source=%s resolver=%s detail=%s target=%p resolvedOffset=0x%zx referenceOffset=0x%zx delta=%lld execRanges=%zu",
-            source, resolution.match.pattern->name,
+            "HOOK_SCAN resolved source=%s pattern=%s resolver=%s detail=%s target=%p resolvedOffset=0x%zx referenceOffset=0x%zx delta=%lld execRanges=%zu",
+            source, resolution.match.pattern->name, resolution.match.pattern->name,
             resolution.match.detail == nullptr ? "<none>" : resolution.match.detail,
             reinterpret_cast<void *>(target), static_cast<size_t>(resolvedOffset),
-            static_cast<size_t>(kReferenceOnSwipeProcessOffset),
-            static_cast<long long>(delta), library.executableRangeCount);
+            static_cast<size_t>(kReferenceOnSwipeProcessOffset), static_cast<long long>(delta),
+            library.executableRangeCount);
 
-    return installFreshHookLocked(library, target, *resolution.match.pattern, source,
-                                  resolution.match.detail);
+    return installFreshHookLocked(library, target, *resolution.match.pattern, source, resolution.match.detail);
 }
 
 bool ensureHook(const LibraryInfo &library, const char *source) {
@@ -771,10 +733,8 @@ void hookWatchdogWorker() {
         } else {
             ++missingPolls;
             if (missingPolls == 12) {
-                logLine(ANDROID_LOG_WARN,
-                        "HOOK_HEALTH %s absent for ~%lldms; waiting for remap",
-                        kTargetLibrary,
-                        static_cast<long long>(missingPolls * kHookHealthIntervalMs));
+                logLine(ANDROID_LOG_WARN, "HOOK_HEALTH %s absent for ~%lldms; waiting for remap",
+                        kTargetLibrary, static_cast<long long>(missingPolls * kHookHealthIntervalMs));
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(kHookHealthIntervalMs));
@@ -836,13 +796,11 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     if (!entriesReady || !hookReady) {
         logLine(ANDROID_LOG_ERROR,
                 "DP_GATE native_init rejected: LSPosed native hook backend unavailable entries=%p hook_func=%p",
-                static_cast<const void *>(entries),
-                entriesReady ? reinterpret_cast<void *>(entries->hook_func) : nullptr);
+                static_cast<const void *>(entries), entriesReady ? reinterpret_cast<void *>(entries->hook_func) : nullptr);
         return nullptr;
     }
     if (!hyosProcess) {
-        logLine(ANDROID_LOG_WARN,
-                "DP_GATE native_init rejected non-HYOS process exe=%s process=%s",
+        logLine(ANDROID_LOG_WARN, "DP_GATE native_init rejected non-HYOS process exe=%s process=%s",
                 executable.c_str(), processName.c_str());
         return nullptr;
     }
@@ -850,21 +808,18 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     gHookFunction = entries->hook_func;
     gUnhookFunction = entries->unhook_func;
     logLine(ANDROID_LOG_INFO,
-            "DP_GATE native_init accepted api=%u exe=%s process=%s launcherCmdline=%d hook_func=%p unhook_func=%p watchdog=%lldms resolver=semantic-motion-graph+exact-fallback abi=transparent-s0 repair=unhook+rehook",
+            "DP_GATE native_init accepted api=%u exe=%s process=%s launcherCmdline=%d hook_func=%p unhook_func=%p watchdog=%lldms resolver=exact-profile-first+semantic-unknown-build abi=transparent-s0 repair=unhook+rehook",
             entries->version, executable.c_str(), processName.c_str(), launcherProcess ? 1 : 0,
-            reinterpret_cast<void *>(entries->hook_func),
-            reinterpret_cast<void *>(entries->unhook_func),
+            reinterpret_cast<void *>(entries->hook_func), reinterpret_cast<void *>(entries->unhook_func),
             static_cast<long long>(kHookHealthIntervalMs));
 
     const LibraryInfo library = findLauncherLibrary();
     if (library.base != 0) {
-        logLine(ANDROID_LOG_INFO,
-                "DP_GATE native_init backfill found %s base=%p process=%s",
+        logLine(ANDROID_LOG_INFO, "DP_GATE native_init backfill found %s base=%p process=%s",
                 kTargetLibrary, reinterpret_cast<void *>(library.base), processName.c_str());
         ensureHook(library, "native-init-backfill");
     } else {
-        logLine(ANDROID_LOG_INFO,
-                "DP_GATE native_init waiting for %s process=%s",
+        logLine(ANDROID_LOG_INFO, "DP_GATE native_init waiting for %s process=%s",
                 kTargetLibrary, processName.c_str());
     }
 
