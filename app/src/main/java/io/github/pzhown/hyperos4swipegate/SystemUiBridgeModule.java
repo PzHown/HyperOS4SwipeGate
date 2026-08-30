@@ -130,9 +130,13 @@ public final class SystemUiBridgeModule extends XposedModule {
             }
 
             long previousNonce = pendingNonce.getAndSet(nonce);
-            if (previousNonce != nonce) {
-                sendAppStage(context, nonce, "SYSTEMUI_QUERY_RECEIVED");
+            if (previousNonce == nonce) {
+                log(android.util.Log.DEBUG, "HyperOS4SwipeGateSystemUI",
+                        "Ignored duplicate runtime query nonce=" + nonce);
+                return;
             }
+
+            sendAppStage(context, nonce, "SYSTEMUI_QUERY_RECEIVED");
             try {
                 Intent carrier = new Intent(ACTION_HYOS_CARRIER)
                         .setPackage(LAUNCHER_PACKAGE)
@@ -145,9 +149,7 @@ public final class SystemUiBridgeModule extends XposedModule {
                 log(android.util.Log.INFO, "HyperOS4SwipeGateSystemUI",
                         "Runtime carrier sent nonce=" + nonce
                                 + " threshold=" + thresholdDp + " logLevel=" + logLevel);
-                if (previousNonce != nonce) {
-                    sendAppStage(context, nonce, "CARRIER_SENT");
-                }
+                sendAppStage(context, nonce, "CARRIER_SENT");
             } catch (Throwable t) {
                 log(android.util.Log.ERROR, "HyperOS4SwipeGateSystemUI",
                         "Runtime carrier send failed", t);
