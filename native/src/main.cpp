@@ -566,7 +566,8 @@ bool ensureHapticCaptureHook() {
 
         gHapticCaptureHookInstalled.store(false, std::memory_order_release);
         gOriginalHapticFeedback.store(nullptr, std::memory_order_release);
-        gCapturedHapticArc.store(0, std::memory_order_release);
+        // Same process and same target: the previously captured HapticFeedback
+        // runtime is still usable. Do not clear it during a normal watchdog rehook.
         const int unhookRc = gUnhookFunction(targetPointer);
         std::array<uint8_t, kHookProbeSize> afterUnhook{};
         if (!readProbeHead(target, afterUnhook)
@@ -632,7 +633,19 @@ bool performReturnHaptic(const char *stage, bool light) {
     if (original == nullptr || arc < 0x10000u) {
         bool expected = false;
         if (gHapticUnavailableLogged.compare_exchange_strong(expected, true)) {
-            logLine(ANDROID_LOG_WARN, "HAPTIC skipped stage=%s reason=runtime-not-captured", stage == nullptr ? "unknown" : stage);
+            const char *reason = original == nullptr
+
+                    ? (arc < 0x10000u ? "hook-and-runtime-missing" : "hook-backup-missing")
+
+                    : "runtime-arc-missing";
+
+            logLine(ANDROID_LOG_WARN,
+
+                    "HAPTIC skipped stage=%s reason=%s hook=%d arc=%p",
+
+                    stage == nullptr ? "unknown" : stage, reason,
+
+                    original == nullptr ? 0 : 1, reinterpret_cast<void *>(arc));
         }
         return false;
     }
