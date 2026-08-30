@@ -1,0 +1,161 @@
+name: Apply dev.9 logging and beta updates
+
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - name: Apply updates
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          detailed_expr = '''    return std::strncmp(message, "DP_GATE rawDx=", 14) == 0
+                  || std::strncmp(message, "HOOK_HEALTH healthy ", 20) == 0
+                  || std::strncmp(message, "CONTROL_CARRIER accepted ", 25) == 0
+                  || std::strncmp(message, "CONTROL_CARRIER duplicate ", 26) == 0
+                  || std::strncmp(message, "HAPTIC_V2 feedback ", 19) == 0
+                  || std::strncmp(message, "HAPTIC_V2 loader candidate ", 27) == 0
+                  || std::strncmp(message, "HAPTIC_V2 loader matched ", 25) == 0
+                  || std::strncmp(message, "NATIVE_REPLY waiting ", 21) == 0
+                  || std::strncmp(message, "Runtime carrier accepted but native reply is not ready", 54) == 0
+                  || std::strncmp(message, "CONTROL_CARRIER sender_uid ", 27) == 0;'''
+
+          # 1) Runtime Android/file log filter: Off emits no normal module logs;
+          # Compact drops recurring transport/haptic/frame/health noise; Detailed keeps all.
+          path = Path('native/src/log_filter.cpp')
+          text = path.read_text()
+          old = '''bool isDetailedOnlyLine(const char *message) {
+    if (message == nullptr) return false;
+    return std::strncmp(message, "DP_GATE rawDx=", 14) == 0
+            || std::strncmp(message, "HOOK_HEALTH healthy ", 20) == 0;
+}
+
+bool shouldPersistForApp(const char *message) {
+    const int level = readNativeLogLevel();
+    if (level <= kLogLevelOff) return false;
+    if (level == kLogLevelCompact && isDetailedOnlyLine(message)) return false;
+    return true;
+}
+'''
+          new = '''bool isDetailedOnlyLine(const char *message) {
+    if (message == nullptr) return false;
+''' + detailed_expr + '''
+}
+
+bool shouldEmitAtLevel(int level, const char *message) {
+    if (level <= kLogLevelOff) return false;
+    if (level == kLogLevelCompact && isDetailedOnlyLine(message)) return false;
+    return true;
+}
+
+bool shouldPersistForApp(const char *message) {
+    return shouldEmitAtLevel(readNativeLogLevel(), message);
+}
+'''
+          if text.count(old) != 1:
+              raise SystemExit('log_filter detailed classifier block not found exactly once')
+          text = text.replace(old, new, 1)
+
+          old = '''    // Error reporting is intentionally independent from the SwipeGate App log setting. Keep the
+    // normal Android log emission and additionally retain ERROR+ lines for LSPosed-side diagnosis.
+    if (priority >= ANDROID_LOG_ERROR) appendLsposedError(text);
+    return __real___android_log_write(priority, tag, text);
+'''
+          new = '''    // ERROR+ retention for diagnostics remains independent from the visible runtime log level,
+    // but normal Android/LSPosed log emission strictly follows Off / Compact / Detailed.
+    if (priority >= ANDROID_LOG_ERROR) appendLsposedError(text);
+    if (!shouldEmitAtLevel(readNativeLogLevel(), text)) return 0;
+    return __real___android_log_write(priority, tag, text);
+'''
+          if text.count(old) != 1:
+              raise SystemExit('android log wrapper block not found exactly once')
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+
+          # 2) App-returned native log uses the same detailed-only classifier.
+          path = Path('native/src/control_channel.cpp')
+          text = path.read_text()
+          old = '''bool isDetailedOnlyLine(const char *text) {
+    if (text == nullptr) return false;
+    return std::strncmp(text, "DP_GATE rawDx=", 14) == 0
+            || std::strncmp(text, "HOOK_HEALTH healthy ", 20) == 0;
+}
+'''
+          ctrl_expr = detailed_expr.replace('message', 'text')
+          new = '''bool isDetailedOnlyLine(const char *text) {
+    if (text == nullptr) return false;
+''' + ctrl_expr + '''
+}
+'''
+          if text.count(old) != 1:
+              raise SystemExit('control_channel detailed classifier block not found exactly once')
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+
+          # 3) Route the one direct native_init print through the wrapped logger too.
+          path = Path('native/src/main.cpp')
+          text = path.read_text()
+          old = '''    __android_log_print(
+            ANDROID_LOG_INFO, kTag,
+            "DP_GATE native_init checks entries=%d hook=%d unhook=%d hyosExe=%d launcherCmdline=%d api=%u exe=%s process=%s",
+'''
+          new = '''    logLine(
+            ANDROID_LOG_INFO,
+            "DP_GATE native_init checks entries=%d hook=%d unhook=%d hyosExe=%d launcherCmdline=%d api=%u exe=%s process=%s",
+'''
+          if text.count(old) != 1:
+              raise SystemExit('native_init direct print block not found exactly once')
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+
+          # 4) Beta label and log-level copy.
+          path = Path('app/src/main/java/io/github/pzhown/hyperos4swipegate/HomeScreen.kt')
+          text = path.read_text()
+          if text.count('title = "丰富侧滑震动反馈",') != 1:
+              raise SystemExit('haptic title not found exactly once')
+          text = text.replace('title = "丰富侧滑震动反馈",', 'title = "丰富侧滑震动反馈 · Beta",', 1)
+          path.write_text(text)
+
+          path = Path('app/src/main/java/io/github/pzhown/hyperos4swipegate/SettingsScreen.kt')
+          text = path.read_text()
+          old = 'summary = "额外记录侧滑过程与周期健康状态",'
+          new = 'summary = "额外记录轮询、触感反馈、侧滑过程与周期健康状态",'
+          if text.count(old) != 1:
+              raise SystemExit('detailed log summary not found exactly once')
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+
+          # 5) dev.9 build identity. Haptic default is already false; preserve existing explicit prefs.
+          path = Path('app/build.gradle.kts')
+          text = path.read_text()
+          if text.count('versionCode = 40') != 1 or text.count('versionName = "0.8.0-dev.8"') != 1:
+              raise SystemExit('unexpected current dev version')
+          text = text.replace('versionCode = 40', 'versionCode = 41', 1)
+          text = text.replace('versionName = "0.8.0-dev.8"', 'versionName = "0.8.0-dev.9"', 1)
+          path.write_text(text)
+          PY
+      - name: Commit changes
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add native/src/log_filter.cpp native/src/control_channel.cpp native/src/main.cpp app/src/main/java/io/github/pzhown/hyperos4swipegate/HomeScreen.kt app/src/main/java/io/github/pzhown/hyperos4swipegate/SettingsScreen.kt app/build.gradle.kts
+          git commit -m "fix: enforce runtime log levels and mark haptics beta"
+          git push origin HEAD:dev
