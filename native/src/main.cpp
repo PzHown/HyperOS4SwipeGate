@@ -1185,7 +1185,11 @@ __attribute__((visibility("hidden"))) float swipegate_hook_enter_and_gate(
     if (isLauncherProcess()) ensureWorkerStarted();
     const bool readyNow = readyFinish != 0;
     const bool readyBefore = gReadyHapticLatched.exchange(readyNow, std::memory_order_acq_rel);
-    if (readyNow && !readyBefore) performReturnHaptic("ready", true);
+    if (readyNow && !readyBefore) {
+        performReturnHaptic("ready-enter", true);
+    } else if (!readyNow && readyBefore && gGestureActive.load(std::memory_order_acquire)) {
+        performReturnHaptic("ready-exit", true);
+    }
     return gateHorizontalDistance(readyFinish != 0, side, horizontalDistancePx);
 }
 
