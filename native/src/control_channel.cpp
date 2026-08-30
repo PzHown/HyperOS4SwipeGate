@@ -601,9 +601,15 @@ bool sendNativeReply(int64_t nonce) {
 
 void handleControlCarrier(void *intent) {
     const auto getExtras = resolveLauncherSymbol<IntentGetExtrasFn>("Intent_get_extras");
-    if (intent == nullptr || getExtras == nullptr
-            || !intentActionEquals(intent, kCarrierAction)
-            || !intentSenderEquals(intent, kSystemUiPackage)) return;
+    if (intent == nullptr || getExtras == nullptr || !intentActionEquals(intent, kCarrierAction)) return;
+
+    // HyperOS Runtime supplies sender_package_name independently of Intent extras. Treat that as
+    // the authentication boundary. sender_uid remains a best-effort cross-check only because
+    // Xiaomi's private PackageManager ABI can differ across launcher/runtime builds.
+    if (!intentSenderEquals(intent, kSystemUiPackage)) {
+        bridgeLog(ANDROID_LOG_WARN, "CONTROL_CARRIER rejected reason=runtime-sender-not-systemui");
+        return;
+    }
 
     void *extras = getExtras(intent);
     bool marker = false;
@@ -612,25 +618,61 @@ void handleControlCarrier(void *intent) {
     int32_t logLevel = -1;
     bool hapticEnabled = false;
     int64_t nonce = 0;
+
+    const bool markerRead = readNativeBool(extras, kMarkerExtra, &marker);
+    const bool senderUidRead = readNativeI32(extras, kSenderUidExtra, &senderUid);
+    const bool nonceRead = readNativeI64(extras, kNonceExtra, &nonce);
+    const bool thresholdRead = readNativeI32(extras, kThresholdExtra, &thresholdDp);
+    const bool logLevelRead = readNativeI32(extras, kLogLevelExtra, &logLevel);
     const bool hapticFieldPresent = readNativeBool(extras, kHapticEnabledExtra, &hapticEnabled);
-    if (!readNativeBool(extras, kMarkerExtra, &marker) || !marker
-            || !readNativeI32(extras, kSenderUidExtra, &senderUid)
-            || !readNativeI64(extras, kNonceExtra, &nonce)
-            || !readNativeI32(extras, kThresholdExtra, &thresholdDp)
-            || !readNativeI32(extras, kLogLevelExtra, &logLevel)
-            || nonce <= 0 || !verifyPackageUid(kSystemUiPackage, senderUid)
-            || thresholdDp < kMinThresholdDp || thresholdDp > kMaxThresholdDp
-            || logLevel < kMinLogLevel || logLevel > kMaxLogLevel) {
-        bridgeLog(ANDROID_LOG_WARN, "Rejected malformed or unauthenticated SystemUI carrier");
+
+    char carrierLog[320]{};
+    if (!markerRead || !marker) {
+        std::snprintf(carrierLog, sizeof(carrierLog),
+                      "CONTROL_CARRIER rejected reason=marker read=%d value=%d",
+                      markerRead ? 1 : 0, marker ? 1 : 0);
+        bridgeLog(ANDROID_LOG_WARN, carrierLog);
         return;
     }
+    if (!nonceRead || nonce <= 0) {
+        std::snprintf(carrierLog, sizeof(carrierLog),
+                      "CONTROL_CARRIER rejected reason=nonce read=%d value=%lld",
+                      nonceRead ? 1 : 0, static_cast<long long>(nonce));
+        bridgeLog(ANDROID_LOG_WARN, carrierLog);
+        return;
+    }
+    if (!thresholdRead || thresholdDp < kMinThresholdDp || thresholdDp > kMaxThresholdDp) {
+        std::snprintf(carrierLog, sizeof(carrierLog),
+                      "CONTROL_CARRIER rejected reason=threshold read=%d value=%d range=%d..%d",
+                      thresholdRead ? 1 : 0, thresholdDp, kMinThresholdDp, kMaxThresholdDp);
+        bridgeLog(ANDROID_LOG_WARN, carrierLog);
+        return;
+    }
+    if (!logLevelRead || logLevel < kMinLogLevel || logLevel > kMaxLogLevel) {
+        std::snprintf(carrierLog, sizeof(carrierLog),
+                      "CONTROL_CARRIER rejected reason=log-level read=%d value=%d range=%d..%d",
+                      logLevelRead ? 1 : 0, logLevel, kMinLogLevel, kMaxLogLevel);
+        bridgeLog(ANDROID_LOG_WARN, carrierLog);
+        return;
+    }
+
+    if (senderUidRead && !verifyPackageUid(kSystemUiPackage, senderUid)) {
+        std::snprintf(carrierLog, sizeof(carrierLog),
+                      "CONTROL_CARRIER sender_uid cross-check unavailable-or-mismatch claimed=%d; accepted-by-runtime-sender=1",
+                      senderUid);
+        bridgeLog(ANDROID_LOG_WARN, carrierLog);
+    } else if (!senderUidRead) {
+        bridgeLog(ANDROID_LOG_WARN,
+                  "CONTROL_CARRIER sender_uid missing; accepted-by-runtime-sender=1");
+    }
+
     if (!hapticFieldPresent) {
         {
             SpinGuard guard;
             hapticEnabled = gHapticEnabled == 1;
         }
         bridgeLog(ANDROID_LOG_WARN,
-                  "SystemUI carrier missing haptic field; preserving previous/default state");
+                  "CONTROL_CARRIER haptic field missing; preserving previous/default state");
     }
 
     bool thresholdChanged;
@@ -648,6 +690,12 @@ void handleControlCarrier(void *intent) {
     }
     if (thresholdChanged) persistValue(kConfigFileName, thresholdDp);
     if (logLevelChanged) persistValue(kLogLevelFileName, logLevel);
+
+    std::snprintf(carrierLog, sizeof(carrierLog),
+                  "CONTROL_CARRIER accepted nonce=%lld threshold=%d logLevel=%d haptic=%d senderUidRead=%d",
+                  static_cast<long long>(nonce), thresholdDp, logLevel, hapticEnabled ? 1 : 0,
+                  senderUidRead ? 1 : 0);
+    bridgeLog(ANDROID_LOG_INFO, carrierLog);
 
     if (!sendNativeReply(nonce)) {
         bridgeLog(ANDROID_LOG_WARN,

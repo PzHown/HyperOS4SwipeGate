@@ -43,7 +43,7 @@ constexpr const char *kTag = "HyperOS4SwipeGateNative";
 constexpr const char *kTargetPackage = "com.miui.home";
 constexpr const char *kSpawnerPath = "/system_ext/bin/hyos_spawner";
 constexpr const char *kTargetLibrary = "libapp_launcher.so";
-constexpr const char *kHapticLibrary = "libhyper_os_background_tasks_public.so";
+constexpr const char *kHapticLibraryNeedle = "libhyper_os_background_tasks_public";
 constexpr const char *kHapticSymbol = "HapticFeedback_perform_ext_haptic_feedback";
 constexpr const char *kStandardHapticSymbol = "HapticFeedback_perform_haptic_feedback";
 constexpr int32_t kReadyHapticConstant = 27;
@@ -504,8 +504,8 @@ bool installHapticCaptureHookFromHandle(void *handle) {
     void *standard = dlsym(handle, kStandardHapticSymbol);
     if (target == nullptr) {
         logLine(ANDROID_LOG_WARN,
-                "HAPTIC_V2 symbol unavailable lib=%s symbol=%s handle=%p",
-                kHapticLibrary, kHapticSymbol, handle);
+                "HAPTIC_V2 symbol unavailable needle=%s symbol=%s handle=%p",
+                kHapticLibraryNeedle, kHapticSymbol, handle);
         gHapticInstallInProgress.store(false, std::memory_order_release);
         return false;
     }
@@ -971,7 +971,17 @@ void ensureWorkerStarted() {
 void onLibraryLoaded(const char *name, void *handle) {
     if (!isHyosSpawnerProcessFamily() || name == nullptr) return;
 
-    if (std::strstr(name, kHapticLibrary) != nullptr && isLauncherProcess()) {
+    if (isLauncherProcess()
+            && (std::strstr(name, "haptic") != nullptr
+                    || std::strstr(name, "background_tasks") != nullptr)) {
+        logLine(ANDROID_LOG_INFO,
+                "HAPTIC_V2 loader candidate name=%s handle=%p",
+                name, handle);
+    }
+    if (std::strstr(name, kHapticLibraryNeedle) != nullptr && isLauncherProcess()) {
+        logLine(ANDROID_LOG_INFO,
+                "HAPTIC_V2 loader matched name=%s handle=%p",
+                name, handle);
         installHapticCaptureHookFromHandle(handle);
     }
 
@@ -1044,7 +1054,7 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
             reinterpret_cast<void *>(entries->hook_func), reinterpret_cast<void *>(entries->unhook_func),
             static_cast<long long>(kHookHealthIntervalMs));
     logLine(ANDROID_LOG_INFO,
-            "HAPTIC_V2 enabled policy=loader-handle-only no-dlopen no-watchdog no-hook-mutex ready=standard-27 commit=ext-0");
+            "HAPTIC_V2 enabled policy=loader-handle-only library-needle=libhyper_os_background_tasks_public no-dlopen no-watchdog no-hook-mutex ready=standard-27 commit=ext-0");
 
     const LibraryInfo library = findLauncherLibrary();
     if (library.base != 0) {
