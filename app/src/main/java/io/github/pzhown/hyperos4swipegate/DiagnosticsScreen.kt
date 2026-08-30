@@ -128,12 +128,12 @@ internal fun DiagnosticsScreen(
                             label = "LSPosed",
                             state = when {
                                 !current.serviceConnected -> "未连接"
-                                !current.lsposedSupported -> "版本不受支持"
+                                !current.lsposedSupported -> "版本不支持"
                                 else -> "已连接"
                             },
                             detail = when {
-                                !current.serviceConnected -> "等待 LSPosed 服务连接"
-                                !current.lsposedSupported -> current.framework.ifBlank { "当前框架版本不受支持" }
+                                !current.serviceConnected -> "等待框架服务"
+                                !current.lsposedSupported -> current.framework.ifBlank { "需要支持的 LSPosed 版本" }
                                 else -> listOf("API ${current.apiVersion}", current.framework)
                                     .filter { it.isNotBlank() }
                                     .joinToString(" · ")
@@ -147,11 +147,11 @@ internal fun DiagnosticsScreen(
                         )
                         DiagnosticPipelineNode(
                             label = "HyOS Runtime",
-                            state = if (current.hyosRuntimeDetected) "已就绪" else "未检测到",
+                            state = if (current.hyosRuntimeDetected) "已加载" else "未检测到",
                             detail = when {
-                                current.hyosRuntimeDetected && current.hyosSpawnerPresent -> "hyos_spawner 已就绪"
+                                current.hyosRuntimeDetected && current.hyosSpawnerPresent -> "hyos_spawner 可用"
                                 current.hyosRuntimeDetected -> "Runtime 已检测"
-                                else -> "未检测到 Launcher Runtime"
+                                else -> "等待 Launcher Runtime"
                             },
                             tone = if (current.hyosRuntimeDetected) DiagnosticTone.Good else DiagnosticTone.Error,
                             drawConnector = true,
@@ -162,7 +162,7 @@ internal fun DiagnosticsScreen(
                             detail = when {
                                 current.nativeProfile.isNotBlank() -> current.nativeProfile
                                 current.nativeDetail.isNotBlank() -> current.nativeDetail
-                                else -> "等待 Native Hook 状态"
+                                else -> "等待 Hook 状态"
                             },
                             tone = nativeHookTone(current),
                             drawConnector = false,
@@ -171,13 +171,13 @@ internal fun DiagnosticsScreen(
                 }
             }
 
-            item { SmallTitle("目标与运行参数") }
+            item { SmallTitle("目标与配置") }
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     DiagnosticValueRow("Launcher", conciseLauncherVersion(current.launcherVersion))
-                    DiagnosticValueRow("模块作用域", if (current.launcherInScope) "已包含" else "未包含")
+                    DiagnosticValueRow("作用域", if (current.launcherInScope) "已包含" else "未包含")
                     DiagnosticValueRow("目标状态", targetStateLabel(current.targetState, current.launcherLoaded))
-                    DiagnosticValueRow("侧边栏触发距离", "${current.thresholdDp} dp")
+                    DiagnosticValueRow("触发距离", "${current.thresholdDp} dp")
                     if (!current.nativeHealthy && current.nativeDetail.isNotBlank() && current.nativeProfile.isNotBlank()) {
                         DiagnosticValueRow("Hook 详情", current.nativeDetail)
                     }
@@ -187,7 +187,7 @@ internal fun DiagnosticsScreen(
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     ArrowPreference(
-                        title = "系统环境",
+                        title = "系统与环境",
                         summary = buildString {
                             append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
                             append(" · Android ").append(Build.VERSION.RELEASE)
@@ -196,8 +196,8 @@ internal fun DiagnosticsScreen(
                     )
                     if (environmentExpanded) {
                         DiagnosticValueRow("Android", "${Build.VERSION.RELEASE} · SDK ${Build.VERSION.SDK_INT}")
-                        DiagnosticValueRow("LSPosed 框架", current.framework.ifBlank { "未知" })
-                        DiagnosticValueRow("HyOS Runtime", if (current.hyosSpawnerPresent) "可用" else "不可用")
+                        DiagnosticValueRow("框架", current.framework.ifBlank { "未知" })
+                        DiagnosticValueRow("HyOS spawner", if (current.hyosSpawnerPresent) "存在" else "不存在")
                     }
                 }
             }
@@ -206,7 +206,7 @@ internal fun DiagnosticsScreen(
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     ArrowPreference(
-                        title = "Native Runtime 日志",
+                        title = "Native 日志",
                         summary = nativeLogSummary(current.nativeLogs),
                         onClick = { logsExpanded = !logsExpanded },
                     )
@@ -219,16 +219,16 @@ internal fun DiagnosticsScreen(
                         ) {
                             Button(
                                 onClick = {
-                                    copyToClipboard("SwipeGate native log", current.nativeLogs, "运行日志已复制")
+                                    copyToClipboard("SwipeGate native log", current.nativeLogs, "日志已复制")
                                 },
                                 enabled = current.nativeLogs.isNotBlank(),
                             ) {
-                                Text("复制日志")
+                                Text("复制")
                             }
                         }
                         SelectionContainer {
                             Text(
-                                text = current.nativeLogs.ifBlank { "暂无运行日志" },
+                                text = current.nativeLogs.ifBlank { "暂无日志" },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(start = 18.dp, end = 18.dp, bottom = 18.dp),
@@ -242,7 +242,7 @@ internal fun DiagnosticsScreen(
                 }
             }
 
-            item { SmallTitle("诊断操作") }
+            item { SmallTitle("问题排查") }
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Row(
@@ -256,7 +256,7 @@ internal fun DiagnosticsScreen(
                             enabled = !loading,
                             modifier = Modifier.weight(1f),
                         ) {
-                            Text(if (loading) "正在刷新" else "刷新状态")
+                            Text(if (loading) "刷新中" else "刷新")
                         }
                         Button(
                             onClick = {
@@ -270,7 +270,7 @@ internal fun DiagnosticsScreen(
                             enabled = !loading,
                             modifier = Modifier.weight(1f),
                         ) {
-                            Text("复制完整诊断")
+                            Text("复制诊断")
                         }
                     }
                 }
@@ -405,8 +405,8 @@ private fun collectDiagnosticUiSnapshot(context: Context): DiagnosticUiSnapshot 
 }
 
 private fun nativeHookLabel(snapshot: DiagnosticUiSnapshot): String = when {
-    snapshot.nativeHealthy -> "正常"
-    snapshot.nativeState == "HEALTHY" && !snapshot.nativeFresh -> "状态已过期"
+    snapshot.nativeHealthy -> "健康"
+    snapshot.nativeState == "HEALTHY" && !snapshot.nativeFresh -> "状态过期"
     snapshot.nativeState == "FAILED" -> "失败"
     snapshot.nativeState == "UNKNOWN" -> "待确认"
     snapshot.nativeState.isBlank() -> "待确认"
@@ -422,10 +422,10 @@ private fun nativeHookTone(snapshot: DiagnosticUiSnapshot): DiagnosticTone = whe
 }
 
 private fun targetStateLabel(state: String, launcherLoaded: Boolean): String = when (state) {
-    "RELOADING" -> "正在重新加载"
-    "FAILED" -> "加载失败"
-    "STALE" -> "等待重载"
-    "UP_TO_DATE" -> "已同步"
+    "RELOADING" -> "正在更新"
+    "FAILED" -> "更新失败"
+    "STALE" -> "待重载"
+    "UP_TO_DATE" -> "最新"
     else -> if (launcherLoaded) "已加载" else "未加载"
 }
 
