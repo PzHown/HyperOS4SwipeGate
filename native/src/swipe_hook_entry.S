@@ -62,3 +62,41 @@ swipegate_on_swipe_process_hook:
     ret
 
 .size swipegate_on_swipe_process_hook, .-swipegate_on_swipe_process_hook
+
+// ABI-transparent commit lifecycle hook. It only emits the haptic event and then
+// forwards the opaque call frame to the original Launcher implementation.
+.global swipegate_on_back_invoke_hook
+.hidden swipegate_on_back_invoke_hook
+.type swipegate_on_back_invoke_hook, %function
+swipegate_on_back_invoke_hook:
+    sub sp, sp, #0x110
+    stp x0, x1, [sp, #0x00]
+    stp x2, x3, [sp, #0x10]
+    stp x4, x5, [sp, #0x20]
+    stp x6, x7, [sp, #0x30]
+    str x8, [sp, #0x40]
+    str x30, [sp, #0x48]
+    stp q0, q1, [sp, #0x50]
+    stp q2, q3, [sp, #0x70]
+    stp q4, q5, [sp, #0x90]
+    stp q6, q7, [sp, #0xb0]
+    bl swipegate_haptic_on_back_invoke
+    ldp q0, q1, [sp, #0x50]
+    ldp q2, q3, [sp, #0x70]
+    ldp q4, q5, [sp, #0x90]
+    ldp q6, q7, [sp, #0xb0]
+    ldp x0, x1, [sp, #0x00]
+    ldp x2, x3, [sp, #0x10]
+    ldp x4, x5, [sp, #0x20]
+    ldp x6, x7, [sp, #0x30]
+    ldr x8, [sp, #0x40]
+    adrp x17, gSwipeGateOriginalOnBackInvoke
+    add x17, x17, :lo12:gSwipeGateOriginalOnBackInvoke
+    ldar x16, [x17]
+    cbz x16, .Lback_invoke_done
+    blr x16
+.Lback_invoke_done:
+    ldr x30, [sp, #0x48]
+    add sp, sp, #0x110
+    ret
+.size swipegate_on_back_invoke_hook, .-swipegate_on_back_invoke_hook

@@ -4,6 +4,7 @@
 #include <android/log.h>
 #include <elf.h>
 #include <fcntl.h>
+#include <dlfcn.h>
 #include <link.h>
 #include <sys/system_properties.h>
 #include <time.h>
@@ -30,6 +31,9 @@ __attribute__((visibility("hidden"))) void swipegate_on_swipe_process_hook();
 __attribute__((visibility("hidden"))) float swipegate_hook_enter_and_gate(
         uint32_t readyFinish, uint32_t side, float horizontalDistancePx);
 __attribute__((visibility("hidden"))) void swipegate_hook_exit();
+__attribute__((visibility("hidden"))) extern void *gSwipeGateOriginalOnBackInvoke;
+__attribute__((visibility("hidden"))) void swipegate_on_back_invoke_hook();
+__attribute__((visibility("hidden"))) void swipegate_haptic_on_back_invoke();
 }
 
 namespace {
@@ -38,6 +42,12 @@ constexpr const char *kTag = "HyperOS4SwipeGateNative";
 constexpr const char *kTargetPackage = "com.miui.home";
 constexpr const char *kSpawnerPath = "/system_ext/bin/hyos_spawner";
 constexpr const char *kTargetLibrary = "libapp_launcher.so";
+constexpr const char *kHapticLibrary = "libhyper_os_background_tasks_public.so";
+constexpr const char *kHapticSymbol = "HapticFeedback_perform_ext_haptic_feedback";
+constexpr const char *kStandardHapticSymbol = "HapticFeedback_perform_haptic_feedback";
+constexpr int32_t kReadyHapticConstant = 27;
+constexpr int32_t kCommitHapticConstant = 0;
+constexpr uintptr_t kPointerTagMask = 0x00ffffffffffffffull;
 constexpr const char *kThresholdDpProperty = "persist.hyperos4swipegate.threshold_dp";
 constexpr int kDefaultThresholdDp = 0;
 constexpr int kStockBoundaryDp = 88;
@@ -95,6 +105,19 @@ constexpr PatternSpec kSemanticOnSwipeProcessPattern = {
         "semantic-motion-graph", nullptr, nullptr, 0,
 };
 
+// Known-good GestureInputBackHelper::on_back_invoke entry patterns.  These are
+// only used after the main swipe profile has already been resolved uniquely.
+constexpr uint8_t kOnBackInvokePatternV1[] = {
+        0xff,0x83,0x05,0xd1,0xfd,0x7b,0x10,0xa9,0xfc,0x6f,0x11,0xa9,0xfa,0x67,0x12,0xa9,
+        0xf8,0x5f,0x13,0xa9,0xf6,0x57,0x14,0xa9,0xf4,0x4f,0x15,0xa9,0xfd,0x03,0x04,0x91,
+        0xf9,0x03,0x00,0xaa,0x20,0x00,0x80,0x52,
+};
+constexpr uint8_t kOnBackInvokePatternV2[] = {
+        0xff,0x83,0x04,0xd1,0xfd,0x7b,0x0c,0xa9,0xfc,0x6f,0x0d,0xa9,0xfa,0x67,0x0e,0xa9,
+        0xf8,0x5f,0x0f,0xa9,0xf6,0x57,0x10,0xa9,0xf4,0x4f,0x11,0xa9,0xfd,0x03,0x03,0x91,
+        0xfa,0x03,0x00,0xaa,0x20,0x00,0x80,0x52,
+};
+
 static_assert(sizeof(kOnSwipeProcessPatternV1) == sizeof(kOnSwipeProcessMaskV1));
 static_assert(sizeof(kOnSwipeProcessPatternV1) >= kHookProbeSize);
 
@@ -117,6 +140,19 @@ std::atomic<uint32_t> gActiveHookCalls{0};
 std::atomic<uint64_t> gRepairCount{0};
 std::atomic<uint64_t> gClampedCount{0};
 std::atomic<uint64_t> gPassthroughCount{0};
+
+// Haptic V2 is deliberately isolated from gHookMutex and the hook-health watchdog.
+// The haptic library is never dlopen'ed by this module: LSPosed gives us the handle
+// after the library is loaded and we resolve symbols exactly once from that handle.
+std::atomic<void *> gOriginalHapticFeedback{nullptr};
+std::atomic<void *> gStandardHapticFeedback{nullptr};
+std::atomic<uintptr_t> gCapturedHapticArc{0};
+std::atomic<bool> gHapticInstallInProgress{false};
+std::atomic<bool> gHapticCaptureHookInstalled{false};
+std::atomic<bool> gHapticUnavailableLogged{false};
+std::atomic<bool> gReadyHapticLatched{false};
+std::atomic<uintptr_t> gBackInvokeTarget{0};
+std::atomic<bool> gBackInvokeHookInstalled{false};
 
 std::mutex gHookMutex;
 std::array<uint8_t, kHookProbeSize> gInstalledPatchHead{};
@@ -432,7 +468,7 @@ int readThresholdDp() {
     }
     return thresholdDp;
 }
-
+\nusing HapticFeedbackFn = void (*)(void *, int32_t);\n\nvoid hapticFeedbackCaptureHook(void *storage, int32_t constant) {\n    if (storage != nullptr) {\n        uintptr_t arc = 0;\n        std::memcpy(&arc, storage, sizeof(arc));\n        arc &= kPointerTagMask;\n        if (arc >= 0x10000u) {\n            gCapturedHapticArc.store(arc, std::memory_order_release);\n            gHapticUnavailableLogged.store(false, std::memory_order_release);\n        }\n    }\n\n    const auto original = reinterpret_cast<HapticFeedbackFn>(\n            gOriginalHapticFeedback.load(std::memory_order_acquire));\n    if (original != nullptr) original(storage, constant);\n}\n\nbool installHapticCaptureHookFromHandle(void *handle) {\n    if (handle == nullptr || gHookFunction == nullptr || !isLauncherProcess()) return false;\n    if (gHapticCaptureHookInstalled.load(std::memory_order_acquire)) return true;\n\n    bool expected = false;\n    if (!gHapticInstallInProgress.compare_exchange_strong(\n            expected, true, std::memory_order_acq_rel)) {\n        return gHapticCaptureHookInstalled.load(std::memory_order_acquire);\n    }\n\n    // LSPosed's native loader callback supplies this already-loaded handle.\n    // Never call dlopen/RTLD_DEFAULT here: that was the lock-order hazard in 0.8.0 v1.\n    void *target = dlsym(handle, kHapticSymbol);\n    void *standard = dlsym(handle, kStandardHapticSymbol);\n    if (target == nullptr) {\n        logLine(ANDROID_LOG_WARN,\n                "HAPTIC_V2 symbol unavailable lib=%s symbol=%s handle=%p",\n                kHapticLibrary, kHapticSymbol, handle);\n        gHapticInstallInProgress.store(false, std::memory_order_release);\n        return false;\n    }\n\n    void *backup = nullptr;\n    const int rc = gHookFunction(\n            target, reinterpret_cast<void *>(hapticFeedbackCaptureHook), &backup);\n    if (rc != 0 || backup == nullptr) {\n        logLine(ANDROID_LOG_ERROR,\n                "HAPTIC_V2 capture hook failed rc=%d target=%p backup=%p",\n                rc, target, backup);\n        gHapticInstallInProgress.store(false, std::memory_order_release);\n        return false;\n    }\n\n    gOriginalHapticFeedback.store(backup, std::memory_order_release);\n    gStandardHapticFeedback.store(standard, std::memory_order_release);\n    gHapticCaptureHookInstalled.store(true, std::memory_order_release);\n    gHapticInstallInProgress.store(false, std::memory_order_release);\n    logLine(ANDROID_LOG_INFO,\n            "HAPTIC_V2 capture hook ready target=%p standard=%p policy=loader-handle-only watchdog=off",\n            target, standard);\n    return true;\n}\n\nbool performNativeHaptic(const char *stage, bool light) {\n    const auto original = reinterpret_cast<HapticFeedbackFn>(\n            gOriginalHapticFeedback.load(std::memory_order_acquire));\n    const uintptr_t arc = gCapturedHapticArc.load(std::memory_order_acquire);\n    if (original == nullptr || arc < 0x10000u) {\n        bool expected = false;\n        if (gHapticUnavailableLogged.compare_exchange_strong(expected, true)) {\n            logLine(ANDROID_LOG_WARN,\n                    "HAPTIC_V2 skipped stage=%s reason=%s hook=%d arc=%p",\n                    stage == nullptr ? "unknown" : stage,\n                    original == nullptr ? "capture-hook-not-ready" : "runtime-arc-not-captured",\n                    original == nullptr ? 0 : 1, reinterpret_cast<void *>(arc));\n        }\n        return false;\n    }\n\n    void *storage = reinterpret_cast<void *>(arc);\n    if (light) {\n        const auto standard = reinterpret_cast<HapticFeedbackFn>(\n                gStandardHapticFeedback.load(std::memory_order_acquire));\n        if (standard != nullptr) {\n            standard(&storage, kReadyHapticConstant);\n            logLine(ANDROID_LOG_INFO,\n                    "HAPTIC_V2 feedback stage=%s kind=light constant=%d",\n                    stage == nullptr ? "unknown" : stage, kReadyHapticConstant);\n            return true;\n        }\n    }\n\n    original(&storage, kCommitHapticConstant);\n    logLine(ANDROID_LOG_INFO,\n            "HAPTIC_V2 feedback stage=%s kind=%s constant=%d",\n            stage == nullptr ? "unknown" : stage, light ? "light-fallback" : "commit",\n            kCommitHapticConstant);\n    return true;\n}\n\nuintptr_t resolveUniqueAuxPattern(const LibraryInfo &library,\n                                  const uint8_t *bytes, size_t size) {\n    if (bytes == nullptr || size == 0) return 0;\n    uintptr_t found = 0;\n    for (size_t rangeIndex = 0; rangeIndex < library.executableRangeCount; ++rangeIndex) {\n        const ExecutableRange &range = library.executableRanges[rangeIndex];\n        if (range.start == 0 || range.size < size) continue;\n        const uintptr_t start = (range.start + 3u) & ~static_cast<uintptr_t>(3u);\n        const uintptr_t last = range.start + range.size - size;\n        for (uintptr_t cursor = start; cursor <= last; cursor += 4u) {\n            if (std::memcmp(reinterpret_cast<const void *>(cursor), bytes, size) != 0) continue;\n            if (found != 0 && found != cursor) return 0;\n            found = cursor;\n        }\n    }\n    return found;\n}\n\nuintptr_t resolveBackInvokeTarget(const LibraryInfo &library) {\n    if (std::strcmp(gActivePatternName, "8.01.02.5459-v1") == 0) {\n        return resolveUniqueAuxPattern(\n                library, kOnBackInvokePatternV1, sizeof(kOnBackInvokePatternV1));\n    }\n    if (std::strcmp(gActivePatternName, "8.01.02.6174-v2") == 0) {\n        return resolveUniqueAuxPattern(\n                library, kOnBackInvokePatternV2, sizeof(kOnBackInvokePatternV2));\n    }\n    return 0;\n}\n\nbool installBackInvokeHapticHook(const LibraryInfo &library) {\n    if (library.base == 0 || gHookFunction == nullptr) return false;\n    const uintptr_t target = resolveBackInvokeTarget(library);\n    if (target == 0) {\n        logLine(ANDROID_LOG_WARN,\n                "HAPTIC_V2 commit hook unresolved profile=%s; ready haptic remains available",\n                gActivePatternName);\n        return false;\n    }\n    if (gBackInvokeHookInstalled.load(std::memory_order_acquire)\n            && gBackInvokeTarget.load(std::memory_order_acquire) == target) {\n        return true;\n    }\n\n    void *backup = nullptr;\n    const int rc = gHookFunction(\n            reinterpret_cast<void *>(target),\n            reinterpret_cast<void *>(swipegate_on_back_invoke_hook), &backup);\n    if (rc != 0 || backup == nullptr) {\n        logLine(ANDROID_LOG_ERROR,\n                "HAPTIC_V2 commit hook failed rc=%d target=%p backup=%p",\n                rc, reinterpret_cast<void *>(target), backup);\n        return false;\n    }\n\n    __atomic_store_n(&gSwipeGateOriginalOnBackInvoke, backup, __ATOMIC_RELEASE);\n    gBackInvokeTarget.store(target, std::memory_order_release);\n    gBackInvokeHookInstalled.store(true, std::memory_order_release);\n    logLine(ANDROID_LOG_INFO,\n            "HAPTIC_V2 commit hook ready profile=%s target=%p watchdog=off",\n            gActivePatternName, reinterpret_cast<void *>(target));\n    return true;\n}\n
 float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDistancePx) {
     const int configuredDp = readThresholdDp();
     const int effectiveDp = configuredDp == 0 ? kStockBoundaryDp : std::max(configuredDp, kStockBoundaryDp);
@@ -454,6 +490,20 @@ float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDi
         gClampedCount.fetch_add(1, std::memory_order_relaxed);
     } else {
         gPassthroughCount.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Custom thresholds use the custom boundary. Stock mode follows Launcher
+    // readyFinish. Trigger only on the false -> true boundary and re-arm after
+    // the gesture leaves ready state. No mutex or symbol lookup occurs here.
+    const bool hapticReady = delayBeyondStock ? userGateReached : readyFinish;
+    if (hapticReady) {
+        bool expected = false;
+        if (gReadyHapticLatched.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel)) {
+            performNativeHaptic("ready", true);
+        }
+    } else {
+        gReadyHapticLatched.store(false, std::memory_order_release);
     }
 
     const int64_t now = monotonicMs();
@@ -544,6 +594,7 @@ bool installFreshHookLocked(const LibraryInfo &library, uintptr_t target,
             densityDpi > 0 ? dpToPx(effectiveDp, densityDpi) : 0.0f,
             probeHex(patchedHead).c_str(),
             static_cast<unsigned long long>(gRepairCount.load(std::memory_order_relaxed)));
+    installBackInvokeHapticHook(library);
     return true;
 }
 
@@ -640,6 +691,9 @@ void resetTrackedHookForRemapLocked(uintptr_t newBase) {
     gExpectedOriginalHeadReady = false;
     gActivePatternName = "<none>";
     gActiveResolverDetail = "<none>";
+    gBackInvokeHookInstalled.store(false, std::memory_order_release);
+    gBackInvokeTarget.store(0, std::memory_order_release);
+    __atomic_store_n(&gSwipeGateOriginalOnBackInvoke, nullptr, __ATOMIC_RELEASE);
 }
 
 bool ensureHookLocked(const LibraryInfo &library, const char *source) {
@@ -748,8 +802,13 @@ void ensureWorkerStarted() {
     std::thread(hookWatchdogWorker).detach();
 }
 
-void onLibraryLoaded(const char *name, void *) {
+void onLibraryLoaded(const char *name, void *handle) {
     if (!isHyosSpawnerProcessFamily() || name == nullptr) return;
+
+    if (std::strstr(name, kHapticLibrary) != nullptr && isLauncherProcess()) {
+        installHapticCaptureHookFromHandle(handle);
+    }
+
     if (std::strstr(name, kTargetLibrary) != nullptr) {
         const LibraryInfo library = findLauncherLibrary();
         if (library.base != 0) {
@@ -763,6 +822,7 @@ void onLibraryLoaded(const char *name, void *) {
 
 extern "C" {
 __attribute__((visibility("hidden"))) void *gSwipeGateOriginalOnSwipeProcess = nullptr;
+__attribute__((visibility("hidden"))) void *gSwipeGateOriginalOnBackInvoke = nullptr;
 
 __attribute__((visibility("hidden"))) float swipegate_hook_enter_and_gate(
         uint32_t readyFinish, uint32_t side, float horizontalDistancePx) {
@@ -773,6 +833,11 @@ __attribute__((visibility("hidden"))) float swipegate_hook_enter_and_gate(
 
 __attribute__((visibility("hidden"))) void swipegate_hook_exit() {
     gActiveHookCalls.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+__attribute__((visibility("hidden"))) void swipegate_haptic_on_back_invoke() {
+    const bool wasReady = gReadyHapticLatched.exchange(false, std::memory_order_acq_rel);
+    if (wasReady) performNativeHaptic("commit", false);
 }
 }
 
@@ -812,6 +877,8 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
             entries->version, executable.c_str(), processName.c_str(), launcherProcess ? 1 : 0,
             reinterpret_cast<void *>(entries->hook_func), reinterpret_cast<void *>(entries->unhook_func),
             static_cast<long long>(kHookHealthIntervalMs));
+    logLine(ANDROID_LOG_INFO,
+            "HAPTIC_V2 enabled policy=loader-handle-only no-dlopen no-watchdog no-hook-mutex ready=standard-27 commit=ext-0");
 
     const LibraryInfo library = findLauncherLibrary();
     if (library.base != 0) {
