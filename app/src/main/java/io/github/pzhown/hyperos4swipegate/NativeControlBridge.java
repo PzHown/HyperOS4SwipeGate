@@ -33,6 +33,8 @@ public final class NativeControlBridge {
     private static volatile String latestLog = "";
     private static volatile Snapshot latestSnapshot = Snapshot.unknown();
     private static volatile long unansweredSinceElapsedMs;
+    private static volatile String channelStage = "APP_READY";
+    private static volatile long channelEventElapsedMs = SystemClock.elapsedRealtime();
 
     private NativeControlBridge() {}
 
@@ -70,14 +72,28 @@ public final class NativeControlBridge {
         registerReplyReceiverIfNeeded();
 
         long now = SystemClock.elapsedRealtime();
-        if (unansweredSinceElapsedMs <= 0L) {
-            unansweredSinceElapsedMs = now;
+        long nonce = PENDING_NONCE.get();
+        boolean created = false;
+        if (nonce <= 0L) {
+            long candidate = SystemClock.elapsedRealtimeNanos();
+            if (candidate <= 0L) candidate = System.nanoTime();
+            if (candidate <= 0L) candidate = 1L;
+            if (PENDING_NONCE.compareAndSet(0L, candidate)) {
+                nonce = candidate;
+                unansweredSinceElapsedMs = now;
+                created = true;
+            } else {
+                nonce = PENDING_NONCE.get();
+            }
         }
+        if (nonce <= 0L) return;
+        if (unansweredSinceElapsedMs <= 0L) unansweredSinceElapsedMs = now;
 
-        long nonce = SystemClock.elapsedRealtimeNanos();
-        if (nonce <= 0L) nonce = System.nanoTime();
-        if (nonce <= 0L) nonce = 1L;
-        PENDING_NONCE.set(nonce);
+        if (created) {
+            setChannelStage("APP_QUERY_SENT");
+        } else if (now - unansweredSinceElapsedMs >= STATUS_REPLY_TIMEOUT_MS) {
+            setChannelStage("CHANNEL_TIMEOUT");
+        }
 
         int threshold = ConfigBridge.localPreferences(context)
                 .getInt(ConfigBridge.PREF_KEY_THRESHOLD_DP, ConfigBridge.DEFAULT_THRESHOLD_DP);
@@ -103,15 +119,16 @@ public final class NativeControlBridge {
             lastError = message == null || message.isBlank()
                     ? t.getClass().getSimpleName()
                     : message;
+            setChannelStage("APP_SEND_ERROR");
         }
     }
 
     public static Snapshot snapshot() {
         Snapshot current = latestSnapshot;
 
-        // A confirmed Native failure is sticky until the native side explicitly reports a newer
-        // WAITING/REPAIRING/HEALTHY state. Never turn a known failure back into "updating" merely
-        // because its heartbeat has gone stale.
+        // Only a failure explicitly reported by the native side is a Native Hook failure.
+        // Transport timeout must not be rewritten into FAILED because that hides whether the
+        // gesture hook itself is healthy and made issue #7 look like a Launcher pattern problem.
         if ("FAILED".equals(current.state())) return current;
 
         long unansweredSince = unansweredSinceElapsedMs;
@@ -119,16 +136,48 @@ public final class NativeControlBridge {
         if (!current.fresh()
                 && unansweredSince > 0L
                 && now - unansweredSince >= STATUS_REPLY_TIMEOUT_MS) {
+            setChannelStage("CHANNEL_TIMEOUT");
             String detail = lastError.isBlank()
-                    ? "Native Hook 状态回包超时；Hook 或状态通道初始化失败"
-                    : "Native Hook 状态通道异常：" + lastError;
-            return new Snapshot("FAILED", current.pattern(), detail, now);
+                    ? "Native 状态通道超时；Hook 本身尚未确认失败。stage=" + channelStage
+                    : "Native 状态通道异常：" + lastError + "；stage=" + channelStage;
+            return new Snapshot("CHANNEL_ERROR", current.pattern(), detail,
+                    current.receivedAtElapsedMs());
         }
         return current;
     }
 
     public static boolean hasFreshPeer() {
         return latestSnapshot.fresh();
+    }
+
+    public static String channelStage() {
+        return channelStage;
+    }
+
+    public static String channelDetail() {
+        return switch (channelStage) {
+            case "APP_READY" -> "App 状态通道已初始化";
+            case "APP_QUERY_SENT" -> "App 已向 SystemUI 发送状态查询";
+            case "SYSTEMUI_QUERY_RECEIVED" -> "SystemUI 已收到 App 状态查询";
+            case "CARRIER_SENT" -> "SystemUI 已向 Launcher 发送 fsgesture carrier，等待 Native 回包";
+            case "CARRIER_SEND_FAILED" -> "SystemUI 无法发送 fsgesture carrier";
+            case "NATIVE_REPLY_REJECTED" -> "SystemUI 收到 Native 回包但认证或 nonce 校验失败";
+            case "NATIVE_REPLY_RELAYED" -> "SystemUI 已把 Native 回包转发给 App";
+            case "APP_NATIVE_REPLY_RECEIVED" -> "App 已收到并验证 Native 回包";
+            case "APP_SEND_ERROR" -> "App 无法向 SystemUI 发送状态查询";
+            case "APP_RECEIVER_ERROR" -> "App 无法注册状态回包接收器";
+            case "CHANNEL_TIMEOUT" -> "状态查询持续重试但尚未收到 Native 回包";
+            default -> channelStage;
+        };
+    }
+
+    public static long channelAgeMs() {
+        long age = SystemClock.elapsedRealtime() - channelEventElapsedMs;
+        return Math.max(0L, age);
+    }
+
+    public static boolean hasPendingQuery() {
+        return PENDING_NONCE.get() > 0L;
     }
 
     public static void clearLog() {
@@ -144,15 +193,21 @@ public final class NativeControlBridge {
                                 ConfigBridge.PREF_KEY_LOG_LEVEL,
                                 ConfigBridge.DEFAULT_LOG_LEVEL));
         if (level <= ConfigBridge.LOG_LEVEL_OFF) return "日志记录已关闭。";
-        if (!latestLog.isBlank()) return latestLog;
-        if (!lastError.isBlank()) return "HyOS Runtime 通道异常：" + lastError;
+        if (!lastError.isBlank()) {
+            return "HyOS Runtime 通道异常：" + lastError
+                    + "\nstage=" + channelStage + " · " + channelDetail();
+        }
         Snapshot effective = snapshot();
+        if ("CHANNEL_ERROR".equals(effective.state())) {
+            return effective.detail() + "\nchannel=" + channelDetail();
+        }
+        if (!latestLog.isBlank()) return latestLog;
         if ("FAILED".equals(effective.state()) && !effective.detail().isBlank()) {
             return effective.detail();
         }
         if (latestSnapshot.fresh()) return "HyOS Runtime 已连接，暂无新的 Native 日志。";
         return "等待 SystemUI → HyOS Runtime 状态回包…\n"
-                + "配置和状态通过小米 fsgesture Native Broadcast 通道同步，不再使用本地端口。";
+                + "stage=" + channelStage + " · " + channelDetail();
     }
 
     private static void registerReplyReceiverIfNeeded() {
@@ -167,12 +222,16 @@ public final class NativeControlBridge {
             lastError = message == null || message.isBlank()
                     ? t.getClass().getSimpleName()
                     : message;
+            setChannelStage("APP_RECEIVER_ERROR");
         }
     }
 
     private static void pulseLoop() {
         while (true) {
             try {
+                // Re-send the same in-flight nonce until it gets a valid Native reply. 0.7.1
+                // generated a new nonce every 1.5 s, so a slower reply could always arrive after
+                // both SystemUI and the App had already moved on to another nonce.
                 requestSync();
                 Thread.sleep(PULSE_INTERVAL_MS);
             } catch (InterruptedException ignored) {
@@ -207,18 +266,43 @@ public final class NativeControlBridge {
             long expected = PENDING_NONCE.get();
             if (nonce <= 0L || nonce != expected) return;
 
+            String stage = safeString(intent.getStringExtra(SystemUiBridgeModule.EXTRA_CHANNEL_STAGE));
+            if (!stage.isBlank()) setChannelStage(stage);
+
             int state = intent.getIntExtra(SystemUiBridgeModule.EXTRA_HOOK_STATE, 0);
             String pattern = safeString(intent.getStringExtra(SystemUiBridgeModule.EXTRA_PATTERN));
             String detail = safeString(intent.getStringExtra(SystemUiBridgeModule.EXTRA_DETAIL));
             String log = safeString(intent.getStringExtra(SystemUiBridgeModule.EXTRA_NATIVE_LOG));
+
+            boolean nativeReply = "NATIVE_REPLY_RELAYED".equals(stage)
+                    || state != 0
+                    || !pattern.isBlank()
+                    || !detail.isBlank()
+                    || !log.isBlank();
+            if (!nativeReply) {
+                // This is a SystemUI transport ACK. Keep the nonce pending so the real Native reply
+                // can still complete the same request.
+                lastError = "";
+                return;
+            }
+
             latestSnapshot = new Snapshot(
                     stateName(state), pattern, detail, SystemClock.elapsedRealtime());
             if (!log.isBlank()) latestLog = log.trim();
             lastError = "";
             unansweredSinceElapsedMs = 0L;
             PENDING_NONCE.compareAndSet(nonce, 0L);
+            setChannelStage("APP_NATIVE_REPLY_RECEIVED");
         }
     };
+
+    private static void setChannelStage(String stage) {
+        if (stage == null || stage.isBlank()) return;
+        if (!stage.equals(channelStage)) {
+            channelStage = stage;
+            channelEventElapsedMs = SystemClock.elapsedRealtime();
+        }
+    }
 
     private static boolean isUidOwner(Context context, int uid, String packageName) {
         if (context == null || uid < 0) return false;
