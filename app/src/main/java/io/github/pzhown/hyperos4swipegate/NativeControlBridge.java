@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class NativeControlBridge {
     private static final long PEER_FRESH_MS = 5_000L;
+    private static final long STATUS_REPLY_TIMEOUT_MS = 6_000L;
     private static final long PULSE_INTERVAL_MS = 1_500L;
 
     private static final AtomicBoolean STARTED = new AtomicBoolean(false);
@@ -31,6 +32,7 @@ public final class NativeControlBridge {
     private static volatile String lastError = "";
     private static volatile String latestLog = "";
     private static volatile Snapshot latestSnapshot = Snapshot.unknown();
+    private static volatile long unansweredSinceElapsedMs;
 
     private NativeControlBridge() {}
 
@@ -67,6 +69,11 @@ public final class NativeControlBridge {
         if (context == null) return;
         registerReplyReceiverIfNeeded();
 
+        long now = SystemClock.elapsedRealtime();
+        if (unansweredSinceElapsedMs <= 0L) {
+            unansweredSinceElapsedMs = now;
+        }
+
         long nonce = SystemClock.elapsedRealtimeNanos();
         if (nonce <= 0L) nonce = System.nanoTime();
         if (nonce <= 0L) nonce = 1L;
@@ -100,7 +107,24 @@ public final class NativeControlBridge {
     }
 
     public static Snapshot snapshot() {
-        return latestSnapshot;
+        Snapshot current = latestSnapshot;
+
+        // A confirmed Native failure is sticky until the native side explicitly reports a newer
+        // WAITING/REPAIRING/HEALTHY state. Never turn a known failure back into "updating" merely
+        // because its heartbeat has gone stale.
+        if ("FAILED".equals(current.state())) return current;
+
+        long unansweredSince = unansweredSinceElapsedMs;
+        long now = SystemClock.elapsedRealtime();
+        if (!current.fresh()
+                && unansweredSince > 0L
+                && now - unansweredSince >= STATUS_REPLY_TIMEOUT_MS) {
+            String detail = lastError.isBlank()
+                    ? "Native Hook 状态回包超时；Hook 或状态通道初始化失败"
+                    : "Native Hook 状态通道异常：" + lastError;
+            return new Snapshot("FAILED", current.pattern(), detail, now);
+        }
+        return current;
     }
 
     public static boolean hasFreshPeer() {
@@ -122,6 +146,10 @@ public final class NativeControlBridge {
         if (level <= ConfigBridge.LOG_LEVEL_OFF) return "日志记录已关闭。";
         if (!latestLog.isBlank()) return latestLog;
         if (!lastError.isBlank()) return "HyOS Runtime 通道异常：" + lastError;
+        Snapshot effective = snapshot();
+        if ("FAILED".equals(effective.state()) && !effective.detail().isBlank()) {
+            return effective.detail();
+        }
         if (latestSnapshot.fresh()) return "HyOS Runtime 已连接，暂无新的 Native 日志。";
         return "等待 SystemUI → HyOS Runtime 状态回包…\n"
                 + "配置和状态通过小米 fsgesture Native Broadcast 通道同步，不再使用本地端口。";
@@ -187,6 +215,7 @@ public final class NativeControlBridge {
                     stateName(state), pattern, detail, SystemClock.elapsedRealtime());
             if (!log.isBlank()) latestLog = log.trim();
             lastError = "";
+            unansweredSinceElapsedMs = 0L;
             PENDING_NONCE.compareAndSet(nonce, 0L);
         }
     };
