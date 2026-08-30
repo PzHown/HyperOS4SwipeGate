@@ -281,7 +281,7 @@ internal fun HomeScreen(
                             }
                         }
                     },
-                    title = "丰富侧滑震动反馈",
+                    title = "丰富侧滑震动反馈 · Beta",
                     summary = if (hapticEnabled) {
                         "进入返回阶段，以及从侧边栏阶段退回时补充轻震反馈"
                     } else {

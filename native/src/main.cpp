@@ -1245,8 +1245,8 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     const bool hyosProcess = executable == kSpawnerPath;
     const bool launcherProcess = processName == kTargetPackage;
 
-    __android_log_print(
-            ANDROID_LOG_INFO, kTag,
+    logLine(
+            ANDROID_LOG_INFO,
             "DP_GATE native_init checks entries=%d hook=%d unhook=%d hyosExe=%d launcherCmdline=%d api=%u exe=%s process=%s",
             entriesReady ? 1 : 0, hookReady ? 1 : 0,
             entriesReady && entries->unhook_func != nullptr ? 1 : 0,

@@ -66,17 +66,32 @@ int readNativeLogLevel() {
     return kLogLevelOff;
 }
 
-bool isDetailedOnlyLine(const char *message) {
-    if (message == nullptr) return false;
-    return std::strncmp(message, "DP_GATE rawDx=", 14) == 0
-            || std::strncmp(message, "HOOK_HEALTH healthy ", 20) == 0;
+bool startsWith(const char *message, const char *prefix) {
+    if (message == nullptr || prefix == nullptr) return false;
+    return std::strncmp(message, prefix, std::strlen(prefix)) == 0;
 }
 
-bool shouldPersistForApp(const char *message) {
-    const int level = readNativeLogLevel();
+bool isDetailedOnlyLine(const char *message) {
+    if (message == nullptr) return false;
+    return startsWith(message, "DP_GATE rawDx=")
+            || startsWith(message, "HOOK_HEALTH healthy ")
+            || startsWith(message, "CONTROL_CARRIER accepted ")
+            || startsWith(message, "CONTROL_CARRIER duplicate ")
+            || startsWith(message, "CONTROL_CARRIER sender_uid ")
+            || startsWith(message, "CONTROL_CARRIER haptic field missing")
+            || startsWith(message, "NATIVE_REPLY waiting ")
+            || startsWith(message, "Runtime carrier accepted but native reply is not ready")
+            || startsWith(message, "HAPTIC_V2 feedback ");
+}
+
+bool shouldEmitAtLevel(int level, const char *message) {
     if (level <= kLogLevelOff) return false;
     if (level == kLogLevelCompact && isDetailedOnlyLine(message)) return false;
     return true;
+}
+
+bool shouldPersistForApp(const char *message) {
+    return shouldEmitAtLevel(readNativeLogLevel(), message);
 }
 
 void appendLsposedError(const char *message) {
@@ -117,9 +132,10 @@ extern "C" int __wrap___android_log_write(int priority, const char *tag, const c
     // independently of whether App log recording is enabled.
     swipegate_control_on_log(priority, text);
 
-    // Error reporting is intentionally independent from the SwipeGate App log setting. Keep the
-    // normal Android log emission and additionally retain ERROR+ lines for LSPosed-side diagnosis.
+    // ERROR+ retention remains available for diagnostics, while normal Android/LSPosed output
+    // strictly follows Off / Compact / Detailed.
     if (priority >= ANDROID_LOG_ERROR) appendLsposedError(text);
+    if (!shouldEmitAtLevel(readNativeLogLevel(), text)) return 0;
     return __real___android_log_write(priority, tag, text);
 }
 

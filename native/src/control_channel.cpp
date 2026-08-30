@@ -242,10 +242,22 @@ void persistValue(const char *fileName, int value) {
     }
 }
 
+bool startsWith(const char *text, const char *prefix) {
+    if (text == nullptr || prefix == nullptr) return false;
+    return std::strncmp(text, prefix, std::strlen(prefix)) == 0;
+}
+
 bool isDetailedOnlyLine(const char *text) {
     if (text == nullptr) return false;
-    return std::strncmp(text, "DP_GATE rawDx=", 14) == 0
-            || std::strncmp(text, "HOOK_HEALTH healthy ", 20) == 0;
+    return startsWith(text, "DP_GATE rawDx=")
+            || startsWith(text, "HOOK_HEALTH healthy ")
+            || startsWith(text, "CONTROL_CARRIER accepted ")
+            || startsWith(text, "CONTROL_CARRIER duplicate ")
+            || startsWith(text, "CONTROL_CARRIER sender_uid ")
+            || startsWith(text, "CONTROL_CARRIER haptic field missing")
+            || startsWith(text, "NATIVE_REPLY waiting ")
+            || startsWith(text, "Runtime carrier accepted but native reply is not ready")
+            || startsWith(text, "HAPTIC_V2 feedback ");
 }
 
 std::string extractPattern(const char *text) {

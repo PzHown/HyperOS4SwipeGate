@@ -164,7 +164,7 @@ internal fun SettingsScreen(
             )
             LogLevelOption(
                 title = "详细",
-                summary = "额外记录侧滑过程与周期健康状态",
+                summary = "额外记录轮询、触感反馈、侧滑过程与周期健康状态",
                 selected = logLevel == ConfigBridge.LOG_LEVEL_DETAILED,
                 onClick = { applyLogLevel(ConfigBridge.LOG_LEVEL_DETAILED) },
             )
