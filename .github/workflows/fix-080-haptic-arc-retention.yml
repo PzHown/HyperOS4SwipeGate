@@ -1,0 +1,88 @@
+name: Fix 0.8.0 haptic arc retention
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/fix-080-haptic-arc-retention.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - name: Preserve captured haptic runtime across normal rehook
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          p = Path('native/src/main.cpp')
+          s = p.read_text()
+
+          old = textwrap.dedent('''\
+                      gHapticCaptureHookInstalled.store(false, std::memory_order_release);
+                      gOriginalHapticFeedback.store(nullptr, std::memory_order_release);
+                      gCapturedHapticArc.store(0, std::memory_order_release);
+                      const int unhookRc = gUnhookFunction(targetPointer);
+          ''')
+          new = textwrap.dedent('''\
+                      // The function entry was restored, but the captured HapticFeedback runtime
+                      // belongs to the same launcher process and target. Keep the runtime pointer
+                      // across a normal rehook; otherwise feedback remains unavailable until
+                      // HyperOS happens to call the ext haptic API naturally again.
+                      gHapticCaptureHookInstalled.store(false, std::memory_order_release);
+                      gOriginalHapticFeedback.store(nullptr, std::memory_order_release);
+                      const int unhookRc = gUnhookFunction(targetPointer);
+          ''')
+          if s.count(old) != 1:
+              raise SystemExit(f'normal rehook block mismatch: {s.count(old)}')
+          s = s.replace(old, new, 1)
+
+          old_log = textwrap.dedent('''\
+                  const auto original = reinterpret_cast<HapticFeedbackFn>(gOriginalHapticFeedback.load(std::memory_order_acquire));
+                  const uintptr_t arc = gCapturedHapticArc.load(std::memory_order_acquire);
+                  if (original == nullptr || arc < 0x10000u) {
+                      bool expected = false;
+                      if (gHapticUnavailableLogged.compare_exchange_strong(expected, true)) {
+                          logLine(ANDROID_LOG_WARN, "HAPTIC skipped stage=%s reason=runtime-not-captured", stage == nullptr ? "unknown" : stage);
+                      }
+                      return false;
+                  }
+          ''')
+          new_log = textwrap.dedent('''\
+                  const auto original = reinterpret_cast<HapticFeedbackFn>(gOriginalHapticFeedback.load(std::memory_order_acquire));
+                  const uintptr_t arc = gCapturedHapticArc.load(std::memory_order_acquire);
+                  if (original == nullptr || arc < 0x10000u) {
+                      bool expected = false;
+                      if (gHapticUnavailableLogged.compare_exchange_strong(expected, true)) {
+                          const char *reason = original == nullptr
+                                  ? (arc < 0x10000u ? "hook-and-runtime-missing" : "hook-backup-missing")
+                                  : "runtime-arc-missing";
+                          logLine(ANDROID_LOG_WARN,
+                                  "HAPTIC skipped stage=%s reason=%s hook=%d arc=%p",
+                                  stage == nullptr ? "unknown" : stage, reason,
+                                  original == nullptr ? 0 : 1, reinterpret_cast<void *>(arc));
+                      }
+                      return false;
+                  }
+          ''')
+          if s.count(old_log) != 1:
+              raise SystemExit(f'haptic unavailable log block mismatch: {s.count(old_log)}')
+          s = s.replace(old_log, new_log, 1)
+
+          p.write_text(s)
+          PY
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add native/src/main.cpp
+          git commit -m 'fix: preserve captured haptic runtime across rehook'
+          git push origin HEAD:dev
