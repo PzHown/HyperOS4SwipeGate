@@ -106,7 +106,7 @@ void fileLog(const char *message) {
     for (size_t i = 0; i < 3; ++i) {
         if (i == 2 && userId != 0) break;
         if (i < 2) std::snprintf(path, sizeof(path), formats[i], userId);
-        else std::snprintf(path, sizeof(path), formats[i]);
+        else std::snprintf(path, sizeof(path), "%s", formats[i]);
         const int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
         if (fd < 0) continue;
         dprintf(fd, "%s\n", message == nullptr ? "" : message);
