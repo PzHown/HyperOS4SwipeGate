@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/apply-haptic-dedup-retry.yml'
       - 'scripts/apply_haptic_dedup_retry.py'
+      - 'scripts/apply_haptic_dedup_retry_v2.py'
 
 permissions:
   contents: write
@@ -19,7 +20,7 @@ jobs:
           ref: dev
           fetch-depth: 0
       - name: Apply patch
-        run: python3 scripts/apply_haptic_dedup_retry.py
+        run: python3 scripts/apply_haptic_dedup_retry_v2.py
       - name: Commit changes
         shell: bash
         run: |
