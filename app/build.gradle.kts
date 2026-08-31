@@ -13,7 +13,7 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // dev.11: flag-backed break-open beta setting + 750 ms Ready/Release dedup.
+        // dev.11: backing-flag break-open beta setting + 750 ms Ready/Release dedup.
         versionCode = 53
         versionName = "0.8.1-dev.11"
 
@@ -29,8 +29,8 @@ android {
 
     val ciStorePath = System.getenv("ANDROID_SIGNING_STORE_FILE")
     val ciStorePassword = System.getenv("ANDROID_SIGNING_STORE_PASSWORD")
-    val ciKeyAlias = System.getenv("ANDROID_SIGNING_KEY_ALIAS")
-    val ciKeyPassword = System.getenv("ANDROID_SIGNING_KEY_PASSWORD")
+    val ciKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
+    val ciKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
     val ciSigningConfig = if (
         !ciStorePath.isNullOrBlank()
         && !ciStorePassword.isNullOrBlank()
