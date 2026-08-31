@@ -1,3 +1,5 @@
+#include "native_api.h"
+
 #include <android/log.h>
 #include <fcntl.h>
 #include <link.h>
@@ -7,7 +9,6 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -38,9 +39,9 @@ struct PatternWord {
     uint32_t mask;
 };
 
-// 6174 reference fingerprints. They intentionally mask only PC-relative fields that
-// are expected to move between nearby Launcher builds. Every pattern was verified to
-// be unique inside the 6174 executable ranges. Unknown layouts fail closed.
+// 6174 reference fingerprints, corroborated on 6179 by the observe-only probe.
+// Only PC-relative fields expected to move are masked. All three related targets must
+// resolve uniquely before the beta hook is allowed to install; otherwise it fails closed.
 constexpr uint32_t kMaskAdrp = 0x9f00001fU;
 constexpr uint32_t kMaskAddImm12 = 0xffc003ffU;
 constexpr uint32_t kMaskCompareBranchImm = 0xff00001fU;
@@ -91,6 +92,8 @@ constexpr PatternWord kHandleBackGesturePattern[] = {
         {0xd107c3ffU, 0xffffffffU},
 };
 
+using MergeSupportFn = uint32_t (*)();
+
 std::atomic<bool> gResolverStarted{false};
 std::atomic<bool> gResolverReady{false};
 std::atomic<uintptr_t> gLauncherBase{0};
@@ -102,6 +105,11 @@ std::atomic<size_t> gCanUseBreakOpenMatches{0};
 std::atomic<size_t> gHandleBackGestureMatches{0};
 std::atomic<int64_t> gLastSwipeAtMs{0};
 std::atomic<uint64_t> gProbeSequence{0};
+std::atomic<HookFunType> gHookFunction{nullptr};
+std::atomic<void *> gOriginalMergeSupport{nullptr};
+std::atomic<bool> gMergeHookInstalled{false};
+std::atomic<bool> gMergeHookAttempted{false};
+std::atomic<uint64_t> gMergeHookCalls{0};
 
 int64_t monotonicMs() {
     timespec ts{};
@@ -200,6 +208,70 @@ uintptr_t resolveUnique(const LibraryInfo &library, const PatternWord (&pattern)
     return matches == 1 ? found : 0;
 }
 
+uint32_t mergeSupportHook() {
+    const auto original = reinterpret_cast<MergeSupportFn>(
+            gOriginalMergeSupport.load(std::memory_order_acquire));
+    const uint32_t stock = original == nullptr ? 0U : (original() & 1U);
+    const uint64_t calls = gMergeHookCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (calls <= 8 || (calls % 128U) == 0U) {
+        probeLog(ANDROID_LOG_INFO,
+                 "BREAK_OPEN_BETA merge-support call=%llu stock=%u forced=1 preserve-can-use-gate=1",
+                 static_cast<unsigned long long>(calls), stock);
+    }
+    return 1U;
+}
+
+void installMergeSupportHookIfReady() {
+    if (!isLauncherProcess() || gMergeHookInstalled.load(std::memory_order_acquire)) return;
+    if (!gResolverReady.load(std::memory_order_acquire)) return;
+
+    const HookFunType hookFunction = gHookFunction.load(std::memory_order_acquire);
+    if (hookFunction == nullptr) return;
+
+    const uintptr_t target = gMergeSupportTarget.load(std::memory_order_acquire);
+    const size_t mergeMatches = gMergeSupportMatches.load(std::memory_order_acquire);
+    const size_t canUseMatches = gCanUseBreakOpenMatches.load(std::memory_order_acquire);
+    const size_t handleMatches = gHandleBackGestureMatches.load(std::memory_order_acquire);
+    if (target == 0 || mergeMatches != 1 || canUseMatches != 1 || handleMatches != 1) {
+        bool expected = false;
+        if (gMergeHookAttempted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+            probeLog(ANDROID_LOG_WARN,
+                     "BREAK_OPEN_BETA install refused mergeTarget=%p matches=%zu/%zu/%zu failClosed=1",
+                     reinterpret_cast<void *>(target), mergeMatches, canUseMatches, handleMatches);
+        }
+        return;
+    }
+
+    bool expected = false;
+    if (!gMergeHookAttempted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
+
+    const auto stockFunction = reinterpret_cast<MergeSupportFn>(target);
+    const uint32_t stockBeforeHook = stockFunction() & 1U;
+    if (stockBeforeHook != 0U) {
+        gMergeHookInstalled.store(true, std::memory_order_release);
+        probeLog(ANDROID_LOG_INFO,
+                 "BREAK_OPEN_BETA stock merge support already enabled target=%p; no override needed",
+                 reinterpret_cast<void *>(target));
+        return;
+    }
+
+    void *backup = nullptr;
+    const int rc = hookFunction(reinterpret_cast<void *>(target),
+                                reinterpret_cast<void *>(mergeSupportHook), &backup);
+    if (rc != 0 || backup == nullptr) {
+        probeLog(ANDROID_LOG_ERROR,
+                 "BREAK_OPEN_BETA hook failed rc=%d target=%p backup=%p",
+                 rc, reinterpret_cast<void *>(target), backup);
+        return;
+    }
+
+    gOriginalMergeSupport.store(backup, std::memory_order_release);
+    gMergeHookInstalled.store(true, std::memory_order_release);
+    probeLog(ANDROID_LOG_INFO,
+             "BREAK_OPEN_BETA hook installed target=%p stockBefore=0 forced=1 preserveCanUseGate=1 preserveHandleBackGesture=1",
+             reinterpret_cast<void *>(target));
+}
+
 void resolverWorker() {
     if (!isLauncherProcess()) return;
 
@@ -228,10 +300,11 @@ void resolverWorker() {
     gResolverReady.store(true, std::memory_order_release);
 
     probeLog(ANDROID_LOG_INFO,
-             "BREAK_OPEN_PROBE resolver ready base=%p mergeTarget=%p mergeMatches=%zu canUseTarget=%p canUseMatches=%zu handleTarget=%p handleMatches=%zu observeOnly=1",
+             "BREAK_OPEN_PROBE resolver ready base=%p mergeTarget=%p mergeMatches=%zu canUseTarget=%p canUseMatches=%zu handleTarget=%p handleMatches=%zu betaOverride=1",
              reinterpret_cast<void *>(library.base), reinterpret_cast<void *>(mergeTarget), mergeMatches,
              reinterpret_cast<void *>(canUseTarget), canUseMatches,
              reinterpret_cast<void *>(handleTarget), handleMatches);
+    installMergeSupportHookIfReady();
 }
 
 void ensureResolverStarted() {
@@ -240,16 +313,21 @@ void ensureResolverStarted() {
     std::thread(resolverWorker).detach();
 }
 
-__attribute__((constructor)) void startBackBreakProbeResolver() {
-    ensureResolverStarted();
-}
-
 }  // namespace
+
+extern "C" __attribute__((visibility("hidden"))) void swipegate_back_break_enable(
+        HookFunType hookFunction) {
+    if (!isLauncherProcess() || hookFunction == nullptr) return;
+    gHookFunction.store(hookFunction, std::memory_order_release);
+    ensureResolverStarted();
+    installMergeSupportHookIfReady();
+}
 
 extern "C" __attribute__((visibility("hidden"))) void swipegate_back_break_probe_on_swipe(
         uint32_t readyFinish, uint32_t side, float horizontalDistancePx) {
     if (!isLauncherProcess()) return;
     ensureResolverStarted();
+    installMergeSupportHookIfReady();
 
     const int64_t now = monotonicMs();
     const int64_t previous = gLastSwipeAtMs.exchange(now, std::memory_order_acq_rel);
@@ -263,16 +341,17 @@ extern "C" __attribute__((visibility("hidden"))) void swipegate_back_break_probe
 
     int mergeSupport = -1;
     if (ready && mergeTarget != 0) {
-        using MergeSupportFn = uint32_t (*)();
         const auto fn = reinterpret_cast<MergeSupportFn>(mergeTarget);
         mergeSupport = static_cast<int>(fn() & 1U);
     }
 
     const uint64_t sequence = gProbeSequence.fetch_add(1, std::memory_order_acq_rel) + 1;
     probeLog(ANDROID_LOG_INFO,
-             "BREAK_OPEN_PROBE swipe seq=%llu resolverReady=%d readyFinish=%u side=%u dx=%.2f mergeSupport=%d base=%p mergeOffset=0x%zx canUseOffset=0x%zx handleOffset=0x%zx matches=%zu/%zu/%zu observeOnly=1",
+             "BREAK_OPEN_PROBE swipe seq=%llu resolverReady=%d readyFinish=%u side=%u dx=%.2f mergeSupport=%d hookInstalled=%d base=%p mergeOffset=0x%zx canUseOffset=0x%zx handleOffset=0x%zx matches=%zu/%zu/%zu betaOverride=1",
              static_cast<unsigned long long>(sequence), ready ? 1 : 0, readyFinish, side,
-             horizontalDistancePx, mergeSupport, reinterpret_cast<void *>(base),
+             horizontalDistancePx, mergeSupport,
+             gMergeHookInstalled.load(std::memory_order_acquire) ? 1 : 0,
+             reinterpret_cast<void *>(base),
              mergeTarget != 0 && base != 0 ? static_cast<size_t>(mergeTarget - base) : 0U,
              canUseTarget != 0 && base != 0 ? static_cast<size_t>(canUseTarget - base) : 0U,
              handleTarget != 0 && base != 0 ? static_cast<size_t>(handleTarget - base) : 0U,
