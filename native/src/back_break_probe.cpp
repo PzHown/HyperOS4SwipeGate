@@ -1,5 +1,6 @@
 #include "native_api.h"
 #include "control_channel.h"
+#include "hook_page_guard.h"
 
 #include <android/log.h>
 #include <fcntl.h>
@@ -243,8 +244,9 @@ bool installHookLocked(const char *source) {
     }
 
     void *backup = nullptr;
-    const int rc = hookFunction(reinterpret_cast<void *>(target),
-                                reinterpret_cast<void *>(mergeSupportHook), &backup);
+    const int rc = swipegate_install_protected_inline_hook(
+            hookFunction, reinterpret_cast<void *>(target),
+            reinterpret_cast<void *>(mergeSupportHook), &backup);
     if (rc != 0 || backup == nullptr) {
         logLine(ANDROID_LOG_ERROR,
                 "BREAK_OPEN_HEALTH hook failed source=%s rc=%d target=%p backup=%p",

@@ -8,6 +8,7 @@ add_library(
         src/swipe_semantic_resolver.cpp
         src/swipe_hook_entry.S
         src/back_break_probe.cpp
+        src/hook_page_guard.cpp
         src/config_reader.cpp
         src/log_filter.cpp
         src/control_channel.cpp

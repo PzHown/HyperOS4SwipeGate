@@ -13,9 +13,9 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // dev.12: self-healing function-scoped break-open beta; backing flag mutation removed; startup crash fix.
-        versionCode = 54
-        versionName = "0.8.1-dev.12"
+        // dev.13: HyperRT MADV_DONTNEED page guard + self-healing hook fallback + 750 ms dedup.
+        versionCode = 55
+        versionName = "0.8.1-dev.13"
 
         ndk {
             abiFilters += "arm64-v8a"

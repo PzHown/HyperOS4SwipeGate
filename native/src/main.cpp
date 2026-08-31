@@ -1,6 +1,7 @@
 #include "native_api.h"
 #include "swipe_semantic_resolver.h"
 #include "control_channel.h"
+#include "hook_page_guard.h"
 
 #include <android/log.h>
 #include <elf.h>
@@ -695,8 +696,8 @@ bool installHapticCaptureHookTarget(void *target, const char *source) {
     }
 
     void *backup = nullptr;
-    const int rc = gHookFunction(
-            target, reinterpret_cast<void *>(hapticFeedbackCaptureHook), &backup);
+    const int rc = swipegate_install_protected_inline_hook(
+            gHookFunction, target, reinterpret_cast<void *>(hapticFeedbackCaptureHook), &backup);
     if (rc != 0 || backup == nullptr) {
         logLine(ANDROID_LOG_ERROR,
                 "HAPTIC_V2 capture hook failed source=%s rc=%d target=%p backup=%p",
@@ -956,8 +957,8 @@ bool installBackInvokeHapticHook(const LibraryInfo &library) {
     }
 
     void *backup = nullptr;
-    const int rc = gHookFunction(
-            reinterpret_cast<void *>(target),
+    const int rc = swipegate_install_protected_inline_hook(
+            gHookFunction, reinterpret_cast<void *>(target),
             reinterpret_cast<void *>(swipegate_on_back_invoke_hook), &backup);
     if (rc != 0 || backup == nullptr) {
         logLine(ANDROID_LOG_ERROR,
@@ -1077,8 +1078,9 @@ bool installFreshHookLocked(const LibraryInfo &library, uintptr_t target,
 
     __atomic_store_n(&gSwipeGateOriginalOnSwipeProcess, nullptr, __ATOMIC_RELEASE);
     void *backup = nullptr;
-    const int rc = gHookFunction(reinterpret_cast<void *>(target),
-                                 reinterpret_cast<void *>(swipegate_on_swipe_process_hook), &backup);
+    const int rc = swipegate_install_protected_inline_hook(
+            gHookFunction, reinterpret_cast<void *>(target),
+            reinterpret_cast<void *>(swipegate_on_swipe_process_hook), &backup);
     if (rc != 0 || backup == nullptr) {
         gHookInstalled.store(false, std::memory_order_release);
         logLine(ANDROID_LOG_ERROR,
