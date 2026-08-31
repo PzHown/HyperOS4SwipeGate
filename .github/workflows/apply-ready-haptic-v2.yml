@@ -6,6 +6,7 @@ on:
       - dev
     paths:
       - scripts/apply_ready_haptic_v2.py
+      - .github/workflows/apply-ready-haptic-v2.yml
   workflow_dispatch:
 
 permissions:
