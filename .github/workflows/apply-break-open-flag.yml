@@ -19,7 +19,22 @@ jobs:
           fetch-depth: 0
 
       - name: Apply patch
-        run: python3 scripts/apply_break_open_flag.py
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/apply_break_open_flag.py')
+          s = p.read_text()
+          old = "'''    bool hapticEnabled = false;\n    const bool markerRead = readNativeBool(extras, kMarkerExtra, &marker);'''"
+          new = "'''    bool hapticEnabled = false;\n    int64_t nonce = 0;\n\n    const bool markerRead = readNativeBool(extras, kMarkerExtra, &marker);'''"
+          old2 = "'''    bool hapticEnabled = false;\n    bool breakOpenEnabled = false;\n    const bool markerRead = readNativeBool(extras, kMarkerExtra, &marker);'''"
+          new2 = "'''    bool hapticEnabled = false;\n    bool breakOpenEnabled = false;\n    int64_t nonce = 0;\n\n    const bool markerRead = readNativeBool(extras, kMarkerExtra, &marker);'''"
+          if old not in s or old2 not in s:
+              raise SystemExit('normalize: expected carrier literals not found')
+          p.write_text(s.replace(old, new, 1).replace(old2, new2, 1))
+          PY
+          python3 scripts/apply_break_open_flag.py
+          rm -f scripts/apply_break_open_flag.py
 
       - name: Validate patch
         shell: bash
