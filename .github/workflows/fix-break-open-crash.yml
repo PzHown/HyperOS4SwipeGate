@@ -1,0 +1,76 @@
+name: Fix break-open startup crash
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/fix-break-open-crash.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - name: Wire self-healing break-open hook
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('native/src/main.cpp')
+          s = p.read_text()
+          old = '__attribute__((visibility("hidden"))) void swipegate_back_break_enable(HookFunType hookFunction);\n'
+          new = ('__attribute__((visibility("hidden"))) void swipegate_back_break_enable(\n'
+                 '        HookFunType hookFunction, UnhookFunType unhookFunction);\n'
+                 '__attribute__((visibility("hidden"))) void swipegate_back_break_maintain();\n')
+          if s.count(old) != 1:
+              raise SystemExit(f'enable declaration matches={s.count(old)}')
+          s = s.replace(old, new, 1)
+
+          old = '            ensureHook(library, "watchdog");\n'
+          new = '            ensureHook(library, "watchdog");\n            swipegate_back_break_maintain();\n'
+          if s.count(old) != 1:
+              raise SystemExit(f'watchdog insertion matches={s.count(old)}')
+          s = s.replace(old, new, 1)
+
+          old = '    if (launcherProcess) swipegate_back_break_enable(entries->hook_func);\n'
+          new = '    if (launcherProcess) swipegate_back_break_enable(entries->hook_func, entries->unhook_func);\n'
+          if s.count(old) != 1:
+              raise SystemExit(f'native_init call matches={s.count(old)}')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path('app/build.gradle.kts')
+          s = p.read_text()
+          if 'versionCode = 53' not in s or 'versionName = "0.8.1-dev.11"' not in s:
+              raise SystemExit('unexpected version')
+          s = s.replace('versionCode = 53', 'versionCode = 54', 1)
+          s = s.replace('versionName = "0.8.1-dev.11"', 'versionName = "0.8.1-dev.12"', 1)
+          s = s.replace('// dev.11: backing-flag break-open beta setting + 750 ms Ready/Release dedup.',
+                        '// dev.12: self-healing function-scoped break-open beta; backing flag mutation removed.')
+          p.write_text(s)
+
+          Path('.github/workflows/fix-break-open-crash.yml').unlink()
+          PY
+      - name: Validate
+        shell: bash
+        run: |
+          git diff --check
+          grep -q 'swipegate_back_break_maintain' native/src/main.cpp
+          grep -q 'swipegate_back_break_enable(entries->hook_func, entries->unhook_func)' native/src/main.cpp
+          grep -q 'versionName = "0.8.1-dev.12"' app/build.gradle.kts
+          grep -q 'backingFlagUntouched=1' native/src/back_break_probe.cpp
+      - name: Commit
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: avoid unsafe break-open backing flag mutation"
+          git push origin HEAD:dev
