@@ -42,6 +42,7 @@ constexpr const char *kNonceExtra = "swipegate_nonce";
 constexpr const char *kThresholdExtra = "swipegate_threshold_dp";
 constexpr const char *kLogLevelExtra = "swipegate_log_level";
 constexpr const char *kHapticEnabledExtra = "swipegate_haptic_enabled";
+constexpr const char *kBreakOpenEnabledExtra = "swipegate_break_open_enabled";
 constexpr const char *kHookStateExtra = "swipegate_hook_state";
 constexpr const char *kPatternExtra = "swipegate_pattern";
 constexpr const char *kDetailExtra = "swipegate_detail";
@@ -50,6 +51,7 @@ constexpr const char *kSenderUidExtra = "sender_uid";
 
 constexpr const char *kConfigFileName = "hyperos4swipegate_config";
 constexpr const char *kLogLevelFileName = "hyperos4swipegate_log_level";
+constexpr const char *kBreakOpenFileName = "hyperos4swipegate_break_open";
 constexpr int kAndroidUserOffset = 100000;
 constexpr int kMinThresholdDp = 88;
 constexpr int kMaxThresholdDp = 300;
@@ -147,6 +149,7 @@ std::atomic<int64_t> gLastAcceptedCarrierNonce{0};
 int gThresholdDp = -1;
 int gLogLevel = -1;
 int gHapticEnabled = -1;
+int gBreakOpenEnabled = -1;
 HookState gHookState = kHookWaiting;
 std::string gPattern;
 std::string gDetail = "Native 模块已加载，等待 HyOS Runtime / Hook";
@@ -650,6 +653,7 @@ void handleControlCarrier(void *intent) {
     int32_t thresholdDp = -1;
     int32_t logLevel = -1;
     bool hapticEnabled = false;
+    bool breakOpenEnabled = false;
     int64_t nonce = 0;
 
     const bool markerRead = readNativeBool(extras, kMarkerExtra, &marker);
@@ -658,8 +662,10 @@ void handleControlCarrier(void *intent) {
     const bool thresholdRead = readNativeI32(extras, kThresholdExtra, &thresholdDp);
     const bool logLevelRead = readNativeI32(extras, kLogLevelExtra, &logLevel);
     const bool hapticFieldPresent = readNativeBool(extras, kHapticEnabledExtra, &hapticEnabled);
+    const bool breakOpenFieldPresent = readNativeBool(
+            extras, kBreakOpenEnabledExtra, &breakOpenEnabled);
 
-    char carrierLog[320]{};
+    char carrierLog[384]{};
     if (!markerRead || !marker) {
         std::snprintf(carrierLog, sizeof(carrierLog),
                       "CONTROL_CARRIER rejected reason=marker read=%d value=%d",
@@ -708,6 +714,15 @@ void handleControlCarrier(void *intent) {
                   "CONTROL_CARRIER haptic field missing; preserving previous/default state");
     }
 
+    if (!breakOpenFieldPresent) {
+        {
+            SpinGuard guard;
+            breakOpenEnabled = gBreakOpenEnabled == 1;
+        }
+        bridgeLog(ANDROID_LOG_WARN,
+                  "CONTROL_CARRIER break-open field missing; preserving previous/default state");
+    }
+
     const int64_t previousNonce = gLastAcceptedCarrierNonce.exchange(
             nonce, std::memory_order_acq_rel);
     if (previousNonce == nonce) {
@@ -721,23 +736,27 @@ void handleControlCarrier(void *intent) {
     bool thresholdChanged;
     bool logLevelChanged;
     bool hapticChanged;
+    bool breakOpenChanged;
     {
         SpinGuard guard;
         thresholdChanged = gThresholdDp != thresholdDp;
         logLevelChanged = gLogLevel != logLevel;
         hapticChanged = gHapticEnabled != (hapticEnabled ? 1 : 0);
+        breakOpenChanged = gBreakOpenEnabled != (breakOpenEnabled ? 1 : 0);
         gThresholdDp = thresholdDp;
         gLogLevel = logLevel;
         gHapticEnabled = hapticEnabled ? 1 : 0;
+        gBreakOpenEnabled = breakOpenEnabled ? 1 : 0;
         if (logLevel <= 0) gAppLog.clear();
     }
     if (thresholdChanged) persistValue(kConfigFileName, thresholdDp);
     if (logLevelChanged) persistValue(kLogLevelFileName, logLevel);
+    if (breakOpenChanged) persistValue(kBreakOpenFileName, breakOpenEnabled ? 1 : 0);
 
     std::snprintf(carrierLog, sizeof(carrierLog),
-                  "CONTROL_CARRIER accepted nonce=%lld threshold=%d logLevel=%d haptic=%d senderUidRead=%d",
+                  "CONTROL_CARRIER accepted nonce=%lld threshold=%d logLevel=%d haptic=%d breakOpen=%d senderUidRead=%d",
                   static_cast<long long>(nonce), thresholdDp, logLevel, hapticEnabled ? 1 : 0,
-                  senderUidRead ? 1 : 0);
+                  breakOpenEnabled ? 1 : 0, senderUidRead ? 1 : 0);
     bridgeLog(ANDROID_LOG_INFO, carrierLog);
 
     if (!sendNativeReply(nonce)) {
@@ -897,6 +916,11 @@ extern "C" int swipegate_control_log_level() {
 extern "C" int swipegate_control_haptic_enabled() {
     SpinGuard guard;
     return gHapticEnabled;
+}
+
+extern "C" int swipegate_control_break_open_enabled() {
+    SpinGuard guard;
+    return gBreakOpenEnabled;
 }
 
 extern "C" void swipegate_control_on_log(int, const char *text) {

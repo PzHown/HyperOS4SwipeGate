@@ -1,4 +1,5 @@
 #include "native_api.h"
+#include "control_channel.h"
 
 #include <android/log.h>
 #include <fcntl.h>
@@ -20,96 +21,63 @@ namespace {
 constexpr const char *kTag = "HyperOS4SwipeGateNative";
 constexpr const char *kTargetPackage = "com.miui.home";
 constexpr const char *kTargetLibrary = "libapp_launcher.so";
-constexpr size_t kMaxExecutableRanges = 16;
-constexpr int64_t kNewGestureGapMs = 450;
+constexpr const char *kPersistedBreakOpenFile = "hyperos4swipegate_break_open";
+constexpr size_t kMaxRanges = 16;
+constexpr int kAndroidUserOffset = 100000;
+constexpr int64_t kFlagGuardIntervalMs = 100;
+constexpr int64_t kStatusLogIntervalMs = 30000;
 
-struct ExecutableRange {
-    uintptr_t start = 0;
-    size_t size = 0;
-};
-
+struct Range { uintptr_t start = 0; size_t size = 0; };
 struct LibraryInfo {
     uintptr_t base = 0;
-    std::array<ExecutableRange, kMaxExecutableRanges> executableRanges{};
+    std::array<Range, kMaxRanges> executableRanges{};
     size_t executableRangeCount = 0;
+    std::array<Range, kMaxRanges> writableRanges{};
+    size_t writableRangeCount = 0;
 };
+struct PatternWord { uint32_t value; uint32_t mask; };
 
-struct PatternWord {
-    uint32_t value;
-    uint32_t mask;
-};
-
-// 6174 reference fingerprints, corroborated on 6179 by the observe-only probe.
-// Only PC-relative fields expected to move are masked. All three related targets must
-// resolve uniquely before the beta hook is allowed to install; otherwise it fails closed.
 constexpr uint32_t kMaskAdrp = 0x9f00001fU;
 constexpr uint32_t kMaskAddImm12 = 0xffc003ffU;
 constexpr uint32_t kMaskCompareBranchImm = 0xff00001fU;
 
 constexpr PatternWord kMergeSupportPattern[] = {
-        {0x90004288U, kMaskAdrp},
-        {0x9133a108U, 0xffffffffU},
-        {0x88dffd08U, 0xffffffffU},
-        {0x350000c8U, kMaskCompareBranchImm},
-        {0x90004288U, kMaskAdrp},
-        {0x39738108U, 0xffffffffU},
-        {0x7100011fU, 0xffffffffU},
-        {0x1a9f07e0U, 0xffffffffU},
+        {0x90004288U, kMaskAdrp}, {0x9133a108U, 0xffffffffU},
+        {0x88dffd08U, 0xffffffffU}, {0x350000c8U, kMaskCompareBranchImm},
+        {0x90004288U, kMaskAdrp}, {0x39738108U, 0xffffffffU},
+        {0x7100011fU, 0xffffffffU}, {0x1a9f07e0U, 0xffffffffU},
         {0xd65f03c0U, 0xffffffffU},
 };
-
 constexpr PatternWord kCanUseBreakOpenPattern[] = {
-        {0xd10303ffU, 0xffffffffU},
-        {0xa9087bfdU, 0xffffffffU},
-        {0xf9004bf7U, 0xffffffffU},
-        {0xa90a57f6U, 0xffffffffU},
-        {0xa90b4ff4U, 0xffffffffU},
-        {0x910203fdU, 0xffffffffU},
-        {0xf0ffd3a8U, kMaskAdrp},
-        {0x9125e908U, kMaskAddImm12},
-        {0xb0ffcfe9U, kMaskAdrp},
-        {0x91376929U, kMaskAddImm12},
-        {0x7100001fU, 0xffffffffU},
-        {0x528000eaU, 0xffffffffU},
-        {0x528000abU, 0xffffffffU},
-        {0x9a881128U, 0xffffffffU},
-        {0x90003436U, kMaskAdrp},
-        {0x9a8a1169U, 0xffffffffU},
-        {0x2a0003f3U, 0xffffffffU},
-        {0xa90027e8U, 0xffffffffU},
+        {0xd10303ffU, 0xffffffffU}, {0xa9087bfdU, 0xffffffffU},
+        {0xf9004bf7U, 0xffffffffU}, {0xa90a57f6U, 0xffffffffU},
+        {0xa90b4ff4U, 0xffffffffU}, {0x910203fdU, 0xffffffffU},
+        {0xf0ffd3a8U, kMaskAdrp}, {0x9125e908U, kMaskAddImm12},
+        {0xb0ffcfe9U, kMaskAdrp}, {0x91376929U, kMaskAddImm12},
+        {0x7100001fU, 0xffffffffU}, {0x528000eaU, 0xffffffffU},
+        {0x528000abU, 0xffffffffU}, {0x9a881128U, 0xffffffffU},
+        {0x90003436U, kMaskAdrp}, {0x9a8a1169U, 0xffffffffU},
+        {0x2a0003f3U, 0xffffffffU}, {0xa90027e8U, 0xffffffffU},
 };
-
 constexpr PatternWord kHandleBackGesturePattern[] = {
-        {0x6db82bebU, 0xffffffffU},
-        {0x6d0123e9U, 0xffffffffU},
-        {0xa9027bfdU, 0xffffffffU},
-        {0xa9036ffcU, 0xffffffffU},
-        {0xa90467faU, 0xffffffffU},
-        {0xa9055ff8U, 0xffffffffU},
-        {0xa90657f6U, 0xffffffffU},
-        {0xa9074ff4U, 0xffffffffU},
-        {0x910083fdU, 0xffffffffU},
-        {0xd107c3ffU, 0xffffffffU},
+        {0x6db82bebU, 0xffffffffU}, {0x6d0123e9U, 0xffffffffU},
+        {0xa9027bfdU, 0xffffffffU}, {0xa9036ffcU, 0xffffffffU},
+        {0xa90467faU, 0xffffffffU}, {0xa9055ff8U, 0xffffffffU},
+        {0xa90657f6U, 0xffffffffU}, {0xa9074ff4U, 0xffffffffU},
+        {0x910083fdU, 0xffffffffU}, {0xd107c3ffU, 0xffffffffU},
 };
 
-using MergeSupportFn = uint32_t (*)();
+enum class FlagKind : int { None = 0, FeatureByte = 1, RuntimeAtomic = 2 };
 
-std::atomic<bool> gResolverStarted{false};
+std::atomic<bool> gWorkerStarted{false};
 std::atomic<bool> gResolverReady{false};
 std::atomic<uintptr_t> gLauncherBase{0};
-std::atomic<uintptr_t> gMergeSupportTarget{0};
-std::atomic<uintptr_t> gCanUseBreakOpenTarget{0};
-std::atomic<uintptr_t> gHandleBackGestureTarget{0};
-std::atomic<size_t> gMergeSupportMatches{0};
-std::atomic<size_t> gCanUseBreakOpenMatches{0};
-std::atomic<size_t> gHandleBackGestureMatches{0};
-std::atomic<int64_t> gLastSwipeAtMs{0};
-std::atomic<uint64_t> gProbeSequence{0};
-std::atomic<HookFunType> gHookFunction{nullptr};
-std::atomic<void *> gOriginalMergeSupport{nullptr};
-std::atomic<bool> gMergeHookInstalled{false};
-std::atomic<bool> gMergeHookAttempted{false};
-std::atomic<uint64_t> gMergeHookCalls{0};
+std::atomic<uintptr_t> gMergeTarget{0};
+std::atomic<uintptr_t> gSelectedFlag{0};
+std::atomic<int> gFlagKind{static_cast<int>(FlagKind::None)};
+std::atomic<uint32_t> gStockFlagValue{0};
+std::atomic<bool> gFlagApplied{false};
+std::atomic<int64_t> gLastStatusLogMs{0};
 
 int64_t monotonicMs() {
     timespec ts{};
@@ -118,23 +86,27 @@ int64_t monotonicMs() {
 }
 
 bool isLauncherProcess() {
-    int fd = open("/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
+    const int fd = open("/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
     if (fd < 0) return false;
     char buffer[256]{};
     const ssize_t n = read(fd, buffer, sizeof(buffer) - 1);
     close(fd);
     if (n <= 0) return false;
-    buffer[sizeof(buffer) - 1] = '\0';
     return std::strcmp(buffer, kTargetPackage) == 0;
 }
 
 void fileLog(const char *message) {
-    static constexpr const char *paths[] = {
-            "/data/user_de/0/com.miui.home/cache/hyperos4swipegate_native.log",
-            "/data/user/0/com.miui.home/cache/hyperos4swipegate_native.log",
+    const int userId = static_cast<int>(getuid()) / kAndroidUserOffset;
+    char path[256]{};
+    const char *formats[] = {
+            "/data/user_de/%d/com.miui.home/cache/hyperos4swipegate_native.log",
+            "/data/user/%d/com.miui.home/cache/hyperos4swipegate_native.log",
             "/data/data/com.miui.home/cache/hyperos4swipegate_native.log",
     };
-    for (const char *path : paths) {
+    for (size_t i = 0; i < 3; ++i) {
+        if (i == 2 && userId != 0) break;
+        if (i < 2) std::snprintf(path, sizeof(path), formats[i], userId);
+        else std::snprintf(path, sizeof(path), formats[i]);
         const int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
         if (fd < 0) continue;
         dprintf(fd, "%s\n", message == nullptr ? "" : message);
@@ -143,7 +115,7 @@ void fileLog(const char *message) {
     }
 }
 
-void probeLog(int priority, const char *format, ...) {
+void logLine(int priority, const char *format, ...) {
     char buffer[1024]{};
     va_list ap;
     va_start(ap, format);
@@ -153,20 +125,20 @@ void probeLog(int priority, const char *format, ...) {
     fileLog(buffer);
 }
 
-int libraryCallback(dl_phdr_info *info, size_t, void *data) {
+int libraryCallback(dl_phdr_info *info, size_t, void *opaque) {
     if (info == nullptr || info->dlpi_name == nullptr) return 0;
     if (std::strstr(info->dlpi_name, kTargetLibrary) == nullptr) return 0;
-
-    auto *result = static_cast<LibraryInfo *>(data);
-    result->base = static_cast<uintptr_t>(info->dlpi_addr);
-    result->executableRangeCount = 0;
+    auto *out = static_cast<LibraryInfo *>(opaque);
+    out->base = static_cast<uintptr_t>(info->dlpi_addr);
     for (ElfW(Half) i = 0; i < info->dlpi_phnum; ++i) {
         const ElfW(Phdr) &phdr = info->dlpi_phdr[i];
-        if (phdr.p_type != PT_LOAD || phdr.p_memsz == 0 || (phdr.p_flags & PF_X) == 0) continue;
-        if (result->executableRangeCount >= result->executableRanges.size()) break;
-        auto &range = result->executableRanges[result->executableRangeCount++];
-        range.start = result->base + static_cast<uintptr_t>(phdr.p_vaddr);
-        range.size = static_cast<size_t>(phdr.p_memsz);
+        if (phdr.p_type != PT_LOAD || phdr.p_memsz == 0) continue;
+        const Range range{out->base + static_cast<uintptr_t>(phdr.p_vaddr),
+                          static_cast<size_t>(phdr.p_memsz)};
+        if ((phdr.p_flags & PF_X) != 0 && out->executableRangeCount < kMaxRanges)
+            out->executableRanges[out->executableRangeCount++] = range;
+        if ((phdr.p_flags & PF_W) != 0 && out->writableRangeCount < kMaxRanges)
+            out->writableRanges[out->writableRangeCount++] = range;
     }
     return 1;
 }
@@ -177,185 +149,241 @@ LibraryInfo findLauncherLibrary() {
     return result;
 }
 
+bool contains(const Range &range, uintptr_t address, size_t size) {
+    if (range.start == 0 || range.size == 0 || address < range.start) return false;
+    const uintptr_t end = address + size;
+    return end >= address && end <= range.start + range.size;
+}
+
+bool isWritable(const LibraryInfo &library, uintptr_t address, size_t size) {
+    for (size_t i = 0; i < library.writableRangeCount; ++i)
+        if (contains(library.writableRanges[i], address, size)) return true;
+    return false;
+}
+
 template <size_t N>
 bool patternMatches(uintptr_t address, const PatternWord (&pattern)[N]) {
     for (size_t i = 0; i < N; ++i) {
         uint32_t word = 0;
-        std::memcpy(&word, reinterpret_cast<const void *>(address + i * sizeof(uint32_t)), sizeof(word));
+        std::memcpy(&word, reinterpret_cast<const void *>(address + i * 4U), 4);
         if ((word & pattern[i].mask) != (pattern[i].value & pattern[i].mask)) return false;
     }
     return true;
 }
 
 template <size_t N>
-uintptr_t resolveUnique(const LibraryInfo &library, const PatternWord (&pattern)[N], size_t *matchCount) {
+uintptr_t resolveUnique(const LibraryInfo &library, const PatternWord (&pattern)[N], size_t *countOut) {
     uintptr_t found = 0;
-    size_t matches = 0;
-    const size_t patternBytes = N * sizeof(uint32_t);
-    for (size_t rangeIndex = 0; rangeIndex < library.executableRangeCount; ++rangeIndex) {
-        const ExecutableRange &range = library.executableRanges[rangeIndex];
-        if (range.start == 0 || range.size < patternBytes) continue;
+    size_t count = 0;
+    const size_t bytes = N * 4U;
+    for (size_t r = 0; r < library.executableRangeCount; ++r) {
+        const Range &range = library.executableRanges[r];
+        if (range.size < bytes) continue;
         const uintptr_t first = (range.start + 3U) & ~static_cast<uintptr_t>(3U);
-        const uintptr_t last = range.start + range.size - patternBytes;
-        for (uintptr_t cursor = first; cursor <= last; cursor += sizeof(uint32_t)) {
-            if (!patternMatches(cursor, pattern)) continue;
-            ++matches;
-            if (matches == 1) found = cursor;
-            if (matches > 1) found = 0;
+        const uintptr_t last = range.start + range.size - bytes;
+        for (uintptr_t p = first; p <= last; p += 4U) {
+            if (!patternMatches(p, pattern)) continue;
+            ++count;
+            found = count == 1 ? p : 0;
         }
     }
-    if (matchCount != nullptr) *matchCount = matches;
-    return matches == 1 ? found : 0;
+    if (countOut != nullptr) *countOut = count;
+    return count == 1 ? found : 0;
 }
 
-uint32_t mergeSupportHook() {
-    const auto original = reinterpret_cast<MergeSupportFn>(
-            gOriginalMergeSupport.load(std::memory_order_acquire));
-    const uint32_t stock = original == nullptr ? 0U : (original() & 1U);
-    const uint64_t calls = gMergeHookCalls.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (calls <= 8 || (calls % 128U) == 0U) {
-        probeLog(ANDROID_LOG_INFO,
-                 "BREAK_OPEN_BETA merge-support call=%llu stock=%u forced=1 preserve-can-use-gate=1",
-                 static_cast<unsigned long long>(calls), stock);
+bool decodeAdrpPage(uintptr_t pc, uint32_t insn, uintptr_t *pageOut) {
+    if (pageOut == nullptr || (insn & 0x9f00001fU) != 0x90000008U) return false;
+    int64_t imm21 = static_cast<int64_t>(((insn >> 5) & 0x7ffffU) << 2)
+            | static_cast<int64_t>((insn >> 29) & 0x3U);
+    if ((imm21 & (1LL << 20)) != 0) imm21 |= ~((1LL << 21) - 1LL);
+    const int64_t page = static_cast<int64_t>(pc & ~static_cast<uintptr_t>(0xfffU)) + (imm21 << 12);
+    if (page <= 0) return false;
+    *pageOut = static_cast<uintptr_t>(page);
+    return true;
+}
+
+bool decodeRuntimeAtomicFlag(uintptr_t target, uintptr_t *out) {
+    uint32_t adrp = 0, add = 0;
+    std::memcpy(&adrp, reinterpret_cast<const void *>(target), 4);
+    std::memcpy(&add, reinterpret_cast<const void *>(target + 4U), 4);
+    uintptr_t page = 0;
+    if (out == nullptr || !decodeAdrpPage(target, adrp, &page)) return false;
+    if ((add & 0xff0003ffU) != 0x91000108U) return false;
+    const uintptr_t imm12 = (add >> 10) & 0xfffU;
+    const uintptr_t shift = ((add >> 22) & 1U) != 0 ? 12U : 0U;
+    *out = page + (imm12 << shift);
+    return true;
+}
+
+bool decodeFeatureByteFlag(uintptr_t target, uintptr_t *out) {
+    uint32_t adrp = 0, ldrb = 0;
+    std::memcpy(&adrp, reinterpret_cast<const void *>(target + 16U), 4);
+    std::memcpy(&ldrb, reinterpret_cast<const void *>(target + 20U), 4);
+    uintptr_t page = 0;
+    if (out == nullptr || !decodeAdrpPage(target + 16U, adrp, &page)) return false;
+    if ((ldrb & 0xffc003ffU) != 0x39400108U) return false;
+    *out = page + static_cast<uintptr_t>((ldrb >> 10) & 0xfffU);
+    return true;
+}
+
+uint32_t readFlag(uintptr_t address, FlagKind kind) {
+    if (kind == FlagKind::FeatureByte)
+        return __atomic_load_n(reinterpret_cast<uint8_t *>(address), __ATOMIC_ACQUIRE);
+    if (kind == FlagKind::RuntimeAtomic)
+        return __atomic_load_n(reinterpret_cast<uint32_t *>(address), __ATOMIC_ACQUIRE);
+    return 0;
+}
+
+void writeFlag(uintptr_t address, FlagKind kind, uint32_t value) {
+    if (kind == FlagKind::FeatureByte)
+        __atomic_store_n(reinterpret_cast<uint8_t *>(address), static_cast<uint8_t>(value), __ATOMIC_RELEASE);
+    else if (kind == FlagKind::RuntimeAtomic)
+        __atomic_store_n(reinterpret_cast<uint32_t *>(address), value, __ATOMIC_RELEASE);
+}
+
+int readPersistedBreakOpen() {
+    const int userId = static_cast<int>(getuid()) / kAndroidUserOffset;
+    char path[256]{};
+    const char *formats[] = {
+            "/data/user_de/%d/com.miui.home/cache/%s",
+            "/data/user/%d/com.miui.home/cache/%s",
+            "/data/data/com.miui.home/cache/%s",
+    };
+    for (size_t i = 0; i < 3; ++i) {
+        if (i == 2 && userId != 0) break;
+        if (i < 2) std::snprintf(path, sizeof(path), formats[i], userId, kPersistedBreakOpenFile);
+        else std::snprintf(path, sizeof(path), formats[i], kPersistedBreakOpenFile);
+        const int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) continue;
+        char buffer[16]{};
+        const ssize_t n = read(fd, buffer, sizeof(buffer) - 1);
+        close(fd);
+        if (n > 0) return buffer[0] == '1' ? 1 : 0;
     }
-    return 1U;
+    return 0;
 }
 
-void installMergeSupportHookIfReady() {
-    if (!isLauncherProcess() || gMergeHookInstalled.load(std::memory_order_acquire)) return;
+bool desiredEnabled() {
+    swipegate_control_sync_if_due();
+    const int live = swipegate_control_break_open_enabled();
+    return live >= 0 ? live == 1 : readPersistedBreakOpen() == 1;
+}
+
+void applyFlagPolicy(bool fromSwipe) {
     if (!gResolverReady.load(std::memory_order_acquire)) return;
+    const uintptr_t address = gSelectedFlag.load(std::memory_order_acquire);
+    const FlagKind kind = static_cast<FlagKind>(gFlagKind.load(std::memory_order_acquire));
+    if (address == 0 || kind == FlagKind::None) return;
+    const bool enabled = desiredEnabled();
+    const uint32_t stock = gStockFlagValue.load(std::memory_order_acquire);
+    const uint32_t current = readFlag(address, kind);
+    const bool applied = gFlagApplied.load(std::memory_order_acquire);
 
-    const HookFunType hookFunction = gHookFunction.load(std::memory_order_acquire);
-    if (hookFunction == nullptr) return;
-
-    const uintptr_t target = gMergeSupportTarget.load(std::memory_order_acquire);
-    const size_t mergeMatches = gMergeSupportMatches.load(std::memory_order_acquire);
-    const size_t canUseMatches = gCanUseBreakOpenMatches.load(std::memory_order_acquire);
-    const size_t handleMatches = gHandleBackGestureMatches.load(std::memory_order_acquire);
-    if (target == 0 || mergeMatches != 1 || canUseMatches != 1 || handleMatches != 1) {
-        bool expected = false;
-        if (gMergeHookAttempted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-            probeLog(ANDROID_LOG_WARN,
-                     "BREAK_OPEN_BETA install refused mergeTarget=%p matches=%zu/%zu/%zu failClosed=1",
-                     reinterpret_cast<void *>(target), mergeMatches, canUseMatches, handleMatches);
+    if (enabled) {
+        if (current != 1U) {
+            writeFlag(address, kind, 1U);
+            logLine(applied ? ANDROID_LOG_WARN : ANDROID_LOG_INFO,
+                    applied ? "BREAK_OPEN_FLAG restored by Launcher observed=%u reasserted=1 kind=%s source=%s"
+                            : "BREAK_OPEN_FLAG enabled old=%u new=1 kind=%s source=%s",
+                    current, kind == FlagKind::FeatureByte ? "feature-byte" : "runtime-atomic",
+                    fromSwipe ? "swipe" : "guard");
         }
-        return;
+        gFlagApplied.store(true, std::memory_order_release);
+    } else if (applied) {
+        if (current != stock) writeFlag(address, kind, stock);
+        gFlagApplied.store(false, std::memory_order_release);
+        logLine(ANDROID_LOG_INFO, "BREAK_OPEN_FLAG disabled restored=%u kind=%s", stock,
+                kind == FlagKind::FeatureByte ? "feature-byte" : "runtime-atomic");
     }
 
-    bool expected = false;
-    if (!gMergeHookAttempted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
-
-    const auto stockFunction = reinterpret_cast<MergeSupportFn>(target);
-    const uint32_t stockBeforeHook = stockFunction() & 1U;
-    if (stockBeforeHook != 0U) {
-        gMergeHookInstalled.store(true, std::memory_order_release);
-        probeLog(ANDROID_LOG_INFO,
-                 "BREAK_OPEN_BETA stock merge support already enabled target=%p; no override needed",
-                 reinterpret_cast<void *>(target));
-        return;
+    const int64_t now = monotonicMs();
+    int64_t last = gLastStatusLogMs.load(std::memory_order_relaxed);
+    if (now - last >= kStatusLogIntervalMs
+            && gLastStatusLogMs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+        const uintptr_t base = gLauncherBase.load(std::memory_order_acquire);
+        logLine(ANDROID_LOG_INFO,
+                "BREAK_OPEN_FLAG healthy enabled=%d value=%u kind=%s targetOffset=0x%zx flagOffset=0x%zx",
+                enabled ? 1 : 0, readFlag(address, kind),
+                kind == FlagKind::FeatureByte ? "feature-byte" : "runtime-atomic",
+                static_cast<size_t>(gMergeTarget.load(std::memory_order_acquire) - base),
+                static_cast<size_t>(address - base));
     }
-
-    void *backup = nullptr;
-    const int rc = hookFunction(reinterpret_cast<void *>(target),
-                                reinterpret_cast<void *>(mergeSupportHook), &backup);
-    if (rc != 0 || backup == nullptr) {
-        probeLog(ANDROID_LOG_ERROR,
-                 "BREAK_OPEN_BETA hook failed rc=%d target=%p backup=%p",
-                 rc, reinterpret_cast<void *>(target), backup);
-        return;
-    }
-
-    gOriginalMergeSupport.store(backup, std::memory_order_release);
-    gMergeHookInstalled.store(true, std::memory_order_release);
-    probeLog(ANDROID_LOG_INFO,
-             "BREAK_OPEN_BETA hook installed target=%p stockBefore=0 forced=1 preserveCanUseGate=1 preserveHandleBackGesture=1",
-             reinterpret_cast<void *>(target));
 }
 
 void resolverWorker() {
     if (!isLauncherProcess()) return;
-
     LibraryInfo library;
-    for (int attempt = 0; attempt < 60; ++attempt) {
+    for (int attempt = 0; attempt < 120; ++attempt) {
         library = findLauncherLibrary();
         if (library.base != 0 && library.executableRangeCount != 0) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     if (library.base == 0 || library.executableRangeCount == 0) return;
 
-    size_t mergeMatches = 0;
-    size_t canUseMatches = 0;
-    size_t handleMatches = 0;
-    const uintptr_t mergeTarget = resolveUnique(library, kMergeSupportPattern, &mergeMatches);
-    const uintptr_t canUseTarget = resolveUnique(library, kCanUseBreakOpenPattern, &canUseMatches);
-    const uintptr_t handleTarget = resolveUnique(library, kHandleBackGesturePattern, &handleMatches);
+    size_t mergeCount = 0, canUseCount = 0, handleCount = 0;
+    const uintptr_t merge = resolveUnique(library, kMergeSupportPattern, &mergeCount);
+    const uintptr_t canUse = resolveUnique(library, kCanUseBreakOpenPattern, &canUseCount);
+    const uintptr_t handle = resolveUnique(library, kHandleBackGesturePattern, &handleCount);
+    if (merge == 0 || canUse == 0 || handle == 0 || mergeCount != 1 || canUseCount != 1 || handleCount != 1) {
+        logLine(ANDROID_LOG_WARN, "BREAK_OPEN_FLAG resolver refused matches=%zu/%zu/%zu failClosed=1",
+                mergeCount, canUseCount, handleCount);
+        return;
+    }
 
+    uintptr_t runtimeFlag = 0, featureFlag = 0;
+    const bool runtimeDecoded = decodeRuntimeAtomicFlag(merge, &runtimeFlag);
+    const bool featureDecoded = decodeFeatureByteFlag(merge, &featureFlag);
+    const bool runtimeWritable = runtimeDecoded && isWritable(library, runtimeFlag, sizeof(uint32_t));
+    const bool featureWritable = featureDecoded && isWritable(library, featureFlag, sizeof(uint8_t));
+
+    uintptr_t selected = 0;
+    FlagKind kind = FlagKind::None;
+    if (featureWritable) { selected = featureFlag; kind = FlagKind::FeatureByte; }
+    else if (runtimeWritable) { selected = runtimeFlag; kind = FlagKind::RuntimeAtomic; }
+    if (selected == 0) {
+        logLine(ANDROID_LOG_WARN,
+                "BREAK_OPEN_FLAG no writable backing flag runtime=%p writable=%d feature=%p writable=%d failClosed=1",
+                reinterpret_cast<void *>(runtimeFlag), runtimeWritable ? 1 : 0,
+                reinterpret_cast<void *>(featureFlag), featureWritable ? 1 : 0);
+        return;
+    }
+
+    const uint32_t stock = readFlag(selected, kind);
     gLauncherBase.store(library.base, std::memory_order_release);
-    gMergeSupportMatches.store(mergeMatches, std::memory_order_release);
-    gCanUseBreakOpenMatches.store(canUseMatches, std::memory_order_release);
-    gHandleBackGestureMatches.store(handleMatches, std::memory_order_release);
-    gMergeSupportTarget.store(mergeTarget, std::memory_order_release);
-    gCanUseBreakOpenTarget.store(canUseTarget, std::memory_order_release);
-    gHandleBackGestureTarget.store(handleTarget, std::memory_order_release);
+    gMergeTarget.store(merge, std::memory_order_release);
+    gSelectedFlag.store(selected, std::memory_order_release);
+    gFlagKind.store(static_cast<int>(kind), std::memory_order_release);
+    gStockFlagValue.store(stock, std::memory_order_release);
     gResolverReady.store(true, std::memory_order_release);
+    logLine(ANDROID_LOG_INFO,
+            "BREAK_OPEN_FLAG resolver ready mergeOffset=0x%zx canUseOffset=0x%zx handleOffset=0x%zx runtimeFlagOffset=0x%zx featureFlagOffset=0x%zx selected=%s stock=%u noInlineHook=1",
+            static_cast<size_t>(merge - library.base), static_cast<size_t>(canUse - library.base),
+            static_cast<size_t>(handle - library.base),
+            runtimeDecoded ? static_cast<size_t>(runtimeFlag - library.base) : 0U,
+            featureDecoded ? static_cast<size_t>(featureFlag - library.base) : 0U,
+            kind == FlagKind::FeatureByte ? "feature-byte" : "runtime-atomic", stock);
 
-    probeLog(ANDROID_LOG_INFO,
-             "BREAK_OPEN_PROBE resolver ready base=%p mergeTarget=%p mergeMatches=%zu canUseTarget=%p canUseMatches=%zu handleTarget=%p handleMatches=%zu betaOverride=1",
-             reinterpret_cast<void *>(library.base), reinterpret_cast<void *>(mergeTarget), mergeMatches,
-             reinterpret_cast<void *>(canUseTarget), canUseMatches,
-             reinterpret_cast<void *>(handleTarget), handleMatches);
-    installMergeSupportHookIfReady();
+    while (isLauncherProcess()) {
+        applyFlagPolicy(false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(kFlagGuardIntervalMs));
+    }
 }
 
-void ensureResolverStarted() {
+void ensureWorkerStarted() {
     bool expected = false;
-    if (!gResolverStarted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
+    if (!gWorkerStarted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
     std::thread(resolverWorker).detach();
 }
 
 }  // namespace
 
-extern "C" __attribute__((visibility("hidden"))) void swipegate_back_break_enable(
-        HookFunType hookFunction) {
-    if (!isLauncherProcess() || hookFunction == nullptr) return;
-    gHookFunction.store(hookFunction, std::memory_order_release);
-    ensureResolverStarted();
-    installMergeSupportHookIfReady();
+extern "C" __attribute__((visibility("hidden"))) void swipegate_back_break_enable(HookFunType) {
+    if (isLauncherProcess()) ensureWorkerStarted();
 }
 
 extern "C" __attribute__((visibility("hidden"))) void swipegate_back_break_probe_on_swipe(
-        uint32_t readyFinish, uint32_t side, float horizontalDistancePx) {
+        uint32_t, uint32_t, float) {
     if (!isLauncherProcess()) return;
-    ensureResolverStarted();
-    installMergeSupportHookIfReady();
-
-    const int64_t now = monotonicMs();
-    const int64_t previous = gLastSwipeAtMs.exchange(now, std::memory_order_acq_rel);
-    if (previous != 0 && now - previous < kNewGestureGapMs) return;
-
-    const bool ready = gResolverReady.load(std::memory_order_acquire);
-    const uintptr_t base = gLauncherBase.load(std::memory_order_acquire);
-    const uintptr_t mergeTarget = gMergeSupportTarget.load(std::memory_order_acquire);
-    const uintptr_t canUseTarget = gCanUseBreakOpenTarget.load(std::memory_order_acquire);
-    const uintptr_t handleTarget = gHandleBackGestureTarget.load(std::memory_order_acquire);
-
-    int mergeSupport = -1;
-    if (ready && mergeTarget != 0) {
-        const auto fn = reinterpret_cast<MergeSupportFn>(mergeTarget);
-        mergeSupport = static_cast<int>(fn() & 1U);
-    }
-
-    const uint64_t sequence = gProbeSequence.fetch_add(1, std::memory_order_acq_rel) + 1;
-    probeLog(ANDROID_LOG_INFO,
-             "BREAK_OPEN_PROBE swipe seq=%llu resolverReady=%d readyFinish=%u side=%u dx=%.2f mergeSupport=%d hookInstalled=%d base=%p mergeOffset=0x%zx canUseOffset=0x%zx handleOffset=0x%zx matches=%zu/%zu/%zu betaOverride=1",
-             static_cast<unsigned long long>(sequence), ready ? 1 : 0, readyFinish, side,
-             horizontalDistancePx, mergeSupport,
-             gMergeHookInstalled.load(std::memory_order_acquire) ? 1 : 0,
-             reinterpret_cast<void *>(base),
-             mergeTarget != 0 && base != 0 ? static_cast<size_t>(mergeTarget - base) : 0U,
-             canUseTarget != 0 && base != 0 ? static_cast<size_t>(canUseTarget - base) : 0U,
-             handleTarget != 0 && base != 0 ? static_cast<size_t>(handleTarget - base) : 0U,
-             gMergeSupportMatches.load(std::memory_order_acquire),
-             gCanUseBreakOpenMatches.load(std::memory_order_acquire),
-             gHandleBackGestureMatches.load(std::memory_order_acquire));
+    ensureWorkerStarted();
+    applyFlagPolicy(true);
 }

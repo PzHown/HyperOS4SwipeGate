@@ -10,6 +10,7 @@ extern "C" {
 int swipegate_control_threshold_dp();
 int swipegate_control_log_level();
 int swipegate_control_haptic_enabled();
+int swipegate_control_break_open_enabled();
 
 // Feed every Native log line into the runtime control plane. Hook state is parsed regardless of
 // the user-facing App log level; App log retention remains controlled by log_level.

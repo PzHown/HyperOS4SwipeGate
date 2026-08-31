@@ -97,6 +97,14 @@ internal fun HomeScreen(
             ),
         )
     }
+    var breakOpenEnabled by remember {
+        mutableStateOf(
+            prefs.getBoolean(
+                ConfigBridge.PREF_KEY_BREAK_OPEN_ENABLED,
+                ConfigBridge.DEFAULT_BREAK_OPEN_ENABLED,
+            ),
+        )
+    }
     var applyStatus by remember { mutableStateOf("") }
     var showThresholdInput by remember { mutableStateOf(false) }
     var thresholdInput by remember { mutableStateOf(TextFieldValue(thresholdDp.roundToInt().toString())) }
@@ -291,6 +299,24 @@ internal fun HomeScreen(
                         "进入返回阶段，以及从侧边栏阶段退回时补充轻震反馈"
                     } else {
                         "保持系统原有震动反馈"
+                    },
+                )
+                SwitchPreference(
+                    checked = breakOpenEnabled,
+                    onCheckedChange = { enabled ->
+                        breakOpenEnabled = enabled
+                        ConfigBridge.applyBreakOpenEnabledAsync(context, enabled) { result ->
+                            if (!result.success()) {
+                                breakOpenEnabled = !enabled
+                                Toast.makeText(context, "启动动画返回同步失败", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    title = "启动动画期间立即返回 · Beta",
+                    summary = if (breakOpenEnabled) {
+                        "从桌面打开 App 后，无需等待启动动画结束即可侧滑返回"
+                    } else {
+                        "保持新版桌面的默认启动动画返回行为"
                     },
                 )
             }

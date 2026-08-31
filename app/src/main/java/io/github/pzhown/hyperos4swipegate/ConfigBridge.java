@@ -15,6 +15,8 @@ public final class ConfigBridge {
     public static final String PREF_KEY_LOG_LEVEL = "native_log_level";
     public static final String PREF_KEY_HAPTIC_ENABLED = "haptic_feedback_enabled";
     public static final boolean DEFAULT_HAPTIC_ENABLED = false;
+    public static final String PREF_KEY_BREAK_OPEN_ENABLED = "break_open_enabled";
+    public static final boolean DEFAULT_BREAK_OPEN_ENABLED = false;
 
     public static final int DEFAULT_THRESHOLD_DP = 0; // Legacy alias: 0 = Xiaomi stock/default (88dp).
     public static final int STOCK_THRESHOLD_DP = 88;
@@ -89,6 +91,15 @@ public final class ConfigBridge {
     public static void applyHapticEnabledAsync(Context context, boolean enabled, Callback callback) {
         Context app = context.getApplicationContext();
         localPreferences(app).edit().putBoolean(PREF_KEY_HAPTIC_ENABLED, enabled).apply();
+        NativeControlBridge.initialize(app);
+        NativeControlBridge.requestConfigRefresh();
+        Result result = new Result(true, enabled ? 1 : 0, "ok");
+        MAIN.post(() -> callback.onResult(result));
+    }
+
+    public static void applyBreakOpenEnabledAsync(Context context, boolean enabled, Callback callback) {
+        Context app = context.getApplicationContext();
+        localPreferences(app).edit().putBoolean(PREF_KEY_BREAK_OPEN_ENABLED, enabled).apply();
         NativeControlBridge.initialize(app);
         NativeControlBridge.requestConfigRefresh();
         Result result = new Result(true, enabled ? 1 : 0, "ok");

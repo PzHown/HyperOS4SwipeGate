@@ -39,6 +39,7 @@ public final class SystemUiBridgeModule extends XposedModule {
     static final String EXTRA_THRESHOLD_DP = "swipegate_threshold_dp";
     static final String EXTRA_LOG_LEVEL = "swipegate_log_level";
     static final String EXTRA_HAPTIC_ENABLED = "swipegate_haptic_enabled";
+    static final String EXTRA_BREAK_OPEN_ENABLED = "swipegate_break_open_enabled";
     static final String EXTRA_HOOK_STATE = "swipegate_hook_state";
     static final String EXTRA_PATTERN = "swipegate_pattern";
     static final String EXTRA_DETAIL = "swipegate_detail";
@@ -121,6 +122,8 @@ public final class SystemUiBridgeModule extends XposedModule {
                     EXTRA_LOG_LEVEL, ConfigBridge.DEFAULT_LOG_LEVEL);
             final boolean hapticEnabled = intent.getBooleanExtra(
                     EXTRA_HAPTIC_ENABLED, ConfigBridge.DEFAULT_HAPTIC_ENABLED);
+            final boolean breakOpenEnabled = intent.getBooleanExtra(
+                    EXTRA_BREAK_OPEN_ENABLED, ConfigBridge.DEFAULT_BREAK_OPEN_ENABLED);
             if (nonce <= 0L
                     || thresholdDp < ConfigBridge.STOCK_THRESHOLD_DP
                     || thresholdDp > ConfigBridge.MAX_THRESHOLD_DP
@@ -148,6 +151,7 @@ public final class SystemUiBridgeModule extends XposedModule {
                         .putExtra(EXTRA_THRESHOLD_DP, thresholdDp)
                         .putExtra(EXTRA_LOG_LEVEL, logLevel)
                         .putExtra(EXTRA_HAPTIC_ENABLED, hapticEnabled)
+                        .putExtra(EXTRA_BREAK_OPEN_ENABLED, breakOpenEnabled)
                         .putExtra(EXTRA_SENDER_UID, Process.myUid());
                 context.sendBroadcast(carrier, null, shareIdentityOptions());
                 log(android.util.Log.INFO, "HyperOS4SwipeGateSystemUI",

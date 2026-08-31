@@ -110,6 +110,8 @@ public final class NativeControlBridge {
 
         boolean hapticEnabled = ConfigBridge.localPreferences(context).getBoolean(
                 ConfigBridge.PREF_KEY_HAPTIC_ENABLED, ConfigBridge.DEFAULT_HAPTIC_ENABLED);
+        boolean breakOpenEnabled = ConfigBridge.localPreferences(context).getBoolean(
+                ConfigBridge.PREF_KEY_BREAK_OPEN_ENABLED, ConfigBridge.DEFAULT_BREAK_OPEN_ENABLED);
 
         try {
             Intent query = new Intent(SystemUiBridgeModule.ACTION_APP_QUERY)
@@ -118,6 +120,7 @@ public final class NativeControlBridge {
                     .putExtra(SystemUiBridgeModule.EXTRA_THRESHOLD_DP, threshold)
                     .putExtra(SystemUiBridgeModule.EXTRA_LOG_LEVEL, logLevel)
                     .putExtra(SystemUiBridgeModule.EXTRA_HAPTIC_ENABLED, hapticEnabled)
+                    .putExtra(SystemUiBridgeModule.EXTRA_BREAK_OPEN_ENABLED, breakOpenEnabled)
                     .putExtra(SystemUiBridgeModule.EXTRA_SENDER_UID, Process.myUid());
             context.sendBroadcast(query, null,
                     BroadcastOptions.makeBasic().setShareIdentityEnabled(true).toBundle());
