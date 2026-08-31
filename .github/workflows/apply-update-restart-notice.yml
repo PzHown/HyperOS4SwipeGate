@@ -1,0 +1,161 @@
+name: Apply update restart notice
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/apply-update-restart-notice.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Apply changes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected 1 match, got {count}")
+              return text.replace(old, new, 1)
+
+          # 1) Ready -> Release dedup window: 140ms -> 400ms.
+          native = Path('native/src/main.cpp')
+          text = native.read_text()
+          text = replace_once(
+              text,
+              'constexpr int64_t kReadyReleaseDedupMs = 140;',
+              'constexpr int64_t kReadyReleaseDedupMs = 400;',
+              'haptic dedup window',
+          )
+          native.write_text(text)
+
+          # 2) App-update restart notice + framework STALE state UI.
+          home = Path('app/src/main/java/io/github/pzhown/hyperos4swipegate/HomeScreen.kt')
+          text = home.read_text()
+
+          text = replace_once(
+              text,
+              'private const val PREF_DP_MIGRATED = "threshold_dp_migrated_v1"\n\n'
+              'private enum class HomeHookState { Loading, Active, Repairing, Error, Inactive, Unknown }',
+              'private const val PREF_DP_MIGRATED = "threshold_dp_migrated_v1"\n'
+              'private const val PREF_LAST_APP_VERSION_CODE = "last_app_version_code"\n\n'
+              'private enum class HomeHookState { Loading, Active, RestartRequired, Repairing, Error, Inactive, Unknown }',
+              'home state declarations',
+          )
+
+          text = replace_once(
+              text,
+              '    var thresholdInputError by remember { mutableStateOf("") }\n',
+              '    var thresholdInputError by remember { mutableStateOf("") }\n'
+              '    var showUpdateRestartNotice by remember { mutableStateOf(false) }\n',
+              'update notice state',
+          )
+
+          text = replace_once(
+              text,
+              '    LaunchedEffect(Unit) {\n'
+              '        while (true) {',
+              '    LaunchedEffect(Unit) {\n'
+              '        showUpdateRestartNotice = shouldShowUpdateRestartNotice(context)\n'
+              '        while (true) {',
+              'update notice trigger',
+          )
+
+          text = replace_once(
+              text,
+              '        HomeHookState.Active -> if (dark) Color(0xFF183D28) else Color(0xFFD9F7E2)\n'
+              '        HomeHookState.Repairing -> if (dark) Color(0xFF4B3B12) else Color(0xFFFFF1BF)',
+              '        HomeHookState.Active -> if (dark) Color(0xFF183D28) else Color(0xFFD9F7E2)\n'
+              '        HomeHookState.RestartRequired -> if (dark) Color(0xFF4B3B12) else Color(0xFFFFF1BF)\n'
+              '        HomeHookState.Repairing -> if (dark) Color(0xFF4B3B12) else Color(0xFFFFF1BF)',
+              'restart background color',
+          )
+
+          text = replace_once(
+              text,
+              '        HomeHookState.Active -> if (dark) Color(0xFFB9F6CA) else Color(0xFF102E1A)\n'
+              '        HomeHookState.Repairing -> if (dark) Color(0xFFFFE08A) else Color(0xFF4B3700)',
+              '        HomeHookState.Active -> if (dark) Color(0xFFB9F6CA) else Color(0xFF102E1A)\n'
+              '        HomeHookState.RestartRequired -> if (dark) Color(0xFFFFE08A) else Color(0xFF4B3700)\n'
+              '        HomeHookState.Repairing -> if (dark) Color(0xFFFFE08A) else Color(0xFF4B3700)',
+              'restart content color',
+          )
+
+          text = replace_once(
+              text,
+              '        HomeHookState.Active -> "✓"\n'
+              '        HomeHookState.Repairing -> "↻"',
+              '        HomeHookState.Active -> "✓"\n'
+              '        HomeHookState.RestartRequired -> "↻"\n'
+              '        HomeHookState.Repairing -> "↻"',
+              'restart icon',
+          )
+
+          text = replace_once(
+              text,
+              '        HomeHookState.Active -> "运行正常"\n'
+              '        HomeHookState.Repairing -> "正在更新"',
+              '        HomeHookState.Active -> "运行正常"\n'
+              '        HomeHookState.RestartRequired -> "需要重启作用域"\n'
+              '        HomeHookState.Repairing -> "正在更新"',
+              'restart primary label',
+          )
+
+          text = replace_once(
+              text,
+              '        HomeHookState.Active -> "系统桌面已加载"\n'
+              '        HomeHookState.Repairing -> "模块更新中"',
+              '        HomeHookState.Active -> "系统桌面已加载"\n'
+              '        HomeHookState.RestartRequired -> "系统桌面仍在运行旧版模块代码"\n'
+              '        HomeHookState.Repairing -> "模块更新中"',
+              'restart secondary label',
+          )
+
+          close_marker = '''    }\n}\n\nprivate fun collectHomeStatusSnapshot(context: Context): HomeStatusSnapshot {'''
+          dialog = '''    }\n\n    OverlayDialog(\n        title = "需要重启作用域",\n        summary = "检测到 SwipeGate 已更新。系统桌面和系统界面可能仍在运行旧版本模块代码，请在 LSPosed 中重启作用域后再继续使用。",\n        show = showUpdateRestartNotice,\n        onDismissRequest = { showUpdateRestartNotice = false },\n    ) {\n        Row(\n            modifier = Modifier.fillMaxWidth(),\n            horizontalArrangement = Arrangement.End,\n        ) {\n            Button(onClick = { showUpdateRestartNotice = false }) {\n                Text("知道了")\n            }\n        }\n    }\n}\n\nprivate fun shouldShowUpdateRestartNotice(context: Context): Boolean {\n    val prefs = ConfigBridge.localPreferences(context)\n    val currentVersionCode = BuildConfig.VERSION_CODE\n    val previousVersionCode = prefs.getInt(PREF_LAST_APP_VERSION_CODE, 0)\n    if (previousVersionCode == 0) {\n        prefs.edit().putInt(PREF_LAST_APP_VERSION_CODE, currentVersionCode).apply()\n        return false\n    }\n    if (previousVersionCode == currentVersionCode) return false\n\n    prefs.edit().putInt(PREF_LAST_APP_VERSION_CODE, currentVersionCode).apply()\n    return true\n}\n\nprivate fun collectHomeStatusSnapshot(context: Context): HomeStatusSnapshot {'''
+          text = replace_once(text, close_marker, dialog, 'insert update restart dialog')
+
+          text = replace_once(
+              text,
+              '    return when (service.targetState()) {\n'
+              '        "RELOADING" -> status(HomeHookState.Repairing, "模块代码正在重新加载。")',
+              '    return when (service.targetState()) {\n'
+              '        "STALE" -> status(HomeHookState.RestartRequired, "检测到系统桌面仍加载旧版本模块代码，请重启作用域。")\n'
+              '        "RELOADING" -> status(HomeHookState.Repairing, "模块代码正在重新加载。")',
+              'STALE mapping',
+          )
+          home.write_text(text)
+
+          # 3) New test build so installing over dev.5 exercises the update detector.
+          gradle = Path('app/build.gradle.kts')
+          text = gradle.read_text()
+          text = replace_once(text, 'versionCode = 47', 'versionCode = 48', 'version code')
+          text = replace_once(text, 'versionName = "0.8.1-dev.5"', 'versionName = "0.8.1-dev.6"', 'version name')
+          gradle.write_text(text)
+
+          # Remove this one-shot workflow from the resulting branch.
+          Path('.github/workflows/apply-update-restart-notice.yml').unlink()
+          PY
+
+      - name: Commit changes
+        shell: bash
+        run: |
+          git diff --check
+          git status --short
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add native/src/main.cpp app/src/main/java/io/github/pzhown/hyperos4swipegate/HomeScreen.kt app/build.gradle.kts .github/workflows/apply-update-restart-notice.yml
+          git commit -m "feat: prompt for scope restart after app update"
+          git push origin HEAD:dev
