@@ -224,12 +224,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete debug-latest --yes --cleanup-tag || true
-          gh release create debug-latest \
+          if ! gh release create debug-latest \
             dist/SwipeGate-debug.apk \
             --target "$GITHUB_SHA" \
             --prerelease \
             --title "SwipeGate v${VERSION_NAME} Debug" \
-            --notes "Development Debug build from the dev branch. LSPosed API 102 native_init for HyperOS 4 Launcher 8.0+."
+            --notes "Development Debug build from the dev branch. LSPosed API 102 native_init for HyperOS 4 Launcher 8.0+."; then
+            echo "::warning::debug-latest release publishing is unavailable for this Actions integration; the uploaded workflow artifact remains the canonical dev build."
+          fi
 
       - name: Publish versioned release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
