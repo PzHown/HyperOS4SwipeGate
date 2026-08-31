@@ -46,7 +46,9 @@ constexpr const char *kTargetLibrary = "libapp_launcher.so";
 constexpr const char *kHapticProviderLibrary = "libhyper_os_background_tasks_public.so";
 constexpr const char *kHapticSymbol = "HapticFeedback_perform_ext_haptic_feedback";
 constexpr int64_t kHapticFeatureResolveIntervalMs = 5000;
-constexpr int64_t kHapticArcMaxAgeMs = 5 * 60 * 1000;
+constexpr int64_t kHapticInitialResolveRetryMs = 500;
+constexpr uint32_t kHapticInitialResolveFastAttempts = 10;
+constexpr int64_t kHapticConfirmSuppressMs = 120;
 constexpr int32_t kHapticConstant = 0;
 constexpr uintptr_t kPointerAddressMask = 0x00ffffffffffffffull;
 constexpr const char *kThresholdDpProperty = "persist.hyperos4swipegate.threshold_dp";
@@ -152,6 +154,9 @@ std::atomic<bool> gHapticInstallInProgress{false};
 std::atomic<bool> gHapticCaptureHookInstalled{false};
 std::atomic<bool> gHapticUnavailableLogged{false};
 std::atomic<int64_t> gLastHapticFeatureResolveMs{0};
+std::atomic<uint32_t> gHapticResolveFailures{0};
+std::atomic<int64_t> gNativeHapticSuppressUntilMs{0};
+std::atomic<int64_t> gLastInjectedHapticAtMs{0};
 // Haptic segment state is independent from the Launcher hook health state.
 // 0 = outside/idle, 1 = first segment (Back, below custom threshold),
 // 2 = second segment (custom threshold reached). Only entering segment 1 is replayed.
@@ -642,6 +647,7 @@ int readThresholdDp() {
 using HapticFeedbackFn = void (*)(void *, int32_t);
 
 void hapticFeedbackCaptureHook(void *storage, int32_t constant) {
+    const int64_t now = monotonicMs();
     if (storage != nullptr) {
         uintptr_t rawArc = 0;
         std::memcpy(&rawArc, storage, sizeof(rawArc));
@@ -650,14 +656,40 @@ void hapticFeedbackCaptureHook(void *storage, int32_t constant) {
             // Preserve the original tagged pointer exactly as Xiaomi supplied it.  The
             // untagged value is used only for sanity checking, never for replay.
             gCapturedHapticArc.store(rawArc, std::memory_order_release);
-            gCapturedHapticArcAtMs.store(monotonicMs(), std::memory_order_release);
+            gCapturedHapticArcAtMs.store(now, std::memory_order_release);
             gHapticUnavailableLogged.store(false, std::memory_order_release);
         }
     }
 
     const auto original = reinterpret_cast<HapticFeedbackFn>(
             gOriginalHapticFeedback.load(std::memory_order_acquire));
-    if (original != nullptr) original(storage, constant);
+    if (original == nullptr) return;
+
+    // The module's injected threshold haptic calls the trampoline directly, so only Xiaomi's
+    // native haptics arrive here.  Suppress at most one native haptic when it follows our
+    // first-segment feedback within a very short window and the gesture is still in segment 1.
+    int64_t suppressUntil = gNativeHapticSuppressUntilMs.load(std::memory_order_acquire);
+    if (suppressUntil > 0) {
+        if (now <= suppressUntil
+                && gHapticGestureSegment.load(std::memory_order_acquire) == 1) {
+            if (gNativeHapticSuppressUntilMs.compare_exchange_strong(
+                    suppressUntil, 0, std::memory_order_acq_rel)) {
+                const int64_t injectedAt = gLastInjectedHapticAtMs.load(std::memory_order_acquire);
+                logLine(ANDROID_LOG_INFO,
+                        "HAPTIC_V2 native feedback suppressed reason=near-threshold-confirm constant=%d deltaMs=%lld windowMs=%lld",
+                        constant,
+                        injectedAt > 0 && now >= injectedAt
+                                ? static_cast<long long>(now - injectedAt) : -1LL,
+                        static_cast<long long>(kHapticConfirmSuppressMs));
+                return;
+            }
+        } else if (now > suppressUntil) {
+            gNativeHapticSuppressUntilMs.compare_exchange_strong(
+                    suppressUntil, 0, std::memory_order_acq_rel);
+        }
+    }
+
+    original(storage, constant);
 }
 
 bool installHapticCaptureHookTarget(void *target, const char *source) {
@@ -682,6 +714,7 @@ bool installHapticCaptureHookTarget(void *target, const char *source) {
     }
 
     gOriginalHapticFeedback.store(backup, std::memory_order_release);
+    gHapticResolveFailures.store(0, std::memory_order_release);
     gHapticCaptureHookInstalled.store(true, std::memory_order_release);
     gHapticInstallInProgress.store(false, std::memory_order_release);
     gHapticUnavailableLogged.store(false, std::memory_order_release);
@@ -732,21 +765,17 @@ bool performNativeHaptic(const char *stage) {
     const uintptr_t addressBits = rawArc & kPointerAddressMask;
     const int64_t capturedAtMs = gCapturedHapticArcAtMs.load(std::memory_order_acquire);
     const int64_t now = monotonicMs();
-    const bool stale = capturedAtMs <= 0 || now < capturedAtMs
-            || now - capturedAtMs > kHapticArcMaxAgeMs;
-    if (original == nullptr || addressBits < 0x10000u || stale) {
+    if (original == nullptr || addressBits < 0x10000u) {
         bool expected = false;
         if (gHapticUnavailableLogged.compare_exchange_strong(expected, true)) {
             const char *reason = original == nullptr ? "capture-hook-not-ready"
-                    : addressBits < 0x10000u ? "runtime-arc-not-captured"
-                    : "runtime-arc-stale";
+                    : "runtime-arc-not-captured";
             logLine(ANDROID_LOG_WARN,
-                    "HAPTIC_V2 skipped stage=%s reason=%s hook=%d arc=%p ageMs=%lld maxAgeMs=%lld",
+                    "HAPTIC_V2 skipped stage=%s reason=%s hook=%d arc=%p ageMs=%lld retry=1",
                     stage == nullptr ? "unknown" : stage, reason,
                     original == nullptr ? 0 : 1, reinterpret_cast<void *>(rawArc),
                     capturedAtMs <= 0 || now < capturedAtMs ? -1LL
-                            : static_cast<long long>(now - capturedAtMs),
-                    static_cast<long long>(kHapticArcMaxAgeMs));
+                            : static_cast<long long>(now - capturedAtMs));
         }
         return false;
     }
@@ -755,10 +784,14 @@ bool performNativeHaptic(const char *stage) {
     // Replay the exact tagged pointer observed from Xiaomi and only use the verified ext API.
     void *storage = reinterpret_cast<void *>(rawArc);
     original(&storage, kHapticConstant);
+    gLastInjectedHapticAtMs.store(now, std::memory_order_release);
+    gNativeHapticSuppressUntilMs.store(now + kHapticConfirmSuppressMs, std::memory_order_release);
     logLine(ANDROID_LOG_INFO,
-            "HAPTIC_V2 feedback stage=%s kind=ext constant=%d arcAgeMs=%lld",
+            "HAPTIC_V2 feedback stage=%s kind=ext constant=%d arcAgeMs=%lld confirmSuppressMs=%lld",
             stage == nullptr ? "unknown" : stage, kHapticConstant,
-            static_cast<long long>(now - capturedAtMs));
+            capturedAtMs <= 0 || now < capturedAtMs ? -1LL
+                    : static_cast<long long>(now - capturedAtMs),
+            static_cast<long long>(kHapticConfirmSuppressMs));
     return true;
 }
 
@@ -876,10 +909,25 @@ float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDi
     } else if (readyFinish) {
         hapticSegment = 1;
     }
+    if (hapticSegment != 1) {
+        gNativeHapticSuppressUntilMs.store(0, std::memory_order_release);
+    }
     const int previousHapticSegment = gHapticGestureSegment.exchange(
             hapticSegment, std::memory_order_acq_rel);
     if (hapticSegment == 1 && previousHapticSegment != 1) {
-        performNativeHaptic(previousHapticSegment == 2 ? "return-first" : "first");
+        const char *stage = previousHapticSegment == 2 ? "return-first" : "first";
+        if (!performNativeHaptic(stage)) {
+            // Do not consume the segment transition when the feedback could not actually be
+            // emitted.  Restoring the previous state lets a later frame retry as soon as the
+            // capture hook/Arc becomes available instead of losing the first haptic forever.
+            int expectedSegment = 1;
+            if (gHapticGestureSegment.compare_exchange_strong(
+                    expectedSegment, previousHapticSegment, std::memory_order_acq_rel)) {
+                logLine(ANDROID_LOG_INFO,
+                        "HAPTIC_V2 retry armed stage=%s previousSegment=%d reason=feedback-not-emitted",
+                        stage, previousHapticSegment);
+            }
+        }
     }
 
     const int64_t now = monotonicMs();
@@ -1162,11 +1210,17 @@ void hookWatchdogWorker() {
             ensureHook(library, "watchdog");
             if (!gHapticCaptureHookInstalled.load(std::memory_order_acquire)) {
                 const int64_t now = monotonicMs();
+                const uint32_t failures = gHapticResolveFailures.load(std::memory_order_relaxed);
+                const int64_t retryInterval = failures < kHapticInitialResolveFastAttempts
+                        ? kHapticInitialResolveRetryMs : kHapticFeatureResolveIntervalMs;
                 int64_t last = gLastHapticFeatureResolveMs.load(std::memory_order_relaxed);
-                if (now - last >= kHapticFeatureResolveIntervalMs
+                if (now - last >= retryInterval
                         && gLastHapticFeatureResolveMs.compare_exchange_strong(
                                 last, now, std::memory_order_relaxed)) {
-                    installHapticCaptureHookFromLauncherImport(library, "watchdog-feature-probe");
+                    if (!installHapticCaptureHookFromLauncherImport(
+                            library, "watchdog-feature-probe")) {
+                        gHapticResolveFailures.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
             }
         } else {
@@ -1271,8 +1325,8 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
             reinterpret_cast<void *>(entries->hook_func), reinterpret_cast<void *>(entries->unhook_func),
             static_cast<long long>(kHookHealthIntervalMs));
     logLine(ANDROID_LOG_INFO,
-            "HAPTIC_V2 enabled policy=worker-only-loaded-elf-import ext-only constant=0 tagged-arc-preserved arc-max-age-ms=%lld first-segment-only no-module-second no-module-commit no-dlsym no-dlopen no-hook-mutex",
-            static_cast<long long>(kHapticArcMaxAgeMs));
+            "HAPTIC_V2 enabled policy=worker-only-loaded-elf-import ext-only constant=0 tagged-arc-preserved process-lifetime-arc retry-on-miss=1 confirm-dedup-ms=%lld first-segment-only no-module-second no-module-commit no-dlsym no-dlopen no-hook-mutex",
+            static_cast<long long>(kHapticConfirmSuppressMs));
 
     const LibraryInfo library = findLauncherLibrary();
     if (library.base != 0) {
