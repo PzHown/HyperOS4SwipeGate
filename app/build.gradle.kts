@@ -13,9 +13,9 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // dev.7: upgrade restart notice + 400 ms Ready/Release dedup.
-        versionCode = 50
-        versionName = "0.8.1-dev.8"
+        // dev.9: break-open animation beta + 400 ms Ready/Release dedup.
+        versionCode = 51
+        versionName = "0.8.1-dev.9"
 
         ndk {
             abiFilters += "arm64-v8a"
