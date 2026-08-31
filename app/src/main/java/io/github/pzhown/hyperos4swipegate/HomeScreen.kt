@@ -60,7 +60,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 import kotlin.math.roundToInt
 
 private const val PREF_DP_MIGRATED = "threshold_dp_migrated_v1"
-private const val PREF_LAST_APP_VERSION_CODE = "last_app_version_code"
+private const val PREF_LAST_SEEN_UPDATE_TIME = "last_seen_app_update_time"
 
 private enum class HomeHookState { Loading, Active, RestartRequired, Repairing, Error, Inactive, Unknown }
 
@@ -436,17 +436,24 @@ internal fun HomeScreen(
 }
 
 private fun shouldShowUpdateRestartNotice(context: Context): Boolean {
-    val prefs = ConfigBridge.localPreferences(context)
-    val currentVersionCode = BuildConfig.VERSION_CODE
-    val previousVersionCode = prefs.getInt(PREF_LAST_APP_VERSION_CODE, 0)
-    if (previousVersionCode == 0) {
-        prefs.edit().putInt(PREF_LAST_APP_VERSION_CODE, currentVersionCode).apply()
-        return false
-    }
-    if (previousVersionCode == currentVersionCode) return false
+    return try {
+        val info = context.packageManager.getPackageInfo(context.packageName, 0)
+        val firstInstallTime = info.firstInstallTime
+        val lastUpdateTime = info.lastUpdateTime
+        val prefs = ConfigBridge.localPreferences(context)
+        val lastSeenUpdateTime = prefs.getLong(PREF_LAST_SEEN_UPDATE_TIME, 0L)
 
-    prefs.edit().putInt(PREF_LAST_APP_VERSION_CODE, currentVersionCode).apply()
-    return true
+        // Fresh install: firstInstallTime == lastUpdateTime, so do not nag.
+        // Upgrade install: lastUpdateTime advances while firstInstallTime stays unchanged.
+        // Persist the update timestamp so each APK update prompts only once.
+        val unseenUpgrade = lastUpdateTime > firstInstallTime && lastSeenUpdateTime != lastUpdateTime
+        if (lastSeenUpdateTime != lastUpdateTime) {
+            prefs.edit().putLong(PREF_LAST_SEEN_UPDATE_TIME, lastUpdateTime).apply()
+        }
+        unseenUpgrade
+    } catch (_: Throwable) {
+        false
+    }
 }
 
 private fun collectHomeStatusSnapshot(context: Context): HomeStatusSnapshot {
