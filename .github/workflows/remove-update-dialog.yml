@@ -1,0 +1,106 @@
+name: Remove update dialog
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/remove-update-dialog.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Patch home status behavior
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected 1 match, got {count}")
+              return text.replace(old, new, 1)
+
+          p = Path('app/src/main/java/io/github/pzhown/hyperos4swipegate/HomeScreen.kt')
+          text = p.read_text()
+
+          text = text.replace('private const val PREF_LAST_SEEN_UPDATE_TIME = "last_seen_app_update_time"\n', '')
+          text = text.replace('    var showUpdateRestartNotice by remember { mutableStateOf(false) }\n', '')
+          text = text.replace('        showUpdateRestartNotice = shouldShowUpdateRestartNotice(context)\n', '')
+
+          # Remove the update-only OverlayDialog while leaving the threshold input dialog intact.
+          pattern = re.compile(
+              r'\n    OverlayDialog\(\n'
+              r'        title = "需要重启作用域",\n'
+              r'        summary = "检测到 SwipeGate 已更新。系统桌面和系统界面可能仍在运行旧版本模块代码，请在 LSPosed 中重启作用域后再继续使用。",\n'
+              r'        show = showUpdateRestartNotice,\n'
+              r'        onDismissRequest = \{ showUpdateRestartNotice = false \},\n'
+              r'    \) \{\n'
+              r'        Row\(\n'
+              r'            modifier = Modifier.fillMaxWidth\(\),\n'
+              r'            horizontalArrangement = Arrangement.End,\n'
+              r'        \) \{\n'
+              r'            Button\(onClick = \{ showUpdateRestartNotice = false \}\) \{\n'
+              r'                Text\("知道了"\)\n'
+              r'            \}\n'
+              r'        \}\n'
+              r'    \}\n',
+              re.M,
+          )
+          text, count = pattern.subn('', text, count=1)
+          if count != 1:
+              raise SystemExit(f'update dialog: expected 1 match, got {count}')
+
+          # Remove PackageManager install-time detector. The framework target state is the source
+          # of truth: STALE means the running scope still has the old module generation loaded.
+          start = text.find('private fun shouldShowUpdateRestartNotice(context: Context): Boolean {')
+          end = text.find('private fun collectHomeStatusSnapshot(context: Context): HomeStatusSnapshot {', start)
+          if start < 0 or end < 0:
+              raise SystemExit('update detector block not found')
+          text = text[:start] + text[end:]
+
+          # Keep the existing RestartRequired card and make its copy explicitly scope-oriented.
+          text = replace_once(
+              text,
+              '        HomeHookState.RestartRequired -> "系统桌面仍在运行旧版模块代码"',
+              '        HomeHookState.RestartRequired -> "模块已更新，作用域仍在运行旧版代码"',
+              'restart secondary label',
+          )
+          text = replace_once(
+              text,
+              '        "STALE" -> status(HomeHookState.RestartRequired, "检测到系统桌面仍加载旧版本模块代码，请重启作用域。")',
+              '        "STALE" -> status(HomeHookState.RestartRequired, "模块已更新，但作用域仍加载旧版本代码。请在 LSPosed 中重启作用域。")',
+              'stale detail',
+          )
+          p.write_text(text)
+
+          gradle = Path('app/build.gradle.kts')
+          g = gradle.read_text()
+          g = replace_once(g, 'versionCode = 49', 'versionCode = 50', 'versionCode')
+          g = replace_once(g, 'versionName = "0.8.1-dev.7"', 'versionName = "0.8.1-dev.8"', 'versionName')
+          g = g.replace('// dev.7: robust upgrade detection + 400 ms Ready/Release dedup.',
+                        '// dev.8: restart-required home state + 400 ms Ready/Release dedup.')
+          gradle.write_text(g)
+
+          Path('.github/workflows/remove-update-dialog.yml').unlink()
+          PY
+
+      - name: Commit changes
+        shell: bash
+        run: |
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/io/github/pzhown/hyperos4swipegate/HomeScreen.kt app/build.gradle.kts .github/workflows/remove-update-dialog.yml
+          git commit -m "fix: show restart requirement in home status"
+          git push origin HEAD:dev
