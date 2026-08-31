@@ -29,8 +29,8 @@ android {
 
     val ciStorePath = System.getenv("ANDROID_SIGNING_STORE_FILE")
     val ciStorePassword = System.getenv("ANDROID_SIGNING_STORE_PASSWORD")
-    val ciKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
-    val ciKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+    val ciKeyAlias = System.getenv("ANDROID_SIGNING_KEY_ALIAS")
+    val ciKeyPassword = System.getenv("ANDROID_SIGNING_KEY_PASSWORD")
     val ciSigningConfig = if (
         !ciStorePath.isNullOrBlank()
         && !ciStorePassword.isNullOrBlank()
