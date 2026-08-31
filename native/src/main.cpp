@@ -36,7 +36,9 @@ __attribute__((visibility("hidden"))) extern void *gSwipeGateOriginalOnBackInvok
 __attribute__((visibility("hidden"))) void swipegate_on_back_invoke_hook();
 __attribute__((visibility("hidden"))) void swipegate_haptic_on_back_invoke();
 __attribute__((visibility("hidden"))) void swipegate_haptic_on_back_invoke_exit();
-__attribute__((visibility("hidden"))) void swipegate_back_break_enable(HookFunType hookFunction);
+__attribute__((visibility("hidden"))) void swipegate_back_break_enable(
+        HookFunType hookFunction, UnhookFunType unhookFunction);
+__attribute__((visibility("hidden"))) void swipegate_back_break_maintain();
 }
 
 namespace {
@@ -1309,6 +1311,7 @@ void hookWatchdogWorker() {
         if (library.base != 0) {
             missingPolls = 0;
             ensureHook(library, "watchdog");
+            swipegate_back_break_maintain();
             if (!gHapticCaptureHookInstalled.load(std::memory_order_acquire)
                     || !gHapticRuntimeBridgeResolved.load(std::memory_order_acquire)) {
                 const int64_t now = monotonicMs();
@@ -1440,7 +1443,7 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
 
     gHookFunction = entries->hook_func;
     gUnhookFunction = entries->unhook_func;
-    if (launcherProcess) swipegate_back_break_enable(entries->hook_func);
+    if (launcherProcess) swipegate_back_break_enable(entries->hook_func, entries->unhook_func);
     logLine(ANDROID_LOG_INFO,
             "DP_GATE native_init accepted api=%u exe=%s process=%s launcherCmdline=%d hook_func=%p unhook_func=%p watchdog=%lldms resolver=exact-profile-first+semantic-unknown-build abi=transparent-s0 repair=unhook+rehook",
             entries->version, executable.c_str(), processName.c_str(), launcherProcess ? 1 : 0,
