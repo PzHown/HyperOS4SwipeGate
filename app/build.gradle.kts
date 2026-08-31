@@ -13,7 +13,7 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // dev.13: HyperRT MADV_DONTNEED page guard + self-healing hook fallback + 750 ms dedup.
+        // dev.13: HyperRT MADV_DONTNEED page guard + self-healing hook fallback + 750 ms dedup; CI-validated guard build.
         versionCode = 55
         versionName = "0.8.1-dev.13"
 
