@@ -36,6 +36,7 @@ __attribute__((visibility("hidden"))) extern void *gSwipeGateOriginalOnBackInvok
 __attribute__((visibility("hidden"))) void swipegate_on_back_invoke_hook();
 __attribute__((visibility("hidden"))) void swipegate_haptic_on_back_invoke();
 __attribute__((visibility("hidden"))) void swipegate_haptic_on_back_invoke_exit();
+__attribute__((visibility("hidden"))) void swipegate_back_break_enable(HookFunType hookFunction);
 }
 
 namespace {
@@ -303,10 +304,9 @@ LibraryInfo findLauncherLibrary() {
 bool rangeContains(const ExecutableRange &range, uintptr_t address, size_t size) {
     if (range.start == 0 || range.size == 0 || address == 0 || size == 0) return false;
     if (address < range.start) return false;
-    const uintptr_t rangeEnd = range.start + range.size;
-    const uintptr_t addressEnd = address + size;
-    if (rangeEnd < range.start || addressEnd < address) return false;
-    return addressEnd <= rangeEnd;
+    const uintptr_t relative = address - range.start;
+    if (relative > range.size) return false;
+    return size <= range.size - relative;
 }
 
 bool libraryContainsRange(const LibraryInfo &library, uintptr_t address, size_t size) {
@@ -316,17 +316,6 @@ bool libraryContainsRange(const LibraryInfo &library, uintptr_t address, size_t 
     return false;
 }
 
-uintptr_t resolveLoadedElfPointer(const LibraryInfo &library, ElfW(Addr) value, size_t size) {
-    if (value == 0 || size == 0) return 0;
-    if (value <= UINTPTR_MAX - library.base) {
-        const uintptr_t relative = library.base + static_cast<uintptr_t>(value);
-        if (libraryContainsRange(library, relative, size)) return relative;
-    }
-    const uintptr_t absolute = static_cast<uintptr_t>(value);
-    if (libraryContainsRange(library, absolute, size)) return absolute;
-    return 0;
-}
-
 struct ImportedFunctionResolution {
     uintptr_t slot = 0;
     void *target = nullptr;
@@ -334,88 +323,80 @@ struct ImportedFunctionResolution {
     const char *relocationKind = nullptr;
 };
 
+uintptr_t resolveLoadedElfPointer(const LibraryInfo &library, ElfW(Addr) raw, size_t size) {
+    const uintptr_t absolute = static_cast<uintptr_t>(raw);
+    if (libraryContainsRange(library, absolute, size)) return absolute;
+    const uintptr_t rebased = library.base + static_cast<uintptr_t>(raw);
+    if (libraryContainsRange(library, rebased, size)) return rebased;
+    return 0;
+}
+
 bool dynStringEquals(const LibraryInfo &library, uintptr_t strtab, size_t strsz,
                      size_t offset, const char *expected) {
     if (expected == nullptr || strtab == 0 || offset >= strsz) return false;
-    const size_t remaining = strsz - offset;
+    const size_t expectedLength = std::strlen(expected);
+    if (expectedLength >= strsz - offset) return false;
     const uintptr_t address = strtab + offset;
-    if (address < strtab || !libraryContainsRange(library, address, remaining)) return false;
-    const char *candidate = reinterpret_cast<const char *>(address);
-    const size_t length = strnlen(candidate, remaining);
-    return length < remaining && std::strlen(expected) == length
-            && std::memcmp(candidate, expected, length) == 0;
+    if (!libraryContainsRange(library, address, expectedLength + 1)) return false;
+    return std::memcmp(reinterpret_cast<const void *>(address), expected, expectedLength + 1) == 0;
 }
 
-ImportedFunctionResolution resolveImportedFunction(const LibraryInfo &library,
-                                                   const char *symbolName) {
-    ImportedFunctionResolution result{};
-    if (library.base == 0 || library.programHeaders == nullptr
-            || library.programHeaderCount == 0 || symbolName == nullptr) return result;
+ImportedFunctionResolution resolveImportedFunction(const LibraryInfo &library, const char *symbolName) {
+    ImportedFunctionResolution result;
+    if (library.base == 0 || library.programHeaders == nullptr || symbolName == nullptr) return result;
 
-    const ElfW(Phdr) *dynamicHeader = nullptr;
+    const ElfW(Dyn) *dynamic = nullptr;
+    size_t dynamicCount = 0;
     for (ElfW(Half) i = 0; i < library.programHeaderCount; ++i) {
         const ElfW(Phdr) &phdr = library.programHeaders[i];
-        if (phdr.p_type == PT_DYNAMIC && phdr.p_memsz >= sizeof(ElfW(Dyn))) {
-            dynamicHeader = &phdr;
-            break;
-        }
+        if (phdr.p_type != PT_DYNAMIC || phdr.p_memsz < sizeof(ElfW(Dyn))) continue;
+        dynamic = reinterpret_cast<const ElfW(Dyn) *>(library.base + static_cast<uintptr_t>(phdr.p_vaddr));
+        dynamicCount = static_cast<size_t>(phdr.p_memsz / sizeof(ElfW(Dyn)));
+        break;
     }
-    if (dynamicHeader == nullptr) return result;
+    if (dynamic == nullptr || dynamicCount == 0) return result;
 
-    const uintptr_t dynamicAddress = resolveLoadedElfPointer(
-            library, dynamicHeader->p_vaddr, static_cast<size_t>(dynamicHeader->p_memsz));
-    if (dynamicAddress == 0) return result;
-    const auto *dynamic = reinterpret_cast<const ElfW(Dyn) *>(dynamicAddress);
-    const size_t dynamicCount = static_cast<size_t>(dynamicHeader->p_memsz / sizeof(ElfW(Dyn)));
-
-    ElfW(Addr) symtabValue = 0;
     ElfW(Addr) strtabValue = 0;
+    ElfW(Xword) strsz = 0;
+    ElfW(Addr) symtabValue = 0;
     ElfW(Addr) jmprelValue = 0;
+    ElfW(Xword) pltrelsz = 0;
+    ElfW(Sxword) pltrelType = 0;
     ElfW(Addr) relaValue = 0;
-    size_t strsz = 0;
-    size_t pltrelsz = 0;
-    size_t relasz = 0;
-    size_t syment = sizeof(ElfW(Sym));
-    size_t relaent = sizeof(ElfW(Rela));
-    ElfW(Sxword) pltrelType = DT_RELA;
+    ElfW(Xword) relasz = 0;
+    ElfW(Xword) syment = sizeof(ElfW(Sym));
 
     for (size_t i = 0; i < dynamicCount; ++i) {
         const ElfW(Dyn) &entry = dynamic[i];
         if (entry.d_tag == DT_NULL) break;
         switch (entry.d_tag) {
-            case DT_SYMTAB: symtabValue = entry.d_un.d_ptr; break;
             case DT_STRTAB: strtabValue = entry.d_un.d_ptr; break;
-            case DT_STRSZ: strsz = static_cast<size_t>(entry.d_un.d_val); break;
-            case DT_SYMENT: syment = static_cast<size_t>(entry.d_un.d_val); break;
+            case DT_STRSZ: strsz = entry.d_un.d_val; break;
+            case DT_SYMTAB: symtabValue = entry.d_un.d_ptr; break;
+            case DT_SYMENT: syment = entry.d_un.d_val; break;
             case DT_JMPREL: jmprelValue = entry.d_un.d_ptr; break;
-            case DT_PLTRELSZ: pltrelsz = static_cast<size_t>(entry.d_un.d_val); break;
-            case DT_PLTREL: pltrelType = entry.d_un.d_val; break;
+            case DT_PLTRELSZ: pltrelsz = entry.d_un.d_val; break;
+            case DT_PLTREL: pltrelType = static_cast<ElfW(Sxword)>(entry.d_un.d_val); break;
             case DT_RELA: relaValue = entry.d_un.d_ptr; break;
-            case DT_RELASZ: relasz = static_cast<size_t>(entry.d_un.d_val); break;
-            case DT_RELAENT: relaent = static_cast<size_t>(entry.d_un.d_val); break;
+            case DT_RELASZ: relasz = entry.d_un.d_val; break;
             default: break;
         }
     }
 
-    if (symtabValue == 0 || strtabValue == 0 || strsz == 0
-            || syment != sizeof(ElfW(Sym)) || relaent != sizeof(ElfW(Rela))) return result;
-
+    if (strtabValue == 0 || strsz == 0 || symtabValue == 0 || syment != sizeof(ElfW(Sym))) return result;
+    const uintptr_t strtab = resolveLoadedElfPointer(library, strtabValue, static_cast<size_t>(strsz));
     const uintptr_t symtab = resolveLoadedElfPointer(library, symtabValue, sizeof(ElfW(Sym)));
-    const uintptr_t strtab = resolveLoadedElfPointer(library, strtabValue, strsz);
-    if (symtab == 0 || strtab == 0) return result;
+    if (strtab == 0 || symtab == 0) return result;
 
-    auto scanRela = [&](uintptr_t tableAddress, size_t tableSize, const char *kind) {
-        if (tableAddress == 0 || tableSize < sizeof(ElfW(Rela))
-                || tableSize % sizeof(ElfW(Rela)) != 0) return;
-        if (!libraryContainsRange(library, tableAddress, tableSize)) return;
-        const auto *relocations = reinterpret_cast<const ElfW(Rela) *>(tableAddress);
-        const size_t count = tableSize / sizeof(ElfW(Rela));
+    auto scanRela = [&](uintptr_t table, size_t bytes, const char *kind) {
+        if (table == 0 || bytes < sizeof(ElfW(Rela))) return;
+        const size_t count = bytes / sizeof(ElfW(Rela));
         for (size_t i = 0; i < count; ++i) {
-            const ElfW(Rela) &relocation = relocations[i];
-            const uint32_t type = ELF64_R_TYPE(relocation.r_info);
-            if (type != R_AARCH64_JUMP_SLOT && type != R_AARCH64_GLOB_DAT) continue;
+            const uintptr_t entryAddress = table + i * sizeof(ElfW(Rela));
+            if (!libraryContainsRange(library, entryAddress, sizeof(ElfW(Rela)))) break;
+            const auto &relocation = *reinterpret_cast<const ElfW(Rela) *>(entryAddress);
             const size_t symbolIndex = static_cast<size_t>(ELF64_R_SYM(relocation.r_info));
-            if (symbolIndex > (SIZE_MAX / sizeof(ElfW(Sym)))) continue;
+            if (symbolIndex > (SIZE_MAX - symtab) / sizeof(ElfW(Sym))) continue;
             const uintptr_t symbolAddress = symtab + symbolIndex * sizeof(ElfW(Sym));
             if (symbolAddress < symtab
                     || !libraryContainsRange(library, symbolAddress, sizeof(ElfW(Sym)))) continue;
@@ -753,83 +734,141 @@ bool installHapticCaptureHookFromLauncherImport(const LibraryInfo &library, cons
     return installHapticCaptureHookTarget(resolution.target, "launcher-import-feature");
 }
 
-using GetGlobalRuntimeFn = void *(*)();
-using RuntimeDecStrongFn = void (*)(void *);
-
-bool decodeBlTarget(uintptr_t pc, uint32_t insn, uintptr_t *target) {
-    if (target == nullptr || (insn & 0xfc000000u) != 0x94000000u) return false;
-    int64_t imm26 = static_cast<int64_t>(insn & 0x03ffffffu);
-    if (imm26 & 0x02000000LL) imm26 |= ~0x03ffffffLL;
+bool decodeBlTarget(uintptr_t pc, uint32_t instruction, uintptr_t *target) {
+    if (target == nullptr || (instruction & 0xfc000000u) != 0x94000000u) return false;
+    int64_t imm26 = static_cast<int64_t>(instruction & 0x03ffffffu);
+    if ((imm26 & 0x02000000LL) != 0) imm26 |= ~0x03ffffffLL;
     *target = static_cast<uintptr_t>(static_cast<int64_t>(pc) + imm26 * 4LL);
     return true;
 }
 
-bool pltUsesSlot(const LibraryInfo &library, uintptr_t plt, uintptr_t slot) {
-    if (plt == 0 || slot == 0 || !libraryContainsRange(library, plt, 16)) return false;
-    uint32_t i[4]{};
-    std::memcpy(i, reinterpret_cast<const void *>(plt), sizeof(i));
-    if ((i[0] & 0x9f00001fu) != 0x90000010u) return false; // adrp x16
-    if ((i[2] & 0xffc003ffu) != 0x91000210u) return false; // add x16,x16,#imm
-    if (i[3] != 0xd61f0220u) return false;                 // br x17
-    int64_t imm21 = (static_cast<int64_t>((i[0] >> 5) & 0x7ffffu) << 2)
-            | static_cast<int64_t>((i[0] >> 29) & 3u);
-    if (imm21 & (1LL << 20)) imm21 |= ~((1LL << 21) - 1LL);
+bool pltReferencesSlot(const LibraryInfo &library, uintptr_t plt, uintptr_t expectedSlot) {
+    if (plt == 0 || expectedSlot == 0 || !libraryContainsRange(library, plt, 16)) return false;
+    uint32_t insn[4]{};
+    std::memcpy(insn, reinterpret_cast<const void *>(plt), sizeof(insn));
+    if ((insn[0] & 0x9f00001fu) != 0x90000010u) return false;
+    if ((insn[2] & 0xffc003ffu) != 0x91000210u) return false;
+    if (insn[3] != 0xd61f0220u) return false;
+
+    int64_t immhi = static_cast<int64_t>((insn[0] >> 5) & 0x7ffffu);
+    const int64_t immlo = static_cast<int64_t>((insn[0] >> 29) & 0x3u);
+    int64_t imm21 = (immhi << 2) | immlo;
+    if ((imm21 & (1LL << 20)) != 0) imm21 |= ~((1LL << 21) - 1LL);
     const uintptr_t page = static_cast<uintptr_t>(
             static_cast<int64_t>(plt & ~static_cast<uintptr_t>(0xfff)) + imm21 * 4096LL);
-    const uintptr_t off = static_cast<uintptr_t>((i[2] >> 10) & 0xfffu)
-            << (((i[2] >> 22) & 1u) ? 12 : 0);
-    return page + off == slot;
+    const uint32_t shift = (insn[2] >> 22) & 0x1u;
+    const uintptr_t addImm = static_cast<uintptr_t>((insn[2] >> 10) & 0xfffu)
+            << (shift != 0 ? 12 : 0);
+    return page + addImm == expectedSlot;
 }
 
 bool resolveHyperRtRuntimeBridge(const LibraryInfo &library) {
     if (gHapticRuntimeBridgeResolved.load(std::memory_order_acquire)) return true;
+    if (library.base == 0) return false;
+
     const ImportedFunctionResolution haptic = resolveImportedFunction(library, kHapticSymbol);
-    const ImportedFunctionResolution dec = resolveImportedFunction(library, "Runtime_dec_strong");
+    const ImportedFunctionResolution decStrong = resolveImportedFunction(library, "Runtime_dec_strong");
     if (haptic.matches != 1 || haptic.slot == 0
-            || dec.matches != 1 || dec.slot == 0 || dec.target == nullptr) return false;
+            || decStrong.matches != 1 || decStrong.slot == 0 || decStrong.target == nullptr) {
+        return false;
+    }
 
     uintptr_t runtimeTarget = 0;
-    size_t hits = 0;
-    for (size_t r = 0; r < library.executableRangeCount; ++r) {
-        const ExecutableRange &range = library.executableRanges[r];
+    size_t corroboratedCallsites = 0;
+    for (size_t rangeIndex = 0; rangeIndex < library.executableRangeCount; ++rangeIndex) {
+        const ExecutableRange &range = library.executableRanges[rangeIndex];
         if (range.start == 0 || range.size < 36) continue;
-        const uintptr_t first = (range.start + 23u) & ~static_cast<uintptr_t>(3u);
+        const uintptr_t start = (range.start + 20u + 3u) & ~static_cast<uintptr_t>(3u);
         const uintptr_t last = range.start + range.size - 12u;
-        for (uintptr_t pc = first; pc <= last; pc += 4u) {
-            uint32_t call = 0;
-            std::memcpy(&call, reinterpret_cast<const void *>(pc), 4);
-            uintptr_t hapticPlt = 0;
-            if (!decodeBlTarget(pc, call, &hapticPlt) || !pltUsesSlot(library, hapticPlt, haptic.slot)) continue;
+        for (uintptr_t pc = start; pc <= last; pc += 4u) {
+            uint32_t callInsn = 0;
+            std::memcpy(&callInsn, reinterpret_cast<const void *>(pc), sizeof(callInsn));
+            uintptr_t callTarget = 0;
+            if (!decodeBlTarget(pc, callInsn, &callTarget)
+                    || !pltReferencesSlot(library, callTarget, haptic.slot)) continue;
 
-            uint32_t movW1 = 0, save = 0, restore = 0, getCall = 0, decCall = 0;
-            std::memcpy(&movW1, reinterpret_cast<const void *>(pc - 4), 4);
-            std::memcpy(&save, reinterpret_cast<const void *>(pc - 16), 4);
-            std::memcpy(&restore, reinterpret_cast<const void *>(pc + 4), 4);
-            std::memcpy(&getCall, reinterpret_cast<const void *>(pc - 20), 4);
-            std::memcpy(&decCall, reinterpret_cast<const void *>(pc + 8), 4);
-            if (movW1 != 0x2a1f03e1u) continue; // mov w1,wzr
-            if ((save & 0xffffffe0u) != 0xaa0003e0u) continue; // mov xN,x0
-            const uint32_t reg = save & 0x1fu;
-            if (restore != (0xaa0003e0u | (reg << 16))) continue; // mov x0,xN
+            // Match Xiaomi's stock HyperRT haptic shape semantically rather than hardcoding an
+            // RVA: get_global_runtime(); store Arc on stack; mov w1, wzr; haptic(&Arc, 0);
+            // mov x0, savedRuntime; Runtime_dec_strong(runtime). Register allocation and stack
+            // offsets are deliberately allowed to vary across nearby Launcher builds.
+            uint32_t movW1 = 0;
+            std::memcpy(&movW1, reinterpret_cast<const void *>(pc - 4u), sizeof(movW1));
+            if (movW1 != 0x2a1f03e1u) continue;  // mov w1, wzr
 
-            uintptr_t candidate = 0, decPlt = 0;
-            if (!decodeBlTarget(pc - 20, getCall, &candidate)
-                    || !decodeBlTarget(pc + 8, decCall, &decPlt)
-                    || !pltUsesSlot(library, decPlt, dec.slot)
-                    || !libraryContainsRange(library, candidate, 4)) continue;
-            if (runtimeTarget != 0 && runtimeTarget != candidate) return false;
-            runtimeTarget = candidate;
-            ++hits;
+            struct Candidate {
+                uintptr_t getter = 0;
+                uint32_t savedReg = 0;
+            };
+            std::array<Candidate, 3> candidates{};
+            size_t candidateCount = 0;
+            for (size_t back = 2; back <= 8 && pc >= range.start + back * 4u; ++back) {
+                uint32_t word = 0;
+                std::memcpy(&word, reinterpret_cast<const void *>(pc - back * 4u), sizeof(word));
+                if ((word & 0xffffffe0u) != 0xaa0003e0u) continue; // mov xN, x0
+                const uint32_t savedReg = word & 0x1fu;
+                for (size_t callBack = back + 1; callBack <= back + 3
+                        && pc >= range.start + callBack * 4u; ++callBack) {
+                    uint32_t maybeCall = 0;
+                    std::memcpy(&maybeCall,
+                                reinterpret_cast<const void *>(pc - callBack * 4u),
+                                sizeof(maybeCall));
+                    uintptr_t getter = 0;
+                    if (!decodeBlTarget(pc - callBack * 4u, maybeCall, &getter)
+                            || !libraryContainsRange(library, getter, 4)) continue;
+                    if (candidateCount < candidates.size()) {
+                        candidates[candidateCount++] = {getter, savedReg};
+                    }
+                    break;
+                }
+            }
+            if (candidateCount == 0) continue;
+
+            uintptr_t matchedRuntime = 0;
+            for (size_t forward = 1; forward <= 5 && pc + forward * 4u + 4u <= last; ++forward) {
+                uint32_t restore = 0;
+                std::memcpy(&restore, reinterpret_cast<const void *>(pc + forward * 4u), sizeof(restore));
+                for (size_t i = 0; i < candidateCount; ++i) {
+                    if (restore != (0xaa0003e0u | (candidates[i].savedReg << 16))) continue;
+                    for (size_t callForward = forward + 1; callForward <= forward + 3
+                            && pc + callForward * 4u <= last; ++callForward) {
+                        uint32_t decInsn = 0;
+                        std::memcpy(&decInsn,
+                                    reinterpret_cast<const void *>(pc + callForward * 4u),
+                                    sizeof(decInsn));
+                        uintptr_t decPlt = 0;
+                        if (decodeBlTarget(pc + callForward * 4u, decInsn, &decPlt)
+                                && pltReferencesSlot(library, decPlt, decStrong.slot)) {
+                            matchedRuntime = candidates[i].getter;
+                            break;
+                        }
+                    }
+                    if (matchedRuntime != 0) break;
+                }
+                if (matchedRuntime != 0) break;
+            }
+            if (matchedRuntime == 0) continue;
+
+            if (runtimeTarget == 0) {
+                runtimeTarget = matchedRuntime;
+            } else if (runtimeTarget != matchedRuntime) {
+                logLine(ANDROID_LOG_WARN,
+                        "HAPTIC_V2 HyperRT runtime resolver ambiguous first=%p next=%p",
+                        reinterpret_cast<void *>(runtimeTarget),
+                        reinterpret_cast<void *>(matchedRuntime));
+                return false;
+            }
+            ++corroboratedCallsites;
         }
     }
-    if (runtimeTarget == 0 || hits == 0) return false;
+
+    if (runtimeTarget == 0 || corroboratedCallsites == 0) return false;
     gGetGlobalRuntime.store(runtimeTarget, std::memory_order_release);
-    gRuntimeDecStrong.store(dec.target, std::memory_order_release);
+    gRuntimeDecStrong.store(decStrong.target, std::memory_order_release);
     gHapticRuntimeBridgeResolved.store(true, std::memory_order_release);
     gHapticUnavailableLogged.store(false, std::memory_order_release);
     logLine(ANDROID_LOG_INFO,
             "HAPTIC_V2 HyperRT runtime bridge resolved getRuntime=%p decStrong=%p stockCallsites=%zu",
-            reinterpret_cast<void *>(runtimeTarget), dec.target, hits);
+            reinterpret_cast<void *>(runtimeTarget), decStrong.target, corroboratedCallsites);
     return true;
 }
 
@@ -839,33 +878,38 @@ bool performNativeHaptic(const char *stage) {
 
     const auto haptic = reinterpret_cast<HapticFeedbackFn>(
             gOriginalHapticFeedback.load(std::memory_order_acquire));
-    const auto getRuntime = reinterpret_cast<GetGlobalRuntimeFn>(
+    const auto getRuntime = reinterpret_cast<void *(*)()>(
             gGetGlobalRuntime.load(std::memory_order_acquire));
-    const auto decStrong = reinterpret_cast<RuntimeDecStrongFn>(
+    const auto decStrong = reinterpret_cast<void (*)(void *)>(
             gRuntimeDecStrong.load(std::memory_order_acquire));
     if (haptic == nullptr || getRuntime == nullptr || decStrong == nullptr
             || !gHapticRuntimeBridgeResolved.load(std::memory_order_acquire)) {
         bool expected = false;
         if (gHapticUnavailableLogged.compare_exchange_strong(expected, true)) {
             logLine(ANDROID_LOG_WARN,
-                    "HAPTIC_V2 skipped stage=%s reason=hyperrt-runtime-bridge-not-ready hook=%d bridge=%d",
+                    "HAPTIC_V2 skipped stage=%s reason=hyperrt-runtime-bridge-not-ready hook=%d bridge=%d getRuntime=%p decStrong=%p",
                     stage == nullptr ? "unknown" : stage,
-                    haptic != nullptr ? 1 : 0,
-                    gHapticRuntimeBridgeResolved.load(std::memory_order_acquire) ? 1 : 0);
+                    haptic == nullptr ? 0 : 1,
+                    gHapticRuntimeBridgeResolved.load(std::memory_order_acquire) ? 1 : 0,
+                    reinterpret_cast<void *>(getRuntime), reinterpret_cast<void *>(decStrong));
         }
         return false;
     }
 
     void *runtime = getRuntime();
-    if (runtime == nullptr) return false;
+    if (runtime == nullptr) {
+        logLine(ANDROID_LOG_WARN,
+                "HAPTIC_V2 skipped stage=%s reason=get-global-runtime-null",
+                stage == nullptr ? "unknown" : stage);
+        return false;
+    }
     void *storage = runtime;
-    haptic(&storage, kHapticConstant); // trampoline: bypass Release-only dispatch hook
+    haptic(&storage, kHapticConstant); // trampoline: bypass our Release-only capture hook
     decStrong(runtime);
 
     const int64_t now = monotonicMs();
     gLastReadyHapticAtMs.store(now, std::memory_order_release);
     gReadyReleaseDedupEligible.store(true, std::memory_order_release);
-    gLastInjectedHapticAtMs.store(now, std::memory_order_release);
     gHapticUnavailableLogged.store(false, std::memory_order_release);
     logLine(ANDROID_LOG_INFO,
             "HAPTIC_V2 feedback stage=%s kind=hyperrt-stock constant=%d readyReleaseDedupMs=%lld",
@@ -874,22 +918,23 @@ bool performNativeHaptic(const char *stage) {
     return true;
 }
 
-uintptr_t resolveUniqueAuxPattern(const LibraryInfo &library,
-                                  const uint8_t *bytes, size_t size) {
-    if (bytes == nullptr || size == 0) return 0;
+uintptr_t resolveUniqueAuxPattern(const LibraryInfo &library, const uint8_t *pattern, size_t size) {
+    if (pattern == nullptr || size == 0) return 0;
     uintptr_t found = 0;
+    size_t matches = 0;
     for (size_t rangeIndex = 0; rangeIndex < library.executableRangeCount; ++rangeIndex) {
         const ExecutableRange &range = library.executableRanges[rangeIndex];
         if (range.start == 0 || range.size < size) continue;
-        const uintptr_t start = (range.start + 3u) & ~static_cast<uintptr_t>(3u);
+        const uintptr_t first = (range.start + 3U) & ~static_cast<uintptr_t>(3U);
         const uintptr_t last = range.start + range.size - size;
-        for (uintptr_t cursor = start; cursor <= last; cursor += 4u) {
-            if (std::memcmp(reinterpret_cast<const void *>(cursor), bytes, size) != 0) continue;
-            if (found != 0 && found != cursor) return 0;
+        for (uintptr_t cursor = first; cursor <= last; cursor += 4U) {
+            if (std::memcmp(reinterpret_cast<const void *>(cursor), pattern, size) != 0) continue;
+            ++matches;
             found = cursor;
+            if (matches > 1) return 0;
         }
     }
-    return found;
+    return matches == 1 ? found : 0;
 }
 
 uintptr_t resolveBackInvokeTarget(const LibraryInfo &library, const char **featureName) {
@@ -1421,6 +1466,9 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
 
     gHookFunction = entries->hook_func;
     gUnhookFunction = entries->unhook_func;
+    if (launcherProcess) {
+        swipegate_back_break_enable(entries->hook_func);
+    }
     logLine(ANDROID_LOG_INFO,
             "DP_GATE native_init accepted api=%u exe=%s process=%s launcherCmdline=%d hook_func=%p unhook_func=%p watchdog=%lldms resolver=exact-profile-first+semantic-unknown-build abi=transparent-s0 repair=unhook+rehook",
             entries->version, executable.c_str(), processName.c_str(), launcherProcess ? 1 : 0,
