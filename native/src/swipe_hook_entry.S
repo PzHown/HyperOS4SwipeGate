@@ -3,6 +3,7 @@
 
 .hidden swipegate_hook_enter_and_gate
 .hidden swipegate_hook_exit
+.hidden swipegate_back_break_probe_on_swipe
 .hidden gSwipeGateOriginalOnSwipeProcess
 .global swipegate_on_swipe_process_hook
 .hidden swipegate_on_swipe_process_hook
@@ -27,13 +28,19 @@ swipegate_on_swipe_process_hook:
     stp q4, q5, [sp, #0x90]
     stp q6, q7, [sp, #0xb0]
 
+    // Observation-only probe. Feed it the original ready/side/distance values,
+    // then explicitly reload the original scalar before the production gate helper.
+    ldr w0, [sp, #0x08]
+    ldr w1, [sp, #0x10]
+    ldr s0, [sp, #0x50]
+    bl swipegate_back_break_probe_on_swipe
+
     // Helper signature:
     // float swipegate_hook_enter_and_gate(uint32_t ready, uint32_t side,
     //                                     float horizontal_distance);
-    // Integer and FP argument banks are independent in AAPCS64, so s0 already
-    // carries the original horizontal distance while w1/w2 are copied to w0/w1.
-    mov w0, w1
-    mov w1, w2
+    ldr w0, [sp, #0x08]
+    ldr w1, [sp, #0x10]
+    ldr s0, [sp, #0x50]
     bl swipegate_hook_enter_and_gate
     str s0, [sp, #0xd0]
 
