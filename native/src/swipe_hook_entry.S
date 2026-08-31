@@ -93,9 +93,15 @@ swipegate_on_back_invoke_hook:
     adrp x17, gSwipeGateOriginalOnBackInvoke
     add x17, x17, :lo12:gSwipeGateOriginalOnBackInvoke
     ldar x16, [x17]
-    cbz x16, .Lback_invoke_done
+    cbz x16, .Lback_invoke_after_original
     blr x16
-.Lback_invoke_done:
+.Lback_invoke_after_original:
+    // Preserve the opaque return value while closing the thread-local Release dedup scope.
+    str x0, [sp, #0xd0]
+    str q0, [sp, #0xe0]
+    bl swipegate_haptic_on_back_invoke_exit
+    ldr q0, [sp, #0xe0]
+    ldr x0, [sp, #0xd0]
     ldr x30, [sp, #0x48]
     add sp, sp, #0x110
     ret
