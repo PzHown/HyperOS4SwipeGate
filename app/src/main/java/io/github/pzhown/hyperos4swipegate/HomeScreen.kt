@@ -60,8 +60,9 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 import kotlin.math.roundToInt
 
 private const val PREF_DP_MIGRATED = "threshold_dp_migrated_v1"
+private const val PREF_LAST_APP_VERSION_CODE = "last_app_version_code"
 
-private enum class HomeHookState { Loading, Active, Repairing, Error, Inactive, Unknown }
+private enum class HomeHookState { Loading, Active, RestartRequired, Repairing, Error, Inactive, Unknown }
 
 private data class HomeStatusSnapshot(
     val state: HomeHookState,
@@ -101,6 +102,7 @@ internal fun HomeScreen(
     var showThresholdInput by remember { mutableStateOf(false) }
     var thresholdInput by remember { mutableStateOf(TextFieldValue(thresholdDp.roundToInt().toString())) }
     var thresholdInputError by remember { mutableStateOf("") }
+    var showUpdateRestartNotice by remember { mutableStateOf(false) }
 
     fun applyThreshold(appliedValue: Int) {
         val applied = appliedValue.coerceIn(ConfigBridge.STOCK_THRESHOLD_DP, ConfigBridge.MAX_THRESHOLD_DP)
@@ -112,6 +114,7 @@ internal fun HomeScreen(
     }
 
     LaunchedEffect(Unit) {
+        showUpdateRestartNotice = shouldShowUpdateRestartNotice(context)
         while (true) {
             snapshot = withContext(Dispatchers.IO) { collectHomeStatusSnapshot(context) }
             delay(1500)
@@ -121,12 +124,14 @@ internal fun HomeScreen(
     val dark = isSystemInDarkTheme()
     val statusBackground = when (snapshot.state) {
         HomeHookState.Active -> if (dark) Color(0xFF183D28) else Color(0xFFD9F7E2)
+        HomeHookState.RestartRequired -> if (dark) Color(0xFF4B3B12) else Color(0xFFFFF1BF)
         HomeHookState.Repairing -> if (dark) Color(0xFF4B3B12) else Color(0xFFFFF1BF)
         HomeHookState.Error -> if (dark) Color(0xFF4A2424) else Color(0xFFFFE0E0)
         else -> MiuixTheme.colorScheme.surfaceContainer
     }
     val statusContent = when (snapshot.state) {
         HomeHookState.Active -> if (dark) Color(0xFFB9F6CA) else Color(0xFF102E1A)
+        HomeHookState.RestartRequired -> if (dark) Color(0xFFFFE08A) else Color(0xFF4B3700)
         HomeHookState.Repairing -> if (dark) Color(0xFFFFE08A) else Color(0xFF4B3700)
         HomeHookState.Error -> if (dark) Color(0xFFFFB4AB) else Color(0xFF5A1010)
         else -> MiuixTheme.colorScheme.onSurfaceContainer
@@ -134,6 +139,7 @@ internal fun HomeScreen(
     val statusIconBackground = statusContent.copy(alpha = 0.12f)
     val statusIcon = when (snapshot.state) {
         HomeHookState.Active -> "✓"
+        HomeHookState.RestartRequired -> "↻"
         HomeHookState.Repairing -> "↻"
         HomeHookState.Error -> "!"
         HomeHookState.Inactive -> "–"
@@ -142,6 +148,7 @@ internal fun HomeScreen(
     }
     val primaryLabel = when (snapshot.state) {
         HomeHookState.Active -> "运行正常"
+        HomeHookState.RestartRequired -> "需要重启作用域"
         HomeHookState.Repairing -> "正在更新"
         HomeHookState.Error -> "异常"
         HomeHookState.Inactive -> "未激活"
@@ -150,6 +157,7 @@ internal fun HomeScreen(
     }
     val secondaryLabel = when (snapshot.state) {
         HomeHookState.Active -> "系统桌面已加载"
+        HomeHookState.RestartRequired -> "系统桌面仍在运行旧版模块代码"
         HomeHookState.Repairing -> "模块更新中"
         HomeHookState.Error -> "模块需要检查"
         HomeHookState.Inactive -> "模块未加载"
@@ -409,6 +417,36 @@ internal fun HomeScreen(
             }
         }
     }
+
+    OverlayDialog(
+        title = "需要重启作用域",
+        summary = "检测到 SwipeGate 已更新。系统桌面和系统界面可能仍在运行旧版本模块代码，请在 LSPosed 中重启作用域后再继续使用。",
+        show = showUpdateRestartNotice,
+        onDismissRequest = { showUpdateRestartNotice = false },
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            Button(onClick = { showUpdateRestartNotice = false }) {
+                Text("知道了")
+            }
+        }
+    }
+}
+
+private fun shouldShowUpdateRestartNotice(context: Context): Boolean {
+    val prefs = ConfigBridge.localPreferences(context)
+    val currentVersionCode = BuildConfig.VERSION_CODE
+    val previousVersionCode = prefs.getInt(PREF_LAST_APP_VERSION_CODE, 0)
+    if (previousVersionCode == 0) {
+        prefs.edit().putInt(PREF_LAST_APP_VERSION_CODE, currentVersionCode).apply()
+        return false
+    }
+    if (previousVersionCode == currentVersionCode) return false
+
+    prefs.edit().putInt(PREF_LAST_APP_VERSION_CODE, currentVersionCode).apply()
+    return true
 }
 
 private fun collectHomeStatusSnapshot(context: Context): HomeStatusSnapshot {
@@ -446,6 +484,7 @@ private fun collectHomeStatusSnapshot(context: Context): HomeStatusSnapshot {
     }
 
     return when (service.targetState()) {
+        "STALE" -> status(HomeHookState.RestartRequired, "检测到系统桌面仍加载旧版本模块代码，请重启作用域。")
         "RELOADING" -> status(HomeHookState.Repairing, "模块代码正在重新加载。")
         "FAILED" -> status(HomeHookState.Error, "目标进程模块更新失败。")
         else -> status(HomeHookState.Active)
