@@ -60,7 +60,6 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 import kotlin.math.roundToInt
 
 private const val PREF_DP_MIGRATED = "threshold_dp_migrated_v1"
-private const val PREF_LAST_SEEN_UPDATE_TIME = "last_seen_app_update_time"
 
 private enum class HomeHookState { Loading, Active, RestartRequired, Repairing, Error, Inactive, Unknown }
 
@@ -102,7 +101,6 @@ internal fun HomeScreen(
     var showThresholdInput by remember { mutableStateOf(false) }
     var thresholdInput by remember { mutableStateOf(TextFieldValue(thresholdDp.roundToInt().toString())) }
     var thresholdInputError by remember { mutableStateOf("") }
-    var showUpdateRestartNotice by remember { mutableStateOf(false) }
 
     fun applyThreshold(appliedValue: Int) {
         val applied = appliedValue.coerceIn(ConfigBridge.STOCK_THRESHOLD_DP, ConfigBridge.MAX_THRESHOLD_DP)
@@ -114,7 +112,6 @@ internal fun HomeScreen(
     }
 
     LaunchedEffect(Unit) {
-        showUpdateRestartNotice = shouldShowUpdateRestartNotice(context)
         while (true) {
             snapshot = withContext(Dispatchers.IO) { collectHomeStatusSnapshot(context) }
             delay(1500)
@@ -157,7 +154,7 @@ internal fun HomeScreen(
     }
     val secondaryLabel = when (snapshot.state) {
         HomeHookState.Active -> "系统桌面已加载"
-        HomeHookState.RestartRequired -> "系统桌面仍在运行旧版模块代码"
+        HomeHookState.RestartRequired -> "模块已更新，作用域仍在运行旧版代码"
         HomeHookState.Repairing -> "模块更新中"
         HomeHookState.Error -> "模块需要检查"
         HomeHookState.Inactive -> "模块未加载"
@@ -417,43 +414,6 @@ internal fun HomeScreen(
             }
         }
     }
-
-    OverlayDialog(
-        title = "需要重启作用域",
-        summary = "检测到 SwipeGate 已更新。系统桌面和系统界面可能仍在运行旧版本模块代码，请在 LSPosed 中重启作用域后再继续使用。",
-        show = showUpdateRestartNotice,
-        onDismissRequest = { showUpdateRestartNotice = false },
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End,
-        ) {
-            Button(onClick = { showUpdateRestartNotice = false }) {
-                Text("知道了")
-            }
-        }
-    }
-}
-
-private fun shouldShowUpdateRestartNotice(context: Context): Boolean {
-    return try {
-        val info = context.packageManager.getPackageInfo(context.packageName, 0)
-        val firstInstallTime = info.firstInstallTime
-        val lastUpdateTime = info.lastUpdateTime
-        val prefs = ConfigBridge.localPreferences(context)
-        val lastSeenUpdateTime = prefs.getLong(PREF_LAST_SEEN_UPDATE_TIME, 0L)
-
-        // Fresh install: firstInstallTime == lastUpdateTime, so do not nag.
-        // Upgrade install: lastUpdateTime advances while firstInstallTime stays unchanged.
-        // Persist the update timestamp so each APK update prompts only once.
-        val unseenUpgrade = lastUpdateTime > firstInstallTime && lastSeenUpdateTime != lastUpdateTime
-        if (lastSeenUpdateTime != lastUpdateTime) {
-            prefs.edit().putLong(PREF_LAST_SEEN_UPDATE_TIME, lastUpdateTime).apply()
-        }
-        unseenUpgrade
-    } catch (_: Throwable) {
-        false
-    }
 }
 
 private fun collectHomeStatusSnapshot(context: Context): HomeStatusSnapshot {
@@ -491,7 +451,7 @@ private fun collectHomeStatusSnapshot(context: Context): HomeStatusSnapshot {
     }
 
     return when (service.targetState()) {
-        "STALE" -> status(HomeHookState.RestartRequired, "检测到系统桌面仍加载旧版本模块代码，请重启作用域。")
+        "STALE" -> status(HomeHookState.RestartRequired, "模块已更新，但作用域仍加载旧版本代码。请在 LSPosed 中重启作用域。")
         "RELOADING" -> status(HomeHookState.Repairing, "模块代码正在重新加载。")
         "FAILED" -> status(HomeHookState.Error, "目标进程模块更新失败。")
         else -> status(HomeHookState.Active)

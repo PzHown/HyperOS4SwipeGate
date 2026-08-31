@@ -14,8 +14,8 @@ android {
         minSdk = 33
         targetSdk = 37
         // dev.7: upgrade restart notice + 400 ms Ready/Release dedup.
-        versionCode = 49
-        versionName = "0.8.1-dev.7"
+        versionCode = 50
+        versionName = "0.8.1-dev.8"
 
         ndk {
             abiFilters += "arm64-v8a"
