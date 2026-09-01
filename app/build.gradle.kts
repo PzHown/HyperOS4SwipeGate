@@ -13,7 +13,7 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // dev.18: dedup the runtime-proven stock Back release HyperRT callsite.
+        // dev.18: dedup the runtime-proven Launcher 8.x stock Back release HyperRT callsite.
         versionCode = 60
         versionName = "0.8.1-dev.18"
 
@@ -29,9 +29,9 @@ android {
     }
 
     val ciStorePath = System.getenv("ANDROID_SIGNING_STORE_FILE")
-    val ciStorePassword = System.getenv("ANDROID_SIGNING_STORE_PASSWORD")
-    val ciKeyAlias = System.getenv("ANDROID_SIGNING_KEY_ALIAS")
-    val ciKeyPassword = System.getenv("ANDROID_SIGNING_KEY_PASSWORD")
+    val ciStorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+    val ciKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
+    val ciKeyPassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
     val ciSigningConfig = if (
         !ciStorePath.isNullOrBlank()
         && !ciStorePassword.isNullOrBlank()
