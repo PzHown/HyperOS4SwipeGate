@@ -9,7 +9,6 @@
 #include <dlfcn.h>
 #include <link.h>
 #include <sys/system_properties.h>
-#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -149,7 +148,6 @@ std::atomic<int64_t> gLastInjectedHapticAtMs{0};
 std::atomic<uintptr_t> gGetGlobalRuntime{0};
 std::atomic<void *> gRuntimeDecStrong{nullptr};
 std::atomic<bool> gHapticRuntimeBridgeResolved{false};
-std::atomic<uint64_t> gHapticTraceSequence{0};
 std::atomic<int64_t> gLastReadyHapticAtMs{0};
 std::atomic<bool> gReadyReleaseDedupEligible{false};
 // Runtime tracing on Launcher 8.01.02.6179 proved the stock hand-up vibration reaches
@@ -637,51 +635,6 @@ int readThresholdDp() {
 
 using HapticFeedbackFn = void (*)(void *, int32_t);
 
-const char *traceModuleBasename(const char *path) {
-    if (path == nullptr || *path == '\0') return "<unresolved>";
-    const char *slash = std::strrchr(path, '/');
-    return slash == nullptr ? path : slash + 1;
-}
-
-void traceStockHapticCall(int32_t constant, int64_t now, uintptr_t callerReturnAddress) {
-    const uintptr_t callsite = callerReturnAddress >= 4u ? callerReturnAddress - 4u : 0u;
-    Dl_info callerInfo{};
-    const bool callerResolved = callsite != 0
-            && dladdr(reinterpret_cast<void *>(callsite), &callerInfo) != 0
-            && callerInfo.dli_fbase != nullptr;
-    const uintptr_t moduleBase = callerResolved
-            ? reinterpret_cast<uintptr_t>(callerInfo.dli_fbase) : 0u;
-    const uintptr_t lrRva = moduleBase != 0 && callerReturnAddress >= moduleBase
-            ? callerReturnAddress - moduleBase : 0u;
-    const uintptr_t callsiteRva = moduleBase != 0 && callsite >= moduleBase
-            ? callsite - moduleBase : 0u;
-    const bool launcherCaller = callerResolved && callerInfo.dli_fname != nullptr
-            && std::strstr(callerInfo.dli_fname, kTargetLibrary) != nullptr;
-
-    const int64_t readyAt = gLastReadyHapticAtMs.load(std::memory_order_acquire);
-    const int64_t deltaReadyMs = readyAt > 0 && now >= readyAt ? now - readyAt : -1;
-    const int segment = gHapticGestureSegment.load(std::memory_order_acquire);
-    const bool eligible = gReadyReleaseDedupEligible.load(std::memory_order_acquire);
-    const uintptr_t releaseCallsite = gStockBackReleaseHapticCallsite.load(std::memory_order_acquire);
-    const uintptr_t launcherBase = gHookedBase.load(std::memory_order_acquire);
-    const uintptr_t releaseCallsiteRva = launcherBase != 0 && releaseCallsite >= launcherBase
-            ? releaseCallsite - launcherBase : 0u;
-    const bool releaseMatch = releaseCallsite != 0 && callsite == releaseCallsite;
-    const uint64_t sequence = gHapticTraceSequence.fetch_add(1, std::memory_order_relaxed) + 1;
-    const long tid = static_cast<long>(syscall(SYS_gettid));
-
-    logLine(ANDROID_LOG_INFO,
-            "HAPTIC_TRACE stock-call seq=%llu tid=%ld constant=%d caller=%p callsite=%p module=%s moduleBase=%p lrRva=0x%zx callsiteRva=0x%zx launcherCaller=%d launcherBase=%p deltaReadyMs=%lld segment=%d eligible=%d releaseCallsite=%p releaseCallsiteRva=0x%zx releaseMatch=%d",
-            static_cast<unsigned long long>(sequence), tid, constant,
-            reinterpret_cast<void *>(callerReturnAddress), reinterpret_cast<void *>(callsite),
-            callerResolved ? traceModuleBasename(callerInfo.dli_fname) : "<unresolved>",
-            reinterpret_cast<void *>(moduleBase), static_cast<size_t>(lrRva),
-            static_cast<size_t>(callsiteRva), launcherCaller ? 1 : 0,
-            reinterpret_cast<void *>(launcherBase), static_cast<long long>(deltaReadyMs),
-            segment, eligible ? 1 : 0, reinterpret_cast<void *>(releaseCallsite),
-            static_cast<size_t>(releaseCallsiteRva), releaseMatch ? 1 : 0);
-}
-
 __attribute__((noinline)) void hapticFeedbackCaptureHook(void *storage, int32_t constant) {
     // The provider target is inline-hooked. Xiaomi's PLT uses BR, not BL, so LR still points
     // at the instruction immediately after the real callsite in libapp_launcher.so. Capture
@@ -692,7 +645,6 @@ __attribute__((noinline)) void hapticFeedbackCaptureHook(void *storage, int32_t 
             __builtin_extract_return_addr(rawReturnAddress)) & kPointerAddressMask;
     const uintptr_t callsite = callerReturnAddress >= 4u ? callerReturnAddress - 4u : 0u;
     const int64_t now = monotonicMs();
-    traceStockHapticCall(constant, now, callerReturnAddress);
     if (storage != nullptr) {
         uintptr_t rawArc = 0;
         std::memcpy(&rawArc, storage, sizeof(rawArc));
@@ -939,8 +891,8 @@ bool performNativeHaptic(const char *stage) {
                 stage == nullptr ? "unknown" : stage);
         return false;
     }
-    // Synthetic Ready uses the original HyperRT trampoline, outside the stock
-    // release-helper scope, so it can never suppress itself.
+    // Synthetic Ready uses the original HyperRT trampoline, bypassing the provider
+    // capture hook, so it can never be mistaken for Xiaomi's stock release callsite.
 
     void *storage = runtime;
     haptic(&storage, kHapticConstant);
@@ -950,10 +902,6 @@ bool performNativeHaptic(const char *stage) {
     gLastReadyHapticAtMs.store(now, std::memory_order_release);
     gReadyReleaseDedupEligible.store(true, std::memory_order_release);
     gHapticUnavailableLogged.store(false, std::memory_order_release);
-    logLine(ANDROID_LOG_INFO,
-            "HAPTIC_V2 feedback stage=%s kind=hyperrt-stock constant=%d readyReleaseDedupMs=%lld",
-            stage == nullptr ? "unknown" : stage, kHapticConstant,
-            static_cast<long long>(kReadyReleaseDedupMs));
     return true;
 }
 
@@ -1100,7 +1048,7 @@ float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDi
     if (hapticSegment == 2) {
         // Threshold / Three-hold remains 100% Xiaomi-owned. It invalidates Ready->Release
         // dedup until the gesture explicitly re-enters Ready, so threshold release is never
-        // suppressed by the release-helper scope.
+        // suppressed by the release-callsite policy.
         gReadyReleaseDedupEligible.store(false, std::memory_order_release);
     }
     const int previousHapticSegment = gHapticGestureSegment.exchange(
@@ -1531,7 +1479,7 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
             reinterpret_cast<void *>(entries->hook_func), reinterpret_cast<void *>(entries->unhook_func),
             static_cast<long long>(kHookHealthIntervalMs));
     logLine(ANDROID_LOG_INFO,
-            "HAPTIC_V2 enabled policy=hyperrt-stock-runtime ready-added=1 threshold-stock=1 release-stock=1 ready-release-dedup-ms=%lld threshold-never-dedup=1 release-source=GestureStubViewWindow::handle_back_gesture callsite-scoped=1 constant=0",
+            "HAPTIC_V2 enabled policy=hyperrt-stock-runtime ready-added=1 threshold-stock=1 release-stock=1 ready-release-dedup-ms=%lld threshold-never-dedup=1 release-source=GestureStubViewWindow::handle_back_gesture callsite-scoped=1 runtime-trace=0 constant=0",
             static_cast<long long>(kReadyReleaseDedupMs));
 
     const LibraryInfo library = findLauncherLibrary();
