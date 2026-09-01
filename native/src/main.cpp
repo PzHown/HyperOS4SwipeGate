@@ -136,15 +136,11 @@ std::atomic<uint64_t> gPassthroughCount{0};
 // production Android hook-library pattern used by xHook/ByteHook/xDL: inspect the already
 // loaded Launcher's PT_DYNAMIC metadata in memory. No APK path open and no haptic dlopen.
 std::atomic<void *> gOriginalHapticFeedback{nullptr};
-std::atomic<uintptr_t> gCapturedHapticArc{0};
-std::atomic<int64_t> gCapturedHapticArcAtMs{0};
 std::atomic<bool> gHapticInstallInProgress{false};
 std::atomic<bool> gHapticCaptureHookInstalled{false};
 std::atomic<bool> gHapticUnavailableLogged{false};
 std::atomic<int64_t> gLastHapticFeatureResolveMs{0};
 std::atomic<uint32_t> gHapticResolveFailures{0};
-std::atomic<int64_t> gNativeHapticSuppressUntilMs{0};
-std::atomic<int64_t> gLastInjectedHapticAtMs{0};
 std::atomic<uintptr_t> gGetGlobalRuntime{0};
 std::atomic<void *> gRuntimeDecStrong{nullptr};
 std::atomic<bool> gHapticRuntimeBridgeResolved{false};
@@ -637,27 +633,14 @@ using HapticFeedbackFn = void (*)(void *, int32_t);
 
 __attribute__((noinline)) void hapticFeedbackCaptureHook(void *storage, int32_t constant) {
     // The provider target is inline-hooked. Xiaomi's PLT uses BR, not BL, so LR still points
-    // at the instruction immediately after the real callsite in libapp_launcher.so. Capture
-    // it before doing any other work. Synthetic Ready feedback uses the original trampoline
-    // and therefore never enters this function.
+    // at the instruction immediately after the real callsite in libapp_launcher.so. Read it
+    // once for callsite-scoped dedup. Synthetic Ready uses the original trampoline and never
+    // enters this function.
     void *rawReturnAddress = __builtin_return_address(0);
     const uintptr_t callerReturnAddress = reinterpret_cast<uintptr_t>(
             __builtin_extract_return_addr(rawReturnAddress)) & kPointerAddressMask;
     const uintptr_t callsite = callerReturnAddress >= 4u ? callerReturnAddress - 4u : 0u;
     const int64_t now = monotonicMs();
-    if (storage != nullptr) {
-        uintptr_t rawArc = 0;
-        std::memcpy(&rawArc, storage, sizeof(rawArc));
-        const uintptr_t addressBits = rawArc & kPointerAddressMask;
-        if (addressBits >= 0x10000u) {
-            // Preserve the original tagged pointer exactly as Xiaomi supplied it.  The
-            // untagged value is used only for sanity checking, never for replay.
-            gCapturedHapticArc.store(rawArc, std::memory_order_release);
-            gCapturedHapticArcAtMs.store(now, std::memory_order_release);
-            gHapticUnavailableLogged.store(false, std::memory_order_release);
-        }
-    }
-
     const auto original = reinterpret_cast<HapticFeedbackFn>(
             gOriginalHapticFeedback.load(std::memory_order_acquire));
     if (original == nullptr) return;
