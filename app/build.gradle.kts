@@ -13,7 +13,7 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // 0.8.2-beta1: runtime-proven Ready/Release haptic dedup and production log convergence.
+        // 0.8.2-beta1: runtime-proven Ready/Release dedup; temporary tracing and legacy Arc state removed.
         versionCode = 62
         versionName = "0.8.2-beta1"
 
