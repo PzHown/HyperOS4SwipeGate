@@ -13,9 +13,9 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // dev.16: verified Launcher 8.x release-boundary haptic dedup at GestureBackArrowView.
-        versionCode = 58
-        versionName = "0.8.1-dev.16"
+        // dev.17: capture real Launcher/HyperRT stock haptic caller LR/RVA on 8.x.
+        versionCode = 59
+        versionName = "0.8.1-dev.17"
 
         ndk {
             abiFilters += "arm64-v8a"
