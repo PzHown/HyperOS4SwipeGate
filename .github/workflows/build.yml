@@ -248,11 +248,17 @@ jobs:
           fi
           gh release delete release-latest --yes --cleanup-tag || true
           gh release delete "$RELEASE_TAG" --yes --cleanup-tag || true
+          RELEASE_NOTES="$(cat RELEASE_NOTES.md)"
+          RELEASE_FLAGS=()
+          if [[ "$VERSION_NAME" == *-* ]]; then
+            RELEASE_FLAGS+=(--prerelease)
+          fi
           gh release create "$RELEASE_TAG" \
             dist/SwipeGate-release.apk \
             --target "$GITHUB_SHA" \
             --title "SwipeGate v${VERSION_NAME}" \
-            --notes $'1. 修复 0.8.0 正式版中 LSPosed Java 入口类被 R8 裁剪导致的 ClassNotFoundException\n2. 保留资源与无用代码压缩，同时关闭类名和成员名混淆\n3. 增加 Release DEX 入口类完整性校验，防止同类问题再次发布'
+            --notes "$RELEASE_NOTES" \
+            "${RELEASE_FLAGS[@]}"
 
       - name: Publish LSPosed prerelease
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -266,7 +272,7 @@ jobs:
           fi
 
           gh auth status
-          RELEASE_NOTES=$'1. 修复 0.8.0 正式版中 LSPosed Java 入口类被 R8 裁剪导致的 ClassNotFoundException\n2. 保留资源与无用代码压缩，同时关闭类名和成员名混淆\n3. 增加 Release DEX 入口类完整性校验，防止同类问题再次发布'
+          RELEASE_NOTES="$(cat RELEASE_NOTES.md)"
 
           if [[ "$VERSION_NAME" != *-* ]]; then
             DEV_PREFIX="${VERSION_CODE}-${VERSION_NAME}-dev."
