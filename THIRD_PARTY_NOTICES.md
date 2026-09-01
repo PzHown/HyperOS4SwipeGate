@@ -2,13 +2,21 @@
 
 ## MiuiBackGestureHook
 
-Parts of the HyperOS Rust Runtime broadcast interoperability design, including the AArch64 `send_broadcast` runtime-capture ABI preservation strategy and the use of Xiaomi's existing `com.android.systemui.fsgesture` carrier, were informed by the open-source MiuiBackGestureHook project. The dev semantic target resolver also follows the same general safety model: parse the mapped ELF/PLT imports, validate a stable AArch64 behavior graph, require a unique candidate, and fail closed when the structure is missing or ambiguous.
+Parts of SwipeGate's HyperOS Rust Runtime interoperability and safety design were informed by the open-source MiuiBackGestureHook project, including:
+
+- AArch64 `send_broadcast` runtime-capture ABI preservation strategy
+- reuse of Xiaomi's existing `com.android.systemui.fsgesture` carrier
+- mapped ELF / PLT import parsing and behavior-graph based target resolution
+- unique-candidate / fail-closed safety model
+- HyperRT `MADV_DONTNEED` inline-hook page protection concept
+
+Project information:
 
 - Project: `wxxsfxyzm/MiuiBackGestureHook`
-- Reference revision: `afce2aa8aa96f40f2351952cf17ec494982b9dec`
+- Reference revision used during the original design comparison: `afce2aa8aa96f40f2351952cf17ec494982b9dec`
 - License: Apache License 2.0
 
-SwipeGate's resolver is independently reduced to the `on_swipe_process` threshold hook and keeps its own exact-pattern fallback, hook-health repair, and ABI-transparent `s0` forwarding. It does not include MiuiBackGestureHook's predictive-back, drawer/overview, Dart, SystemUI monitor, or full launcher-profile feature set.
+SwipeGate's implementation is independently reduced to its own targets and semantics. It maintains its own `GestureInputBackHelper::on_swipe_process` resolver, exact fingerprints, ABI-transparent wrapper, Hook health repair, `BackGestureUtils::convert_offset` progress resolver, HyperRT Ready/Release policy and function-scoped break-open implementation. It does not vendor MiuiBackGestureHook source and does not include that project's predictive-back, drawer/overview, Dart, SystemUI monitor or full launcher-profile feature set.
 
 ## HyperOS4SmallWindowInputFilter
 
