@@ -13,9 +13,9 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // 0.8.2-beta2: semantic convert_offset scaling keeps Back animation READY aligned with custom threshold.
-        versionCode = 63
-        versionName = "0.8.2-beta2"
+        // 0.9.0: stable release with synchronized Back progress, native haptics and break-open support.
+        versionCode = 64
+        versionName = "0.9.0"
 
         ndk {
             abiFilters += "arm64-v8a"

@@ -19,7 +19,7 @@
 
 HyperOS 4 系统桌面支持通过「侧滑停顿」呼出手机管家侧边栏。SwipeGate 把这项手势的触发距离从原厂约 `88 dp` 延后到用户设定值：**门槛前仍按系统返回手势运行，达到门槛后才允许原厂侧边栏停顿逻辑进入下一阶段。**
 
-当前 0.8.2 Beta 还包含两项可选实验功能：
+当前版本还包含两项可选实验功能：
 
 - **丰富侧滑震动反馈**：进入 Ready 时补充一次原生 HyperRT 触觉，并对短时间 Ready→Release 的原厂松手震动做精确去重。
 - **Break-open Beta**：通过函数级 Hook 开启 Launcher 的 merge-back break-open 支持，不修改全局 backing flag。
@@ -71,7 +71,14 @@ Launcher 8.x 的返回手势不是简单在 88dp 处做一次布尔判断。逆�
 110 dp × 0.8 = 88 dp
 ```
 
-因此当前实现会同步缩放这套共享进度坐标，使 **动画 Ready、状态判断和用户设置的门槛保持一致**，而不是在 88dp 后把动画冻结到门槛再突然跳变。达到自定义门槛后仍继续使用小米原生的非线性 easing。
+当前实现会重映射这套共享进度坐标，使 **动画 Ready、状态判断和用户设置的门槛保持一致**，而不是在 88dp 后把动画冻结到门槛再突然跳变：
+
+```text
+0 → 自定义阈值 D       映射为原厂 0 → 88dp（Ready）
+D → D + 22dp          映射为原厂 88 → 110dp（完整进度）
+```
+
+Ready 前按自定义阈值连续拉伸；Ready 后固定保留原厂 `22 dp` 的进度区间，并通过 C1 连续的 cubic Hermite 过渡恢复到 1:1 距离尺度。因此自定义阈值增大时，完整进度不会再被一起推远，也不会在 Ready 点产生新的位置或速度断层。
 
 旧版本保存的 `0` 继续兼容解释为原厂 `88 dp`，但新界面不再提供低于 `88 dp` 的值。
 
@@ -101,14 +108,14 @@ Break-open 使用 `WindowTransitionUtil::is_merge_back_break_open_anim_support` 
 进入「诊断」页复制完整诊断。重点关注 `HOOK_HEALTH`、`PROGRESS_V1`、`HAPTIC_V2`、`BREAK_OPEN_HEALTH` 与 `CONTROL_CARRIER`。如果 Launcher 更新后 resolver 无法唯一确认目标，模块会 fail closed，而不是尝试未知 RVA。
 
 **动画在门槛前被压缩或触发时跳一下**  
-当前版本已经增加 `BackGestureUtils::convert_offset` 进度缩放。诊断中应能看到 `PROGRESS_V1 convert_offset hook ready`；若未解析到该函数，会保守回退到旧的 88dp clamp 路径。
+当前版本已经增加 `BackGestureUtils::convert_offset` 进度重映射。诊断中应能看到 `PROGRESS_V1 convert_offset hook ready`；若未解析到该函数，会保守回退到旧的 88dp clamp 路径。
 
 ## 技术说明
 
 核心实现包括：
 
 - `GestureInputBackHelper::on_swipe_process` 语义 resolver + exact Pattern fallback
-- `BackGestureUtils::convert_offset` 共享进度坐标解析与缩放
+- `BackGestureUtils::convert_offset` 共享进度坐标解析与分段重映射
 - HyperRT 原生 Ready 触觉与真实 Release callsite 级去重
 - `MADV_DONTNEED` 16 KB Hook 页面保护与 watchdog 修复
 - Break-open 函数级安全 Hook

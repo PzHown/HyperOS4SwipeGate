@@ -260,7 +260,7 @@ jobs:
             --notes "$RELEASE_NOTES" \
             "${RELEASE_FLAGS[@]}"
 
-      - name: Publish LSPosed prerelease
+      - name: Publish LSPosed release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.LSPOSED_REPO_TOKEN }}
@@ -273,6 +273,10 @@ jobs:
 
           gh auth status
           RELEASE_NOTES="$(cat RELEASE_NOTES.md)"
+          LSPOSED_RELEASE_FLAGS=()
+          if [[ "$VERSION_NAME" == *-* ]]; then
+            LSPOSED_RELEASE_FLAGS+=(--prerelease)
+          fi
 
           if [[ "$VERSION_NAME" != *-* ]]; then
             DEV_PREFIX="${VERSION_CODE}-${VERSION_NAME}-dev."
@@ -291,8 +295,12 @@ jobs:
             gh release edit "$RELEASE_TAG" \
               --repo "$LSPOSED_REPO" \
               --title "$VERSION_NAME" \
-              --notes "$RELEASE_NOTES" \
-              --prerelease
+              --notes "$RELEASE_NOTES"
+            if [[ "$VERSION_NAME" == *-* ]]; then
+              gh release edit "$RELEASE_TAG" --repo "$LSPOSED_REPO" --prerelease
+            else
+              gh release edit "$RELEASE_TAG" --repo "$LSPOSED_REPO" --prerelease=false
+            fi
           else
             gh release create "$RELEASE_TAG" \
               dist/SwipeGate-release.apk \
@@ -300,7 +308,7 @@ jobs:
               --target main \
               --title "$VERSION_NAME" \
               --notes "$RELEASE_NOTES" \
-              --prerelease
+              "${LSPOSED_RELEASE_FLAGS[@]}"
           fi
 
           gh release view "$RELEASE_TAG" \
