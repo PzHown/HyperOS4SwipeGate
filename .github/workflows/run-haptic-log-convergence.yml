@@ -1,5 +1,6 @@
 name: Run haptic log convergence
 
+# One-shot production cleanup after dev.18 runtime validation.
 on:
   push:
     branches: [dev]
