@@ -1,0 +1,48 @@
+name: Finalize 0.8.2-beta1 prerelease
+
+on:
+  workflow_run:
+    workflows: ["Build APK"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: 62-0.8.2-beta1
+      RELEASE_TITLE: SwipeGate v0.8.2-beta1
+      LSPOSED_REPO: Xposed-Modules-Repo/io.github.pzhown.hyperos4swipegate
+      LSPOSED_TOKEN: ${{ secrets.LSPOSED_REPO_TOKEN }}
+    steps:
+      - name: Finalize GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RELEASE_NOTES=$'1. 新增 HyperOS 4 Launcher 8.0+「丰富侧滑震动反馈」Beta：进入 Ready 时补充一次原生 HyperRT 震动\n2. 精确识别真实 Back Release HyperRT 调用点，仅在 Ready→Release 小于 750ms 时去重松手震动；Threshold/Three 与其他原生震动保持小米行为\n3. 增强 Launcher 8.x 语义解析、16 KB 页面保护与 Hook 健康修复，降低 HyperRT MADV_DONTNEED 导致的 Hook 丢失\n4. Break-open Beta 使用函数级安全 Hook，不修改 backing flag；已验证 Launcher 8.01.02.6174 / 6179'
+          gh release edit "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$RELEASE_TITLE" \
+            --notes "$RELEASE_NOTES" \
+            --prerelease
+          gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,isDraft,isPrerelease,assets \
+            --jq '{tag: .tagName, name: .name, draft: .isDraft, prerelease: .isPrerelease, assets: [.assets[].name]}'
+
+      - name: Finalize LSPosed prerelease
+        if: env.LSPOSED_TOKEN != ''
+        run: |
+          RELEASE_NOTES=$'1. 新增 HyperOS 4 Launcher 8.0+「丰富侧滑震动反馈」Beta：进入 Ready 时补充一次原生 HyperRT 震动\n2. 精确识别真实 Back Release HyperRT 调用点，仅在 Ready→Release 小于 750ms 时去重松手震动；Threshold/Three 与其他原生震动保持小米行为\n3. 增强 Launcher 8.x 语义解析、16 KB 页面保护与 Hook 健康修复，降低 HyperRT MADV_DONTNEED 导致的 Hook 丢失\n4. Break-open Beta 使用函数级安全 Hook，不修改 backing flag；已验证 Launcher 8.01.02.6174 / 6179'
+          GH_TOKEN="$LSPOSED_TOKEN" gh release edit "$RELEASE_TAG" \
+            --repo "$LSPOSED_REPO" \
+            --title "0.8.2-beta1" \
+            --notes "$RELEASE_NOTES" \
+            --prerelease
+          GH_TOKEN="$LSPOSED_TOKEN" gh release view "$RELEASE_TAG" \
+            --repo "$LSPOSED_REPO" \
+            --json tagName,name,isDraft,isPrerelease,assets \
+            --jq '{tag: .tagName, name: .name, draft: .isDraft, prerelease: .isPrerelease, assets: [.assets[].name]}'
