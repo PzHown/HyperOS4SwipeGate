@@ -13,9 +13,9 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // dev.13: HyperRT MADV_DONTNEED page guard + self-healing hook fallback + 750 ms dedup; CI-validated guard build.
-        versionCode = 55
-        versionName = "0.8.1-dev.13"
+        // dev.14: cross-thread one-shot Ready/Release dedup token + MADV_DONTNEED page guard.
+        versionCode = 56
+        versionName = "0.8.1-dev.14"
 
         ndk {
             abiFilters += "arm64-v8a"

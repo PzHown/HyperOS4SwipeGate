@@ -167,8 +167,12 @@ std::atomic<void *> gRuntimeDecStrong{nullptr};
 std::atomic<bool> gHapticRuntimeBridgeResolved{false};
 std::atomic<int64_t> gLastReadyHapticAtMs{0};
 std::atomic<bool> gReadyReleaseDedupEligible{false};
-thread_local bool gReleaseDedupArmed = false;
-thread_local bool gReleaseHapticSuppressed = false;
+// Release can be emitted asynchronously by HyperRT after on_back_invoke returns or
+// from another thread. Publish a one-shot process-wide token at on_back_invoke entry;
+// the first matching constant=0 haptic consumes it atomically before the Ready+750ms
+// deadline. Threshold/new-Ready transitions explicitly invalidate any stale token.
+std::atomic<int64_t> gReleaseDedupTokenDeadlineMs{0};
+std::atomic<int64_t> gReleaseDedupTokenReadyAtMs{0};
 // Haptic segment state is independent from the Launcher hook health state.
 // 0 = outside/idle, 1 = first segment (Back, below custom threshold),
 // 2 = second segment (custom threshold reached). Only entering segment 1 is replayed.
@@ -668,18 +672,33 @@ void hapticFeedbackCaptureHook(void *storage, int32_t constant) {
             gOriginalHapticFeedback.load(std::memory_order_acquire));
     if (original == nullptr) return;
 
-    // Only a stock Release haptic inside the on_back_invoke scope can be deduplicated.
-    // Threshold / Three-hold feedback is outside this scope and is never touched.
-    if (gReleaseDedupArmed && constant == kHapticConstant) {
-        gReleaseDedupArmed = false;
-        gReleaseHapticSuppressed = true;
-        const int64_t readyAt = gLastReadyHapticAtMs.load(std::memory_order_acquire);
-        logLine(ANDROID_LOG_INFO,
-                "HAPTIC_V2 release suppressed reason=ready-release-dedup constant=%d deltaMs=%lld windowMs=%lld",
-                constant,
-                readyAt > 0 && now >= readyAt ? static_cast<long long>(now - readyAt) : -1LL,
-                static_cast<long long>(kReadyReleaseDedupMs));
-        return;
+    // A Release haptic may arrive after on_back_invoke has returned or on another
+    // HyperRT thread. Consume exactly one process-wide token; Threshold and unrelated
+    // feedback remain untouched because no token exists unless on_back_invoke armed it.
+    if (constant == kHapticConstant) {
+        int64_t deadline = gReleaseDedupTokenDeadlineMs.load(std::memory_order_acquire);
+        while (deadline > 0) {
+            if (now >= deadline) {
+                if (gReleaseDedupTokenDeadlineMs.compare_exchange_weak(
+                            deadline, 0, std::memory_order_acq_rel, std::memory_order_acquire)) {
+                    gReleaseDedupTokenReadyAtMs.store(0, std::memory_order_release);
+                    break;
+                }
+                continue;
+            }
+            if (gReleaseDedupTokenDeadlineMs.compare_exchange_weak(
+                        deadline, 0, std::memory_order_acq_rel, std::memory_order_acquire)) {
+                const int64_t readyAt = gReleaseDedupTokenReadyAtMs.exchange(
+                        0, std::memory_order_acq_rel);
+                logLine(ANDROID_LOG_INFO,
+                        "HAPTIC_V2 release suppressed reason=ready-release-token constant=%d deltaMs=%lld windowMs=%lld crossThreadSafe=1",
+                        constant,
+                        readyAt > 0 && now >= readyAt
+                                ? static_cast<long long>(now - readyAt) : -1LL,
+                        static_cast<long long>(kReadyReleaseDedupMs));
+                return;
+            }
+        }
     }
 
     original(storage, constant);
@@ -880,6 +899,12 @@ bool performNativeHaptic(const char *stage) {
                 stage == nullptr ? "unknown" : stage);
         return false;
     }
+    // A new Ready segment supersedes any delayed Release token left by the
+    // previous gesture. The synthetic Ready call uses the original trampoline, so it
+    // cannot consume this token itself.
+    gReleaseDedupTokenDeadlineMs.store(0, std::memory_order_release);
+    gReleaseDedupTokenReadyAtMs.store(0, std::memory_order_release);
+
     void *storage = runtime;
     haptic(&storage, kHapticConstant);
     decStrong(runtime);
@@ -1012,8 +1037,11 @@ float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDi
     }
     if (hapticSegment == 2) {
         // Threshold / Three-hold remains 100% Xiaomi-owned and cancels Ready->Release dedup
-        // until the gesture explicitly re-enters Ready.
+        // until the gesture explicitly re-enters Ready. Also invalidate a not-yet-consumed
+        // Release token defensively so Threshold feedback can never be swallowed.
         gReadyReleaseDedupEligible.store(false, std::memory_order_release);
+        gReleaseDedupTokenDeadlineMs.store(0, std::memory_order_release);
+        gReleaseDedupTokenReadyAtMs.store(0, std::memory_order_release);
     }
     const int previousHapticSegment = gHapticGestureSegment.exchange(
             hapticSegment, std::memory_order_acq_rel);
@@ -1395,21 +1423,27 @@ __attribute__((visibility("hidden"))) void swipegate_hook_exit() {
 }
 
 __attribute__((visibility("hidden"))) void swipegate_haptic_on_back_invoke() {
-    gReleaseDedupArmed = false;
-    gReleaseHapticSuppressed = false;
+    // Clear any stale token before evaluating this commit. If this Ready is still within
+    // the 750ms policy window, publish a one-shot deadline that survives function exit
+    // and can be consumed from any HyperRT thread.
+    gReleaseDedupTokenDeadlineMs.store(0, std::memory_order_release);
+    gReleaseDedupTokenReadyAtMs.store(0, std::memory_order_release);
     const bool eligible = gReadyReleaseDedupEligible.exchange(false, std::memory_order_acq_rel);
     const int64_t readyAt = gLastReadyHapticAtMs.load(std::memory_order_acquire);
     const int64_t now = monotonicMs();
     const int64_t delta = readyAt > 0 && now >= readyAt ? now - readyAt : -1;
     if (eligible && delta >= 0 && delta < kReadyReleaseDedupMs
             && gHapticCaptureHookInstalled.load(std::memory_order_acquire)) {
-        gReleaseDedupArmed = true;
+        gReleaseDedupTokenReadyAtMs.store(readyAt, std::memory_order_release);
+        gReleaseDedupTokenDeadlineMs.store(
+                readyAt + kReadyReleaseDedupMs, std::memory_order_release);
     }
 }
 
 __attribute__((visibility("hidden"))) void swipegate_haptic_on_back_invoke_exit() {
-    gReleaseDedupArmed = false;
-    gReleaseHapticSuppressed = false;
+    // Do not clear the Release token here: HyperRT can emit the stock Release haptic
+    // asynchronously after this function returns. It is one-shot and self-expires at
+    // Ready+750ms, or is invalidated by Threshold / the next Ready segment.
     gHapticGestureSegment.store(0, std::memory_order_release);
 }
 }
