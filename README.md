@@ -4,7 +4,7 @@
 
 # HyperOS4 SwipeGate
 
-**延后 HyperOS 4 侧滑停顿触发，不改变返回手势。**
+**延后 HyperOS 4 侧滑停顿触发，并尽量保持原厂返回手势、动画与触觉语义。**
 
 [![Build APK](https://github.com/PzHown/HyperOS4SwipeGate/actions/workflows/build.yml/badge.svg)](https://github.com/PzHown/HyperOS4SwipeGate/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/PzHown/HyperOS4SwipeGate?include_prereleases&label=release)](https://github.com/PzHown/HyperOS4SwipeGate/releases)
@@ -17,15 +17,16 @@
 
 ## 介绍
 
-HyperOS 4 系统桌面支持通过「侧滑停顿」呼出手机管家侧边栏。
+HyperOS 4 系统桌面支持通过「侧滑停顿」呼出手机管家侧边栏。SwipeGate 把这项手势的触发距离从原厂约 `88 dp` 延后到用户设定值：**门槛前仍按系统返回手势运行，达到门槛后才允许原厂侧边栏停顿逻辑进入下一阶段。**
 
-SwipeGate 可以提高这项手势的触发距离：**未达到设定距离时仍执行系统返回，达到后才允许原厂侧边栏停顿逻辑继续触发。**
+当前 0.8.2 Beta 还包含两项可选实验功能：
+
+- **丰富侧滑震动反馈**：进入 Ready 时补充一次原生 HyperRT 触觉，并对短时间 Ready→Release 的原厂松手震动做精确去重。
+- **Break-open Beta**：通过函数级 Hook 开启 Launcher 的 merge-back break-open 支持，不修改全局 backing flag。
 
 ## 下载
 
-前往 [Releases](https://github.com/PzHown/HyperOS4SwipeGate/releases) 获取最新构建。
-
-当前提供自动构建版本，适配范围请以本页「当前支持」为准。
+前往 [Releases](https://github.com/PzHown/HyperOS4SwipeGate/releases) 获取最新构建。开发分支会持续产生自动构建，实际兼容范围请以本页「当前支持」与诊断页为准。
 
 ## 当前支持
 
@@ -33,7 +34,7 @@ SwipeGate 可以提高这项手势的触发距离：**未达到设定距离时�
 | --- | --- |
 | 系统 | HyperOS 4 |
 | 系统桌面 | Launcher 8.0+ |
-| 已测试版本 | `RELEASE-8.01.02.5459-260807-08242024-R`<br>`RELEASE-8.01.02.5465-260807-08262034-R`<br>`RELEASE-8.01.02.6174-260818-08281208-R` |
+| 已测试版本 | `RELEASE-8.01.02.5459-260807-08242024-R`<br>`RELEASE-8.01.02.5465-260807-08262034-R`<br>`RELEASE-8.01.02.6174-260818-08281208-R`<br>`RELEASE-8.01.02.6179-260818-08292132-R` |
 | Android | Android 17 / API 37 |
 | 架构 | arm64-v8a |
 | LSPosed | Modern API 102 · versionCode ≥ 7846 |
@@ -41,11 +42,9 @@ SwipeGate 可以提高这项手势的触发距离：**未达到设定距离时�
 | 必需作用域 | **系统桌面** `com.miui.home` + **系统界面** `com.android.systemui` |
 | Root | 不需要 |
 
-> LSPosed versionCode ≥ 7846、Zygisk Next 1.5.0+ 与两个必需作用域缺一不可。主页会以无 Root 方式检测 LSPosed 版本、系统桌面作用域、系统界面作用域和实际 HyOS Runtime 能力。
->
 > `com.android.systemui` 不是可选作用域。SwipeGate 的 App ↔ HyOS Runtime 配置与状态通道需要模块代码运行在 SystemUI 中，再通过小米现有的 `com.android.systemui.fsgesture` 通道中继到 Launcher native runtime。
 >
-> Launcher 8.0+ 为目标兼容范围。模块不会依赖固定 Hook offset，而是扫描 Launcher native 可执行代码并寻找已验证的唯一代码特征。仅地址变化通常无需重新适配；如果目标函数本身的代码特征发生变化，则会停止安装 Hook 并保持原厂行为。
+> 模块不按 Launcher `versionName` 硬编码放行，也不直接依赖固定 Hook offset。native resolver 会扫描已加载的 `libapp_launcher.so`，只有在语义结构或已验证 Pattern 能唯一确认目标时才安装 Hook；不确定时保持原厂行为。
 
 ## 安装与使用
 
@@ -53,44 +52,69 @@ SwipeGate 可以提高这项手势的触发距离：**未达到设定距离时�
 2. 在 LSPosed 中启用 **HyperOS4 SwipeGate**，作用域同时勾选：
    - **系统桌面**（`com.miui.home`）
    - **系统界面**（`com.android.systemui`）
-3. 重启系统桌面和系统界面，或直接重启设备，使两个作用域中的模块代码完成加载。
+3. 重启系统桌面和系统界面，或直接重启设备。
 4. 在手机管家中将侧边栏呼出方式设为「侧滑停顿呼出」。
-5. 打开 SwipeGate，在「主页」中调整触发距离。
+5. 打开 SwipeGate，在主页调整触发距离；实验功能可按需开启。
 
-实时配置与状态主链路为 `App → SystemUI → HyOS Runtime / Launcher native`，不需要授予 Root 权限。RemotePreferences 仍保留兼容镜像，但不是 HyperOS 4 native 运行时的唯一配置通道。
+实时控制主链路为 `App → SystemUI → HyOS Runtime / Launcher native`，不需要 `su`。RemotePreferences 与 Launcher cache 仅作为兼容和持久化辅助通道。
 
-## 触发距离
+## 触发距离与动画
 
 可修改范围为 **88–300 dp**：
 
-- `88 dp`：原厂触发距离
-- `89–300 dp`：使用设定距离延后侧边栏触发
+- `88 dp`：原厂边界
+- `89–300 dp`：延后侧边栏停顿触发
 
-数值越大，需要向屏幕内侧滑得越远才会进入侧边栏停顿触发。
+Launcher 8.x 的返回手势不是简单在 88dp 处做一次布尔判断。逆向确认 `BackGestureUtils::convert_offset` 使用约 `110 dp` 的总坐标，并在 `0.8` 处进入 Ready：
 
-旧版本留下的 `0` 仍会被兼容解释为原厂 `88 dp`，但新界面不再提供低于 `88 dp` 的可调值。
+```text
+110 dp × 0.8 = 88 dp
+```
 
-## 排查
+因此当前实现会同步缩放这套共享进度坐标，使 **动画 Ready、状态判断和用户设置的门槛保持一致**，而不是在 88dp 后把动画冻结到门槛再突然跳变。达到自定义门槛后仍继续使用小米原生的非线性 easing。
+
+旧版本保存的 `0` 继续兼容解释为原厂 `88 dp`，但新界面不再提供低于 `88 dp` 的值。
+
+## 丰富侧滑震动反馈 Beta
+
+Launcher 8.0 的原厂 Back 手势在松手真正返回时会触发 HyperRT 震动。SwipeGate 的 Beta 模式会在进入 Ready 时补充同类型原生触觉，并保持以下规则：
+
+```text
+Ready → Release < 750ms        补 Ready，去重原厂 Release
+Ready → Release >= 750ms       补 Ready，保留原厂 Release
+Ready → Threshold → Release    Threshold/Release 保持小米语义
+Ready → Threshold → Ready      第二次 Ready 重新建立 750ms 窗口
+```
+
+去重只匹配逆向与运行时验证过的 `GestureStubViewWindow::handle_back_gesture` Release HyperRT 调用点，不会全局吞掉其他 `constant=0` 触觉。
+
+## Break-open Beta
+
+Break-open 使用 `WindowTransitionUtil::is_merge_back_break_open_anim_support` 的函数级 Hook：开启时只把该能力判断提升为 true，关闭时返回原厂结果。不会修改 backing flag，也不会全局改写 Launcher 状态。
+
+## 诊断与排查
 
 **显示「未激活」**  
-确认 LSPosed 已启用模块，并确认作用域同时包含 **系统桌面 `com.miui.home`** 和 **系统界面 `com.android.systemui`**。缺少任意一个作用域，SwipeGate 都不会判定为完整激活。随后确认设备存在 HYOS Runtime，并重启对应进程或设备。App 会综合 LSPosed API 102、两个必需作用域、Launcher UID 和 HYOS Runtime 证据判断状态，不再依赖 Root/logcat。
-
-**显示「LSPosed 未连接」**  
-确认正在使用支持 Modern API 102 的 LSPosed，并重新打开模块 App。
+确认 LSPosed、Zygisk Next / HyOS Runtime 与两个必需作用域都满足要求。App 会通过 XposedService 与运行时握手判断状态，不依赖 Root/logcat。
 
 **功能没有生效**  
-进入 App 的「诊断」页检查 **系统桌面作用域**、**系统界面作用域**、Native Hook 状态并复制完整诊断；必要时再检查 LSPosed 日志中的 `HyperOS4SwipeGateNative` / `HOOK_SCAN` / `HOOK_HEALTH`。
+进入「诊断」页复制完整诊断。重点关注 `HOOK_HEALTH`、`PROGRESS_V1`、`HAPTIC_V2`、`BREAK_OPEN_HEALTH` 与 `CONTROL_CARRIER`。如果 Launcher 更新后 resolver 无法唯一确认目标，模块会 fail closed，而不是尝试未知 RVA。
 
-**升级了系统桌面**  
-如果只是 native 地址重新排列，模块会自动重新定位；如果目标函数被重新编译或重构导致 Pattern 不再匹配，则需要追加新版本 Pattern。反馈时请附带 Launcher **完整版本号**和诊断信息。
+**动画在门槛前被压缩或触发时跳一下**  
+当前版本已经增加 `BackGestureUtils::convert_offset` 进度缩放。诊断中应能看到 `PROGRESS_V1 convert_offset hook ready`；若未解析到该函数，会保守回退到旧的 88dp clamp 路径。
 
 ## 技术说明
 
-模块通过 LSPosed Modern API 102 `native_init` 进入 HyperOS 4 Launcher 的 native/Rust 进程，扫描 `libapp_launcher.so` 的可执行段，在唯一代码特征匹配后才安装 Hook。
+核心实现包括：
 
-运行时控制链路为 `App → SystemUiBridgeModule（com.android.systemui）→ 小米 fsgesture 广播 → Launcher / HyOS native runtime`。系统桌面与系统界面因此都是必需作用域；RemotePreferences / Launcher cache 继续作为兼容与持久化辅助通道，全程无需 `su`。
+- `GestureInputBackHelper::on_swipe_process` 语义 resolver + exact Pattern fallback
+- `BackGestureUtils::convert_offset` 共享进度坐标解析与缩放
+- HyperRT 原生 Ready 触觉与真实 Release callsite 级去重
+- `MADV_DONTNEED` 16 KB Hook 页面保护与 watchdog 修复
+- Break-open 函数级安全 Hook
+- App → SystemUI → HyOS Runtime 的 Rootless 控制与诊断通道
 
-逆向目标、Pattern 扫描、Hook 策略、安全校验与构建说明见 [docs/TECHNICAL.md](docs/TECHNICAL.md)。
+详细逆向、Hook 结构与安全约束见 [docs/TECHNICAL.md](docs/TECHNICAL.md)，主目标定位规则见 [docs/SEMANTIC_RESOLVER.md](docs/SEMANTIC_RESOLVER.md)。
 
 ## 许可
 
