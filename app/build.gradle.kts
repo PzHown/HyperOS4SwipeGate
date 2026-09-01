@@ -3,8 +3,6 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val swipeGateVersionCode = 57
-
 android {
     namespace = "io.github.pzhown.hyperos4swipegate"
     compileSdk = 37
@@ -16,7 +14,7 @@ android {
         minSdk = 33
         targetSdk = 37
         // dev.15: end-to-end loaded-version handshake for reliable restart-required detection.
-        versionCode = swipeGateVersionCode
+        versionCode = 57
         versionName = "0.8.1-dev.15"
 
         ndk {
@@ -25,7 +23,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments += "-DANDROID_STL=c++_static"
-                arguments += "-DSWIPEGATE_VERSION_CODE=$swipeGateVersionCode"
+                arguments += "-DSWIPEGATE_VERSION_CODE=$versionCode"
             }
         }
     }
