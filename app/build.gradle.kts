@@ -13,9 +13,9 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // 0.8.2-beta1: runtime-proven Ready/Release dedup; temporary tracing and legacy Arc state removed.
-        versionCode = 62
-        versionName = "0.8.2-beta1"
+        // 0.8.2-beta2: scale Launcher Back progress coordinate so animation READY matches custom threshold.
+        versionCode = 63
+        versionName = "0.8.2-beta2"
 
         ndk {
             abiFilters += "arm64-v8a"

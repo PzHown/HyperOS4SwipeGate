@@ -61,6 +61,12 @@ constexpr int64_t kHealthyLogIntervalMs = 60000;
 constexpr int64_t kRepairCooldownMs = 1500;
 constexpr int64_t kHookIdleWaitMs = 120;
 constexpr int64_t kPatternRescanIntervalMs = 5000;
+constexpr size_t kBackProgressCallerScanSize = 0x900;
+constexpr size_t kBackProgressBodyProbeSize = 0x90;
+constexpr uint32_t kFmovS1Twenty = 0x1e269001u;
+constexpr uint32_t kFmovS8S0 = 0x1e204008u;
+constexpr uint32_t kFcmpS8Zero = 0x1e202108u;
+constexpr uint32_t kMovW8Float110 = 0x52a85b88u;
 constexpr size_t kHookProbeSize = 16;
 constexpr size_t kMaxExecutableRanges = 12;
 constexpr size_t kMaxLoadRanges = 16;
@@ -153,6 +159,14 @@ std::atomic<bool> gReadyReleaseDedupEligible{false};
 // suppress unrelated constant=0 haptics.
 std::atomic<uintptr_t> gStockBackReleaseHapticCallsite{0};
 std::atomic<bool> gStockBackReleaseHapticCallsiteResolved{false};
+// Launcher 8.x uses BackGestureUtils::convert_offset as the shared progress coordinate
+// for on_swipe_process, on_vsync and release. Runtime hook scales its distance input so
+// Xiaomi's native 0.8 READY point moves from 88dp to the configured threshold without
+// freezing the animation or changing unrelated raw gesture/velocity calculations.
+std::atomic<void *> gOriginalBackProgressConvertOffset{nullptr};
+std::atomic<uintptr_t> gBackProgressConvertOffsetTarget{0};
+std::atomic<bool> gBackProgressHookInstalled{false};
+std::atomic<bool> gBackProgressResolveFailureLogged{false};
 // Haptic segment state is independent from the Launcher hook health state.
 // 0 = outside/idle, 1 = first segment (Back, below custom threshold),
 // 2 = second segment (custom threshold reached). Only entering segment 1 is replayed.
@@ -751,6 +765,143 @@ bool decodeBlTarget(uintptr_t pc, uint32_t instruction, uintptr_t *target) {
     return true;
 }
 
+bool validateBackProgressConvertOffsetBody(const LibraryInfo &library, uintptr_t candidate) {
+    if (candidate == 0 || !libraryContainsRange(library, candidate, kBackProgressBodyProbeSize)) {
+        return false;
+    }
+
+    bool sawInputMove = false;
+    bool sawNegativeGuard = false;
+    bool sawStockDistance110 = false;
+    for (size_t offset = 0; offset < kBackProgressBodyProbeSize; offset += 4) {
+        uint32_t insn = 0;
+        std::memcpy(&insn, reinterpret_cast<const void *>(candidate + offset), sizeof(insn));
+        sawInputMove |= insn == kFmovS8S0;
+        sawNegativeGuard |= insn == kFcmpS8Zero;
+        sawStockDistance110 |= insn == kMovW8Float110;
+    }
+    return sawInputMove && sawNegativeGuard && sawStockDistance110;
+}
+
+uintptr_t resolveBackProgressConvertOffsetTarget(
+        const LibraryInfo &library, uintptr_t onSwipeProcessTarget,
+        size_t *corroboratedCallsites) {
+    if (corroboratedCallsites != nullptr) *corroboratedCallsites = 0;
+    if (library.base == 0 || onSwipeProcessTarget == 0) return 0;
+
+    struct Candidate {
+        uintptr_t target = 0;
+        size_t calls = 0;
+    };
+    std::array<Candidate, 16> candidates{};
+    size_t candidateCount = 0;
+
+    const uintptr_t end = onSwipeProcessTarget + kBackProgressCallerScanSize;
+    for (uintptr_t pc = onSwipeProcessTarget; pc + 8u <= end; pc += 4u) {
+        if (!libraryContainsRange(library, pc, 8)) break;
+        uint32_t callInsn = 0;
+        uint32_t nextInsn = 0;
+        std::memcpy(&callInsn, reinterpret_cast<const void *>(pc), sizeof(callInsn));
+        std::memcpy(&nextInsn, reinterpret_cast<const void *>(pc + 4u), sizeof(nextInsn));
+        if (nextInsn != kFmovS1Twenty) continue;
+
+        uintptr_t target = 0;
+        if (!decodeBlTarget(pc, callInsn, &target)
+                || !validateBackProgressConvertOffsetBody(library, target)) {
+            continue;
+        }
+
+        size_t index = 0;
+        for (; index < candidateCount; ++index) {
+            if (candidates[index].target == target) break;
+        }
+        if (index == candidateCount) {
+            if (candidateCount >= candidates.size()) return 0;
+            candidates[candidateCount++].target = target;
+        }
+        ++candidates[index].calls;
+    }
+
+    uintptr_t found = 0;
+    size_t foundCalls = 0;
+    size_t qualified = 0;
+    for (size_t i = 0; i < candidateCount; ++i) {
+        // Direct APK validation: Launcher 8.01.02.5459 has 3 corroborating callsites and
+        // 6174 has 4 in on_swipe_process. Requiring >=3 rejects incidental float helpers.
+        if (candidates[i].calls < 3) continue;
+        found = candidates[i].target;
+        foundCalls = candidates[i].calls;
+        ++qualified;
+    }
+    if (qualified != 1) return 0;
+    if (corroboratedCallsites != nullptr) *corroboratedCallsites = foundCalls;
+    return found;
+}
+
+using BackProgressConvertOffsetFn = float (*)(float);
+
+float backProgressConvertOffsetHook(float distancePx) {
+    const auto original = reinterpret_cast<BackProgressConvertOffsetFn>(
+            gOriginalBackProgressConvertOffset.load(std::memory_order_acquire));
+    if (original == nullptr) return distancePx;
+
+    const int configuredDp = readThresholdDp();
+    const int effectiveDp = configuredDp == 0
+            ? kStockBoundaryDp : std::max(configuredDp, kStockBoundaryDp);
+    if (effectiveDp <= kStockBoundaryDp) return original(distancePx);
+
+    // convert_offset's stock coordinate is 110dp with READY at progress 0.8, i.e. 88dp.
+    // Scaling its pixel input by 88/customThreshold is density-independent and preserves
+    // Xiaomi's own nonlinear easing after READY. At rawDx == customThreshold the original
+    // function receives exactly the stock-equivalent 88dp distance.
+    const float scale = static_cast<float>(kStockBoundaryDp) / static_cast<float>(effectiveDp);
+    return original(distancePx * scale);
+}
+
+bool installBackProgressHook(
+        const LibraryInfo &library, uintptr_t onSwipeProcessTarget, const char *source) {
+    if (library.base == 0 || onSwipeProcessTarget == 0 || gHookFunction == nullptr) return false;
+    if (gBackProgressHookInstalled.load(std::memory_order_acquire)) return true;
+
+    size_t corroboratedCallsites = 0;
+    const uintptr_t target = resolveBackProgressConvertOffsetTarget(
+            library, onSwipeProcessTarget, &corroboratedCallsites);
+    if (target == 0) {
+        bool expected = false;
+        if (gBackProgressResolveFailureLogged.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel)) {
+            logLine(ANDROID_LOG_WARN,
+                    "PROGRESS_V1 convert_offset unresolved source=%s onSwipe=%p profile=%s; keeping legacy clamp fallback",
+                    source == nullptr ? "unknown" : source,
+                    reinterpret_cast<void *>(onSwipeProcessTarget), gActivePatternName);
+        }
+        return false;
+    }
+
+    void *backup = nullptr;
+    const int rc = swipegate_install_protected_inline_hook(
+            gHookFunction, reinterpret_cast<void *>(target),
+            reinterpret_cast<void *>(backProgressConvertOffsetHook), &backup);
+    if (rc != 0 || backup == nullptr) {
+        logLine(ANDROID_LOG_ERROR,
+                "PROGRESS_V1 convert_offset hook failed source=%s rc=%d target=%p backup=%p",
+                source == nullptr ? "unknown" : source, rc,
+                reinterpret_cast<void *>(target), backup);
+        return false;
+    }
+
+    gOriginalBackProgressConvertOffset.store(backup, std::memory_order_release);
+    gBackProgressConvertOffsetTarget.store(target, std::memory_order_release);
+    gBackProgressHookInstalled.store(true, std::memory_order_release);
+    gBackProgressResolveFailureLogged.store(false, std::memory_order_release);
+    const uintptr_t rva = target >= library.base ? target - library.base : 0u;
+    logLine(ANDROID_LOG_INFO,
+            "PROGRESS_V1 convert_offset hook ready source=%s target=%p targetRva=0x%zx corroboratedCalls=%zu mapping=88dp/customThreshold refs=5459:0x773814,6174:0x60bb80",
+            source == nullptr ? "unknown" : source,
+            reinterpret_cast<void *>(target), static_cast<size_t>(rva), corroboratedCallsites);
+    return true;
+}
+
 bool pltReferencesSlot(const LibraryInfo &library, uintptr_t plt, uintptr_t expectedSlot) {
     if (plt == 0 || expectedSlot == 0 || !libraryContainsRange(library, plt, 16)) return false;
     uint32_t insn[4]{};
@@ -1007,10 +1158,19 @@ float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDi
     const bool delayBeyondStock = effectiveDp > kStockBoundaryDp && densityDpi > 0
             && stockGuardPx > 0.0f && userGatePx > stockBoundaryPx;
     const bool userGateReached = !delayBeyondStock || absDx >= userGatePx;
+    const bool progressHookReady = gBackProgressHookInstalled.load(std::memory_order_acquire);
+    const float progressScale = effectiveDp > kStockBoundaryDp
+            ? static_cast<float>(kStockBoundaryDp) / static_cast<float>(effectiveDp) : 1.0f;
 
+    // Preferred path: keep Xiaomi's raw gesture distance untouched and move the shared
+    // convert_offset progress coordinate instead. This preserves raw velocity/history while
+    // stretching the Back animation continuously so progress 0.8 lands on customThreshold.
+    // If the semantic progress resolver is unavailable on an unknown build, retain the old
+    // 87.xdp clamp as a fail-safe rather than changing gesture semantics without proof.
     float effectiveDistancePx = horizontalDistancePx;
     bool clamped = false;
-    if (delayBeyondStock && !userGateReached && absDx > stockGuardPx) {
+    const bool legacyClampFallback = delayBeyondStock && !progressHookReady;
+    if (legacyClampFallback && !userGateReached && absDx > stockGuardPx) {
         effectiveDistancePx = std::copysign(stockGuardPx, horizontalDistancePx);
         clamped = true;
         gClampedCount.fetch_add(1, std::memory_order_relaxed);
@@ -1040,8 +1200,8 @@ float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDi
         const char *stage = previousHapticSegment == 2 ? "return-first" : "first";
         if (!performNativeHaptic(stage)) {
             // Do not consume the segment transition when the feedback could not actually be
-            // emitted.  Restoring the previous state lets a later frame retry as soon as the
-            // capture hook/Arc becomes available instead of losing the first haptic forever.
+            // emitted. Restoring the previous state lets a later frame retry as soon as the
+            // HyperRT bridge is available instead of losing the first haptic forever.
             int expectedSegment = 1;
             if (gHapticGestureSegment.compare_exchange_strong(
                     expectedSegment, previousHapticSegment, std::memory_order_acq_rel)) {
@@ -1056,10 +1216,11 @@ float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDi
     int64_t last = gLastSwipeLogMs.load(std::memory_order_relaxed);
     if (now - last >= 1000 && gLastSwipeLogMs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
         logLine(ANDROID_LOG_INFO,
-                "DP_GATE rawDx=%.2f effectiveDx=%.2f configuredDp=%d effectiveDp=%d densityDpi=%d userGatePx=%.2f stockBoundaryPx=%.2f guardPx=%.2f delayBeyondStock=%d gateReached=%d clamped=%d readyFinish=%d side=%u repairs=%llu",
+                "DP_GATE rawDx=%.2f effectiveDx=%.2f configuredDp=%d effectiveDp=%d densityDpi=%d userGatePx=%.2f stockBoundaryPx=%.2f delayBeyondStock=%d gateReached=%d progressHook=%d progressScale=%.4f legacyClamp=%d clamped=%d readyFinish=%d side=%u repairs=%llu",
                 horizontalDistancePx, effectiveDistancePx, configuredDp, effectiveDp, densityDpi,
-                userGatePx, stockBoundaryPx, stockGuardPx, delayBeyondStock ? 1 : 0,
-                userGateReached ? 1 : 0, clamped ? 1 : 0, readyFinish ? 1 : 0, side,
+                userGatePx, stockBoundaryPx, delayBeyondStock ? 1 : 0,
+                userGateReached ? 1 : 0, progressHookReady ? 1 : 0, progressScale,
+                legacyClampFallback ? 1 : 0, clamped ? 1 : 0, readyFinish ? 1 : 0, side,
                 static_cast<unsigned long long>(gRepairCount.load(std::memory_order_relaxed)));
     }
     return effectiveDistancePx;
@@ -1141,6 +1302,9 @@ bool installFreshHookLocked(const LibraryInfo &library, uintptr_t target,
             densityDpi > 0 ? dpToPx(effectiveDp, densityDpi) : 0.0f,
             probeHex(patchedHead).c_str(),
             static_cast<unsigned long long>(gRepairCount.load(std::memory_order_relaxed)));
+    // Stretch Xiaomi's shared Back progress coordinate before relying on raw-distance
+    // passthrough. Unknown builds fall back to the legacy clamp inside gateHorizontalDistance.
+    installBackProgressHook(library, target, "primary-hook-install");
     // Runtime tracing on 6179 identified the real stock hand-up HyperRT callsite. Resolve
     // its structural fingerprint now; no secondary Launcher function hook is required.
     resolveAndPublishStockBackReleaseHapticCallsite(library, "primary-hook-install");
@@ -1242,6 +1406,10 @@ void resetTrackedHookForRemapLocked(uintptr_t newBase) {
     gActiveResolverDetail = "<none>";
     gStockBackReleaseHapticCallsiteResolved.store(false, std::memory_order_release);
     gStockBackReleaseHapticCallsite.store(0, std::memory_order_release);
+    gBackProgressHookInstalled.store(false, std::memory_order_release);
+    gBackProgressConvertOffsetTarget.store(0, std::memory_order_release);
+    gOriginalBackProgressConvertOffset.store(nullptr, std::memory_order_release);
+    gBackProgressResolveFailureLogged.store(false, std::memory_order_release);
 }
 
 bool ensureHookLocked(const LibraryInfo &library, const char *source) {
@@ -1263,8 +1431,10 @@ bool ensureHookLocked(const LibraryInfo &library, const char *source) {
                     && gLastHealthyLogMs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
                 const uintptr_t releaseCallsite = gStockBackReleaseHapticCallsite.load(
                         std::memory_order_acquire);
+                const uintptr_t progressTarget = gBackProgressConvertOffsetTarget.load(
+                        std::memory_order_acquire);
                 logLine(ANDROID_LOG_INFO,
-                        "HOOK_HEALTH healthy source=%s base=%p target=%p pattern=%s resolver=%s detail=%s configuredDp=%d repairs=%llu hapticCapture=%d releaseCallsiteReady=%d releaseCallsite=%p releaseCallsiteRva=0x%zx",
+                        "HOOK_HEALTH healthy source=%s base=%p target=%p pattern=%s resolver=%s detail=%s configuredDp=%d repairs=%llu hapticCapture=%d releaseCallsiteReady=%d releaseCallsite=%p releaseCallsiteRva=0x%zx progressHook=%d progressTarget=%p progressTargetRva=0x%zx",
                         source, reinterpret_cast<void *>(library.base), reinterpret_cast<void *>(trackedTarget),
                         gActivePatternName, gActivePatternName, gActiveResolverDetail, readThresholdDp(),
                         static_cast<unsigned long long>(gRepairCount.load(std::memory_order_relaxed)),
@@ -1272,7 +1442,11 @@ bool ensureHookLocked(const LibraryInfo &library, const char *source) {
                         gStockBackReleaseHapticCallsiteResolved.load(std::memory_order_acquire) ? 1 : 0,
                         reinterpret_cast<void *>(releaseCallsite),
                         library.base != 0 && releaseCallsite >= library.base
-                                ? static_cast<size_t>(releaseCallsite - library.base) : 0u);
+                                ? static_cast<size_t>(releaseCallsite - library.base) : 0u,
+                        gBackProgressHookInstalled.load(std::memory_order_acquire) ? 1 : 0,
+                        reinterpret_cast<void *>(progressTarget),
+                        library.base != 0 && progressTarget >= library.base
+                                ? static_cast<size_t>(progressTarget - library.base) : 0u);
             }
             return true;
         }
@@ -1339,6 +1513,12 @@ void hookWatchdogWorker() {
         if (library.base != 0) {
             missingPolls = 0;
             ensureHook(library, "watchdog");
+            if (!gBackProgressHookInstalled.load(std::memory_order_acquire)) {
+                const uintptr_t onSwipeTarget = gHookedTarget.load(std::memory_order_acquire);
+                if (onSwipeTarget != 0) {
+                    installBackProgressHook(library, onSwipeTarget, "watchdog");
+                }
+            }
             if (!gStockBackReleaseHapticCallsiteResolved.load(std::memory_order_acquire)) {
                 resolveAndPublishStockBackReleaseHapticCallsite(library, "watchdog");
             }
