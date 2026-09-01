@@ -1,49 +1,317 @@
-name: Update 0.9.0 Release Notes
+name: Build APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+  workflow_dispatch:
 
 permissions:
   contents: write
+  packages: read
+
+concurrency:
+  group: swipegate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  update-release-notes:
-    if: contains(github.event.head_commit.message, '[release-notes-only]')
+  build:
     runs-on: ubuntu-latest
+    env:
+      GITHUB_ACTOR: ${{ github.actor }}
+      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Update project release notes
+      - name: Select build channel
+        shell: bash
+        run: |
+          VERSION_CODE="$(sed -nE 's/^[[:space:]]*versionCode = ([0-9]+).*/\1/p' app/build.gradle.kts | head -n1)"
+          VERSION_NAME="$(sed -nE 's/^[[:space:]]*versionName = "([^"]+)".*/\1/p' app/build.gradle.kts | head -n1)"
+          if [ -z "$VERSION_CODE" ] || [ -z "$VERSION_NAME" ]; then
+            echo "::error::Could not read versionCode/versionName from app/build.gradle.kts"
+            exit 1
+          fi
+          RELEASE_TAG="${VERSION_CODE}-${VERSION_NAME}"
+
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            BUILD_VARIANT="debug"
+            BUILD_TASK="assembleDebug"
+            APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+            CHANNEL="pr"
+          elif [ "$GITHUB_REF_NAME" = "main" ]; then
+            BUILD_VARIANT="release"
+            BUILD_TASK="assembleRelease"
+            APK_PATH="app/build/outputs/apk/release/app-release.apk"
+            CHANNEL="release"
+          elif [ "$GITHUB_REF_NAME" = "dev" ]; then
+            BUILD_VARIANT="debug"
+            BUILD_TASK="assembleDebug"
+            APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+            CHANNEL="debug"
+          else
+            echo "::error::Unsupported branch: $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          echo "BUILD_VARIANT=$BUILD_VARIANT" >> "$GITHUB_ENV"
+          echo "BUILD_TASK=$BUILD_TASK" >> "$GITHUB_ENV"
+          echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
+          echo "CHANNEL=$CHANNEL" >> "$GITHUB_ENV"
+          echo "Selected versionCode=$VERSION_CODE versionName=$VERSION_NAME tag=$RELEASE_TAG channel=$CHANNEL variant=$BUILD_VARIANT task=$BUILD_TASK"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK, NDK and CMake
+        run: |
+          sdkmanager "platforms;android-37.0" "build-tools;37.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - name: Set up Gradle 9.5.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+
+      - name: Prepare persistent signing keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            python3 - <<'PY'
+          import base64
+          import binascii
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          raw = os.environ.get("ANDROID_KEYSTORE_BASE64", "").strip()
+          if raw.startswith("ANDROID_KEYSTORE_BASE64="):
+              raw = raw.split("=", 1)[1]
+          if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+              raw = raw[1:-1]
+          raw = re.sub(r"\s+", "", raw)
+
+          try:
+              data = base64.b64decode(raw, validate=True)
+          except (binascii.Error, ValueError):
+              print("::error::ANDROID_KEYSTORE_BASE64 is not valid Base64.")
+              sys.exit(1)
+
+          if not data.startswith(bytes.fromhex("FEEDFEED")):
+              print("::error::Decoded ANDROID_KEYSTORE_BASE64 is not the expected JKS keystore.")
+              sys.exit(1)
+
+          output = Path(os.environ["RUNNER_TEMP"]) / "swipegate-release.jks"
+          output.write_bytes(data)
+          print(f"Persistent Android signing key decoded ({len(data)} bytes).")
+          PY
+            keytool -list \
+              -keystore "$RUNNER_TEMP/swipegate-release.jks" \
+              -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+              -alias "$ANDROID_KEY_ALIAS" >/dev/null
+            echo "CI_SIGNING_ENABLED=1" >> "$GITHUB_ENV"
+            echo "Persistent Android signing key validated."
+          else
+            if [ "$CHANNEL" = "release" ]; then
+              echo "::error::main/release builds require the persistent Android signing secrets."
+              exit 1
+            fi
+            echo "CI_SIGNING_ENABLED=0" >> "$GITHUB_ENV"
+            echo "No persistent signing secret configured; debug CI will use the Gradle debug key."
+          fi
+
+      - name: Build APK
+        env:
+          ANDROID_SIGNING_STORE_FILE: ${{ runner.temp }}/swipegate-release.jks
+          ANDROID_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: gradle --no-daemon ":app:$BUILD_TASK"
+
+      - name: Verify LSPosed API102 packaging
+        run: |
+          JAVA_ENTRIES="$(unzip -p "$APK_PATH" META-INF/xposed/java_init.list)"
+          printf '%s\n' "$JAVA_ENTRIES" | grep -qx 'io.github.pzhown.hyperos4swipegate.ModuleMain'
+          printf '%s\n' "$JAVA_ENTRIES" | grep -qx 'io.github.pzhown.hyperos4swipegate.NativeErrorReporter'
+          printf '%s\n' "$JAVA_ENTRIES" | grep -qx 'io.github.pzhown.hyperos4swipegate.SystemUiBridgeModule'
+          test "$(printf '%s\n' "$JAVA_ENTRIES" | grep -cve '^$')" -eq 3
+
+          unzip -p "$APK_PATH" 'classes*.dex' | strings > dex-strings.txt
+          grep -Fq 'Lio/github/pzhown/hyperos4swipegate/ModuleMain;' dex-strings.txt
+          grep -Fq 'Lio/github/pzhown/hyperos4swipegate/NativeErrorReporter;' dex-strings.txt
+          grep -Fq 'Lio/github/pzhown/hyperos4swipegate/SystemUiBridgeModule;' dex-strings.txt
+
+          NATIVE_ENTRIES="$(unzip -p "$APK_PATH" META-INF/xposed/native_init.list)"
+          printf '%s\n' "$NATIVE_ENTRIES" | grep -qx 'libhyperos4swipegate.so'
+          test "$(printf '%s\n' "$NATIVE_ENTRIES" | grep -cve '^$')" -eq 1
+
+          unzip -p "$APK_PATH" META-INF/xposed/module.prop | tee module.prop
+          grep -qx 'minApiVersion=102' module.prop
+          grep -qx 'targetApiVersion=102' module.prop
+          grep -qx 'staticScope=true' module.prop
+
+          SCOPES="$(unzip -p "$APK_PATH" META-INF/xposed/scope.list)"
+          printf '%s\n' "$SCOPES" | grep -qx 'com.miui.home'
+          printf '%s\n' "$SCOPES" | grep -qx 'com.android.systemui'
+          test "$(printf '%s\n' "$SCOPES" | grep -cve '^$')" -eq 2
+
+          unzip -l "$APK_PATH" | grep -q 'lib/arm64-v8a/libhyperos4swipegate.so'
+
+      - name: Verify native entry and 16 KB ELF alignment
+        run: |
+          unzip -p "$APK_PATH" lib/arm64-v8a/libhyperos4swipegate.so > /tmp/libhyperos4swipegate.so
+          NM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          ZIPALIGN="$ANDROID_HOME/build-tools/37.0.0/zipalign"
+          "$NM" -D /tmp/libhyperos4swipegate.so | tee native-symbols.txt
+          grep -q ' native_init$' native-symbols.txt
+          "$READELF" -lW /tmp/libhyperos4swipegate.so | tee elf-program-headers.txt
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('elf-program-headers.txt').read_text()
+          aligns = []
+          for line in text.splitlines():
+              if re.match(r'^\s*LOAD\s', line):
+                  m = re.search(r'(0x[0-9a-fA-F]+)\s*$', line)
+                  if not m:
+                      raise SystemExit(f'Could not parse LOAD alignment: {line}')
+                  aligns.append(int(m.group(1), 16))
+          if not aligns or any(a < 0x4000 for a in aligns):
+              raise SystemExit(f'Invalid ELF LOAD alignments: {[hex(a) for a in aligns]}')
+          print('ELF LOAD alignments:', [hex(a) for a in aligns])
+          PY
+          "$ZIPALIGN" -c -P 16 -v 4 "$APK_PATH"
+
+      - name: Verify APK signing certificate
+        run: |
+          APKSIGNER="$ANDROID_HOME/build-tools/37.0.0/apksigner"
+          "$APKSIGNER" verify --verbose --print-certs "$APK_PATH" | tee apk-signing.txt
+          if [ "$CI_SIGNING_ENABLED" = "1" ]; then
+            tr '[:upper:]' '[:lower:]' < apk-signing.txt | grep -q 'f7a9ef2678d55e321a01f54cef9d1c180ec4e0c87473611437a04d2d801b8f11'
+            echo "Persistent signing certificate verified."
+          fi
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p dist
+          cp "$APK_PATH" "dist/SwipeGate-$BUILD_VARIANT.apk"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SwipeGate-${{ github.run_number }}
+          path: dist/SwipeGate-*.apk
+
+      - name: Publish debug-latest
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release edit 64-0.9.0 \
-            --repo PzHown/HyperOS4SwipeGate \
-            --title "SwipeGate v0.9.0" \
-            --notes-file RELEASE_NOTES.md \
-            --prerelease=false
-          gh release view 64-0.9.0 \
-            --repo PzHown/HyperOS4SwipeGate \
-            --json tagName,name,isDraft,isPrerelease,assets \
-            --jq '{tag: .tagName, name: .name, draft: .isDraft, prerelease: .isPrerelease, assets: [.assets[].name]}'
+          gh release delete debug-latest --yes --cleanup-tag || true
+          if ! gh release create debug-latest \
+            dist/SwipeGate-debug.apk \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "SwipeGate v${VERSION_NAME} Debug" \
+            --notes "Development Debug build from the dev branch. LSPosed API 102 native_init for HyperOS 4 Launcher 8.0+."; then
+            echo "::warning::debug-latest release publishing is unavailable for this Actions integration; the uploaded workflow artifact remains the canonical dev build."
+          fi
 
-      - name: Update LSPosed release notes
+      - name: Publish versioned release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$VERSION_NAME" != *-* ]]; then
+            DEV_PREFIX="${VERSION_CODE}-${VERSION_NAME}-dev."
+            gh release list --limit 100 --json tagName --jq '.[].tagName' | while read -r TAG; do
+              case "$TAG" in
+                "$DEV_PREFIX"*) gh release delete "$TAG" --yes --cleanup-tag ;;
+              esac
+            done
+          fi
+          gh release delete release-latest --yes --cleanup-tag || true
+          gh release delete "$RELEASE_TAG" --yes --cleanup-tag || true
+          RELEASE_NOTES="$(cat RELEASE_NOTES.md)"
+          RELEASE_FLAGS=()
+          if [[ "$VERSION_NAME" == *-* ]]; then
+            RELEASE_FLAGS+=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" \
+            dist/SwipeGate-release.apk \
+            --target "$GITHUB_SHA" \
+            --title "SwipeGate v${VERSION_NAME}" \
+            --notes "$RELEASE_NOTES" \
+            "${RELEASE_FLAGS[@]}"
+
+      - name: Publish LSPosed release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.LSPOSED_REPO_TOKEN }}
           LSPOSED_REPO: Xposed-Modules-Repo/io.github.pzhown.hyperos4swipegate
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "::error::Repository secret LSPOSED_REPO_TOKEN is required."
+            echo "::error::Repository secret LSPOSED_REPO_TOKEN is required for cross-repository publishing."
             exit 1
           fi
-          gh release edit 64-0.9.0 \
-            --repo "$LSPOSED_REPO" \
-            --title "0.9.0" \
-            --notes-file RELEASE_NOTES.md \
-            --prerelease=false
-          gh release view 64-0.9.0 \
+
+          gh auth status
+          RELEASE_NOTES="$(cat RELEASE_NOTES.md)"
+          LSPOSED_RELEASE_FLAGS=()
+          if [[ "$VERSION_NAME" == *-* ]]; then
+            LSPOSED_RELEASE_FLAGS+=(--prerelease)
+          fi
+
+          if [[ "$VERSION_NAME" != *-* ]]; then
+            DEV_PREFIX="${VERSION_CODE}-${VERSION_NAME}-dev."
+            gh release list --repo "$LSPOSED_REPO" --limit 100 --json tagName --jq '.[].tagName' | while read -r TAG; do
+              case "$TAG" in
+                "$DEV_PREFIX"*) gh release delete "$TAG" --repo "$LSPOSED_REPO" --yes --cleanup-tag ;;
+              esac
+            done
+          fi
+
+          if gh release view "$RELEASE_TAG" --repo "$LSPOSED_REPO" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" \
+              dist/SwipeGate-release.apk \
+              --repo "$LSPOSED_REPO" \
+              --clobber
+            gh release edit "$RELEASE_TAG" \
+              --repo "$LSPOSED_REPO" \
+              --title "$VERSION_NAME" \
+              --notes "$RELEASE_NOTES"
+            if [[ "$VERSION_NAME" == *-* ]]; then
+              gh release edit "$RELEASE_TAG" --repo "$LSPOSED_REPO" --prerelease
+            else
+              gh release edit "$RELEASE_TAG" --repo "$LSPOSED_REPO" --prerelease=false
+            fi
+          else
+            gh release create "$RELEASE_TAG" \
+              dist/SwipeGate-release.apk \
+              --repo "$LSPOSED_REPO" \
+              --target main \
+              --title "$VERSION_NAME" \
+              --notes "$RELEASE_NOTES" \
+              "${LSPOSED_RELEASE_FLAGS[@]}"
+          fi
+
+          gh release view "$RELEASE_TAG" \
             --repo "$LSPOSED_REPO" \
             --json tagName,name,isDraft,isPrerelease,assets \
             --jq '{tag: .tagName, name: .name, draft: .isDraft, prerelease: .isPrerelease, assets: [.assets[].name]}'
