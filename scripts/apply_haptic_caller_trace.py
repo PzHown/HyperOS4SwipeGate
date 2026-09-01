@@ -10,6 +10,7 @@ def replace_once(path: str, old: str, new: str, label: str) -> None:
     p.write_text(text.replace(old, new, 1))
 
 
+# One-shot staging patch. Updating this file intentionally triggers the companion workflow.
 # 1) Native trace: capture the real caller of every stock HyperRT ext-haptic invocation.
 replace_once(
     "native/src/main.cpp",
@@ -131,8 +132,6 @@ replace_once(
     "version bump",
 )
 
-# Verify that the trace can identify an actual stock caller and that synthetic Ready still
-# bypasses the capture hook via gOriginalHapticFeedback.
 main_text = Path("native/src/main.cpp").read_text()
 for required in [
     "HAPTIC_TRACE stock-call",
@@ -148,6 +147,5 @@ for required in [
     if required not in main_text:
         raise SystemExit(f"required trace invariant missing: {required}")
 
-# The staging machinery is intentionally one-shot.
 Path("scripts/apply_haptic_caller_trace.py").unlink()
 Path(".github/workflows/run-haptic-caller-trace.yml").unlink()
