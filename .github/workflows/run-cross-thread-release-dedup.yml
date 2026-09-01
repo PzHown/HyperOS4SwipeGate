@@ -1,0 +1,45 @@
+name: Run cross-thread release dedup patch
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/run-cross-thread-release-dedup.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - name: Apply patch
+        run: python3 scripts/apply_cross_thread_release_dedup.py
+      - name: Validate
+        shell: bash
+        run: |
+          git diff --check
+          ! grep -q 'gReleaseDedupArmed' native/src/main.cpp
+          ! grep -q 'gReleaseHapticSuppressed' native/src/main.cpp
+          grep -q 'gReleaseDedupTokenDeadlineMs' native/src/main.cpp
+          grep -q 'reason=ready-release-token' native/src/main.cpp
+          grep -q 'crossThreadSafe=1' native/src/main.cpp
+          grep -q 'kReadyReleaseDedupMs = 750' native/src/main.cpp
+          grep -q 'versionName = "0.8.1-dev.14"' app/build.gradle.kts
+      - name: Cleanup staging files
+        run: |
+          rm -f scripts/apply_cross_thread_release_dedup.py
+          rm -f .github/workflows/apply-cross-thread-release-dedup.yml
+          rm -f .github/workflows/run-cross-thread-release-dedup.yml
+      - name: Commit
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: dedup asynchronous release haptic across threads"
+          git push origin HEAD:dev
