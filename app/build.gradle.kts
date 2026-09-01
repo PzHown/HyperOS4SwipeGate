@@ -13,9 +13,9 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // dev.19: production cleanup after runtime-proven release-callsite dedup; caller trace removed.
-        versionCode = 61
-        versionName = "0.8.1-dev.19"
+        // 0.8.2-beta1: runtime-proven Ready/Release haptic dedup and production log convergence.
+        versionCode = 62
+        versionName = "0.8.2-beta1"
 
         ndk {
             abiFilters += "arm64-v8a"
