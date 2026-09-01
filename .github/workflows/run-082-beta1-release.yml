@@ -1,0 +1,38 @@
+name: Stage 0.8.2-beta1 release
+
+on:
+  push:
+    branches: [ dev ]
+    paths:
+      - scripts/apply_082_beta1_release.py
+      - .github/workflows/run-082-beta1-release.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - name: Apply release staging
+        run: python3 scripts/apply_082_beta1_release.py
+      - name: Verify release tree
+        run: |
+          grep -Fq 'versionCode = 62' app/build.gradle.kts
+          grep -Fq 'versionName = "0.8.2-beta1"' app/build.gradle.kts
+          ! grep -Fq 'HAPTIC_TRACE stock-call' native/src/main.cpp
+          grep -Fq 'kReadyReleaseDedupMs = 750' native/src/main.cpp
+          grep -Fq 'RELEASE_FLAGS+=(--prerelease)' .github/workflows/build.yml
+          test ! -e scripts/apply_082_beta1_release.py
+          test ! -e .github/workflows/run-082-beta1-release.yml
+      - name: Commit release staging
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'release: prepare 0.8.2-beta1'
+          git push origin HEAD:dev
