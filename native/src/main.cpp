@@ -55,6 +55,8 @@ constexpr uintptr_t kPointerAddressMask = 0x00ffffffffffffffull;
 constexpr const char *kThresholdDpProperty = "persist.hyperos4swipegate.threshold_dp";
 constexpr int kDefaultThresholdDp = 0;
 constexpr int kStockBoundaryDp = 88;
+constexpr int kStockFullProgressDp = 110;
+constexpr int kStockPostReadySpanDp = kStockFullProgressDp - kStockBoundaryDp;
 constexpr int kMaxThresholdDp = 320;
 constexpr int64_t kHookHealthIntervalMs = 500;
 constexpr int64_t kHealthyLogIntervalMs = 60000;
@@ -72,6 +74,8 @@ constexpr size_t kMaxExecutableRanges = 12;
 constexpr size_t kMaxLoadRanges = 16;
 
 constexpr uintptr_t kReferenceOnSwipeProcessOffset = 0x816fc4;
+
+static_assert(kStockPostReadySpanDp > 0);
 
 // These byte patterns are feature fingerprints, not version gates. A newer Launcher may
 // reuse the same gesture implementation and is compatible when the fingerprint still matches.
@@ -160,9 +164,9 @@ std::atomic<bool> gReadyReleaseDedupEligible{false};
 std::atomic<uintptr_t> gStockBackReleaseHapticCallsite{0};
 std::atomic<bool> gStockBackReleaseHapticCallsiteResolved{false};
 // Launcher 8.x uses BackGestureUtils::convert_offset as the shared progress coordinate
-// for on_swipe_process, on_vsync and release. Runtime hook scales its distance input so
-// Xiaomi's native 0.8 READY point moves from 88dp to the configured threshold without
-// freezing the animation or changing unrelated raw gesture/velocity calculations.
+// for on_swipe_process, on_vsync and release. Runtime hook stretches only the pre-READY
+// segment to the configured threshold, then rejoins Xiaomi's stock 22dp READY->full span
+// with C1-continuous interpolation so the tail no longer grows with the custom threshold.
 std::atomic<void *> gOriginalBackProgressConvertOffset{nullptr};
 std::atomic<uintptr_t> gBackProgressConvertOffsetTarget{0};
 std::atomic<bool> gBackProgressHookInstalled{false};
@@ -850,12 +854,48 @@ float backProgressConvertOffsetHook(float distancePx) {
             ? kStockBoundaryDp : std::max(configuredDp, kStockBoundaryDp);
     if (effectiveDp <= kStockBoundaryDp) return original(distancePx);
 
-    // convert_offset's stock coordinate is 110dp with READY at progress 0.8, i.e. 88dp.
-    // Scaling its pixel input by 88/customThreshold is density-independent and preserves
-    // Xiaomi's own nonlinear easing after READY. At rawDx == customThreshold the original
-    // function receives exactly the stock-equivalent 88dp distance.
-    const float scale = static_cast<float>(kStockBoundaryDp) / static_cast<float>(effectiveDp);
-    return original(distancePx * scale);
+    const int densityDpi = readDensityDpi();
+    if (densityDpi <= 0 || !std::isfinite(distancePx)) return original(distancePx);
+
+    const float stockReadyPx = dpToPx(kStockBoundaryDp, densityDpi);
+    const float stockFullPx = dpToPx(kStockFullProgressDp, densityDpi);
+    const float stockPostReadySpanPx = dpToPx(kStockPostReadySpanDp, densityDpi);
+    const float userReadyPx = dpToPx(effectiveDp, densityDpi);
+    if (stockReadyPx <= 0.0f || stockFullPx <= stockReadyPx
+            || stockPostReadySpanPx <= 0.0f || userReadyPx <= stockReadyPx) {
+        return original(distancePx);
+    }
+
+    const float rawDistancePx = std::fabs(distancePx);
+    const float preReadyScale = stockReadyPx / userReadyPx;
+    float mappedDistancePx = 0.0f;
+
+    if (rawDistancePx <= userReadyPx) {
+        // Stretch only the 0 -> READY segment so customThreshold lands exactly on stock 88dp.
+        mappedDistancePx = rawDistancePx * preReadyScale;
+    } else if (rawDistancePx >= userReadyPx + stockPostReadySpanPx) {
+        // Once the stock 22dp READY->full span is consumed, continue at the original 1:1 rate.
+        mappedDistancePx = stockFullPx
+                + (rawDistancePx - userReadyPx - stockPostReadySpanPx);
+    } else {
+        // Rejoin the stock tail with a cubic Hermite segment. Endpoints are fixed at
+        // customThreshold -> 88dp and customThreshold+22dp -> 110dp. Tangents are the
+        // pre-READY scale and 1:1 respectively, making both position and speed continuous.
+        const float tailDistancePx = rawDistancePx - userReadyPx;
+        const float t = tailDistancePx / stockPostReadySpanPx;
+        const float t2 = t * t;
+        const float t3 = t2 * t;
+        const float h00 = 2.0f * t3 - 3.0f * t2 + 1.0f;
+        const float h10 = t3 - 2.0f * t2 + t;
+        const float h01 = -2.0f * t3 + 3.0f * t2;
+        const float h11 = t3 - t2;
+        mappedDistancePx = h00 * stockReadyPx
+                + h10 * stockPostReadySpanPx * preReadyScale
+                + h01 * stockFullPx
+                + h11 * stockPostReadySpanPx;
+    }
+
+    return original(std::copysign(mappedDistancePx, distancePx));
 }
 
 bool installBackProgressHook(
@@ -896,7 +936,7 @@ bool installBackProgressHook(
     gBackProgressResolveFailureLogged.store(false, std::memory_order_release);
     const uintptr_t rva = target >= library.base ? target - library.base : 0u;
     logLine(ANDROID_LOG_INFO,
-            "PROGRESS_V1 convert_offset hook ready source=%s target=%p targetRva=0x%zx corroboratedCalls=%zu mapping=88dp/customThreshold refs=5459:0x773814,6174:0x60bb80",
+            "PROGRESS_V1 convert_offset hook ready source=%s target=%p targetRva=0x%zx corroboratedCalls=%zu mapping=pre-ready-scale+22dp-hermite-tail refs=5459:0x773814,6174:0x60bb80",
             source == nullptr ? "unknown" : source,
             reinterpret_cast<void *>(target), static_cast<size_t>(rva), corroboratedCallsites);
     return true;
@@ -1159,14 +1199,15 @@ float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDi
             && stockGuardPx > 0.0f && userGatePx > stockBoundaryPx;
     const bool userGateReached = !delayBeyondStock || absDx >= userGatePx;
     const bool progressHookReady = gBackProgressHookInstalled.load(std::memory_order_acquire);
-    const float progressScale = effectiveDp > kStockBoundaryDp
+    const float preReadyScale = effectiveDp > kStockBoundaryDp
             ? static_cast<float>(kStockBoundaryDp) / static_cast<float>(effectiveDp) : 1.0f;
 
     // Preferred path: keep Xiaomi's raw gesture distance untouched and move the shared
     // convert_offset progress coordinate instead. This preserves raw velocity/history while
-    // stretching the Back animation continuously so progress 0.8 lands on customThreshold.
-    // If the semantic progress resolver is unavailable on an unknown build, retain the old
-    // 87.xdp clamp as a fail-safe rather than changing gesture semantics without proof.
+    // stretching only the pre-READY animation so progress 0.8 lands on customThreshold; the
+    // stock 22dp READY->full span remains fixed. If the semantic progress resolver is
+    // unavailable on an unknown build, retain the old 87.xdp clamp as a fail-safe rather
+    // than changing gesture semantics without proof.
     float effectiveDistancePx = horizontalDistancePx;
     bool clamped = false;
     const bool legacyClampFallback = delayBeyondStock && !progressHookReady;
@@ -1216,11 +1257,12 @@ float gateHorizontalDistance(bool readyFinish, uint32_t side, float horizontalDi
     int64_t last = gLastSwipeLogMs.load(std::memory_order_relaxed);
     if (now - last >= 1000 && gLastSwipeLogMs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
         logLine(ANDROID_LOG_INFO,
-                "DP_GATE rawDx=%.2f effectiveDx=%.2f configuredDp=%d effectiveDp=%d densityDpi=%d userGatePx=%.2f stockBoundaryPx=%.2f delayBeyondStock=%d gateReached=%d progressHook=%d progressScale=%.4f legacyClamp=%d clamped=%d readyFinish=%d side=%u repairs=%llu",
+                "DP_GATE rawDx=%.2f effectiveDx=%.2f configuredDp=%d effectiveDp=%d densityDpi=%d userGatePx=%.2f stockBoundaryPx=%.2f delayBeyondStock=%d gateReached=%d progressHook=%d preReadyScale=%.4f postReadySpanDp=%d legacyClamp=%d clamped=%d readyFinish=%d side=%u repairs=%llu",
                 horizontalDistancePx, effectiveDistancePx, configuredDp, effectiveDp, densityDpi,
                 userGatePx, stockBoundaryPx, delayBeyondStock ? 1 : 0,
-                userGateReached ? 1 : 0, progressHookReady ? 1 : 0, progressScale,
-                legacyClampFallback ? 1 : 0, clamped ? 1 : 0, readyFinish ? 1 : 0, side,
+                userGateReached ? 1 : 0, progressHookReady ? 1 : 0, preReadyScale,
+                kStockPostReadySpanDp, legacyClampFallback ? 1 : 0, clamped ? 1 : 0,
+                readyFinish ? 1 : 0, side,
                 static_cast<unsigned long long>(gRepairCount.load(std::memory_order_relaxed)));
     }
     return effectiveDistancePx;
@@ -1302,7 +1344,7 @@ bool installFreshHookLocked(const LibraryInfo &library, uintptr_t target,
             densityDpi > 0 ? dpToPx(effectiveDp, densityDpi) : 0.0f,
             probeHex(patchedHead).c_str(),
             static_cast<unsigned long long>(gRepairCount.load(std::memory_order_relaxed)));
-    // Stretch Xiaomi's shared Back progress coordinate before relying on raw-distance
+    // Remap Xiaomi's shared Back progress coordinate before relying on raw-distance
     // passthrough. Unknown builds fall back to the legacy clamp inside gateHorizontalDistance.
     installBackProgressHook(library, target, "primary-hook-install");
     // Runtime tracing on 6179 identified the real stock hand-up HyperRT callsite. Resolve
