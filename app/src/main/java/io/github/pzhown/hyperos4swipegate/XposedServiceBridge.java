@@ -249,8 +249,10 @@ public final class XposedServiceBridge {
             final boolean systemUiInScope = current.getScope().contains(SYSTEM_UI_PACKAGE);
 
             HookedTarget matchedTarget = null;
+            HookedTarget systemUiTarget = null;
             String matchMode = "none";
             StringBuilder targetDump = new StringBuilder();
+            long installedVersionCode = resolveInstalledVersionCode(context);
 
             if (api >= XposedService.API_102) {
                 List<HookedTarget> targets = current.getRunningTargets();
@@ -260,12 +262,15 @@ public final class XposedServiceBridge {
                     targetDump.append(target.getProcessName())
                             .append(" uid=").append(target.getUid())
                             .append(" pid=").append(target.getPid())
-                            .append(" state=").append(target.getState().name());
+                            .append(" state=").append(target.getState().name())
+                            .append(" loadedVersion=").append(target.getLoadedVersionCode());
 
+                    if (SYSTEM_UI_PACKAGE.equals(target.getProcessName())) {
+                        systemUiTarget = target;
+                    }
                     if (TARGET_PACKAGE.equals(target.getProcessName())) {
                         matchedTarget = target;
                         matchMode = "process-name";
-                        break;
                     }
                 }
 
@@ -293,41 +298,45 @@ public final class XposedServiceBridge {
 
             boolean directRuntimeTarget = matchedTarget != null;
 
-            // Some HYOS-enabled LSPosed builds do not expose a native-only child as a Java-style
-            // running target. Both required scopes + the Xiaomi HYOS runtime are valid activation
-            // evidence, but activation alone is never enough for a green/active UI state.
+            // Some HYOS-enabled LSPosed builds do not expose the native-only launcher child as a
+            // normal running target. Scope presence is activation evidence only; it must never be
+            // promoted to UP_TO_DATE because that masks STALE SystemUI/native code after an APK update.
             boolean hyosActivationFallback = !directRuntimeTarget
                     && api >= XposedService.API_102
                     && launcherInScope
                     && systemUiInScope
                     && hyosSpawnerPresent;
 
-            boolean launcherLoaded = directRuntimeTarget || hyosActivationFallback;
-            String frameworkTargetState = directRuntimeTarget
-                    ? matchedTarget.getState().name()
-                    : (hyosActivationFallback ? "UP_TO_DATE" : "");
+            boolean launcherLoaded = directRuntimeTarget || systemUiTarget != null || hyosActivationFallback;
+            String frameworkTargetState = aggregateTargetState(
+                    matchedTarget, systemUiTarget, installedVersionCode);
             int targetPid = directRuntimeTarget ? matchedTarget.getPid() : 0;
 
             DiagnosticsStreamBridge.NativeHookStatus nativeHookStatus =
                     DiagnosticsStreamBridge.nativeHookStatus();
+            NativeControlBridge.Snapshot nativePeer = NativeControlBridge.snapshot();
             String nativeState = nativeHookStatus.state();
+            boolean runtimeVersionStale = nativePeer.fresh()
+                    && (nativePeer.systemUiLoadedVersionCode() <= 0L
+                    || nativePeer.nativeLoadedVersionCode() <= 0L
+                    || nativePeer.systemUiLoadedVersionCode() != installedVersionCode
+                    || nativePeer.nativeLoadedVersionCode() != installedVersionCode);
             String targetState = frameworkTargetState;
             if (launcherLoaded) {
-                // Failure wins over freshness. A stale FAILED state must stay failed until the
-                // native side reports a newer state; otherwise the UI lies by falling back to
-                // "正在更新" after a known Hook failure.
+                // Framework state is authoritative when available. The explicit version handshake
+                // covers HYOS builds that hide the launcher child from getRunningTargets().
                 if ("FAILED".equals(frameworkTargetState) || "FAILED".equals(nativeState)) {
                     targetState = "FAILED";
+                } else if ("STALE".equals(frameworkTargetState) || runtimeVersionStale) {
+                    targetState = "STALE";
                 } else if ("RELOADING".equals(frameworkTargetState)) {
                     targetState = "RELOADING";
                 } else if (!nativeHookStatus.fresh()) {
-                    // Keep the existing short loading window while the app waits for the first
-                    // Native reply. NativeControlBridge turns a prolonged no-reply condition into
-                    // FAILED after its fail-closed timeout, so this can no longer loop forever.
                     targetState = "RELOADING";
                 } else {
                     targetState = switch (nativeState) {
-                        case "HEALTHY" -> frameworkTargetState;
+                        case "HEALTHY" -> frameworkTargetState.isBlank()
+                                ? "UP_TO_DATE" : frameworkTargetState;
                         case "FAILED" -> "FAILED";
                         case "REPAIRING", "WAITING", "UNKNOWN" -> "RELOADING";
                         default -> "RELOADING";
@@ -347,6 +356,10 @@ public final class XposedServiceBridge {
                     + " nativeHookFresh=" + nativeHookStatus.fresh()
                     + " nativeHookPattern=" + nativeHookStatus.pattern()
                     + " nativeHookDetail=" + nativeHookStatus.detail()
+                    + " installedVersion=" + installedVersionCode
+                    + " systemUiLoadedVersion=" + nativePeer.systemUiLoadedVersionCode()
+                    + " nativeLoadedVersion=" + nativePeer.nativeLoadedVersionCode()
+                    + " runtimeVersionStale=" + runtimeVersionStale
                     + " targets=[" + targetDump + "]";
 
             serviceError = "";
@@ -373,6 +386,37 @@ public final class XposedServiceBridge {
 
     static String currentServiceError() {
         return serviceError;
+    }
+
+    private static long resolveInstalledVersionCode(Context context) {
+        try {
+            return context.getPackageManager()
+                    .getPackageInfo(context.getPackageName(), 0)
+                    .getLongVersionCode();
+        } catch (Throwable ignored) {
+            return BuildConfig.VERSION_CODE;
+        }
+    }
+
+    private static String aggregateTargetState(
+            HookedTarget launcherTarget, HookedTarget systemUiTarget, long installedVersionCode) {
+        boolean stale = false;
+        boolean reloading = false;
+        for (HookedTarget target : new HookedTarget[]{launcherTarget, systemUiTarget}) {
+            if (target == null) continue;
+            if (target.getState() == HookedTarget.State.FAILED) return "FAILED";
+            if (target.getState() == HookedTarget.State.STALE) stale = true;
+            if (target.getState() == HookedTarget.State.RELOADING) reloading = true;
+            long loadedVersionCode = target.getLoadedVersionCode();
+            if (loadedVersionCode > 0L && installedVersionCode > 0L
+                    && loadedVersionCode != installedVersionCode) {
+                stale = true;
+            }
+        }
+        if (stale) return "STALE";
+        if (reloading) return "RELOADING";
+        if (launcherTarget != null || systemUiTarget != null) return "UP_TO_DATE";
+        return "";
     }
 
     private static int resolveLauncherUid(Context context) {

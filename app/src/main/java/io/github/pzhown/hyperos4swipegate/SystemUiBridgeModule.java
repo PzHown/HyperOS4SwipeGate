@@ -41,6 +41,8 @@ public final class SystemUiBridgeModule extends XposedModule {
     static final String EXTRA_HAPTIC_ENABLED = "swipegate_haptic_enabled";
     static final String EXTRA_BREAK_OPEN_ENABLED = "swipegate_break_open_enabled";
     static final String EXTRA_HOOK_STATE = "swipegate_hook_state";
+    static final String EXTRA_SYSTEMUI_MODULE_VERSION = "swipegate_systemui_module_version";
+    static final String EXTRA_NATIVE_MODULE_VERSION = "swipegate_native_module_version";
     static final String EXTRA_PATTERN = "swipegate_pattern";
     static final String EXTRA_DETAIL = "swipegate_detail";
     static final String EXTRA_NATIVE_LOG = "swipegate_native_log";
@@ -97,7 +99,8 @@ public final class SystemUiBridgeModule extends XposedModule {
         context.registerReceiver(nativeReplyReceiver, nativeReply, Context.RECEIVER_EXPORTED);
 
         log(android.util.Log.INFO, "HyperOS4SwipeGateSystemUI",
-                "SystemUI runtime bridge ready uid=" + Process.myUid());
+                "SystemUI runtime bridge ready uid=" + Process.myUid()
+                        + " loadedVersion=" + BuildConfig.VERSION_CODE);
     }
 
     private final BroadcastReceiver appQueryReceiver = new BroadcastReceiver() {
@@ -190,6 +193,9 @@ public final class SystemUiBridgeModule extends XposedModule {
                         .putExtra(EXTRA_NONCE, nonce)
                         .putExtra(EXTRA_HOOK_STATE,
                                 intent.getIntExtra(EXTRA_HOOK_STATE, 0))
+                        .putExtra(EXTRA_SYSTEMUI_MODULE_VERSION, BuildConfig.VERSION_CODE)
+                        .putExtra(EXTRA_NATIVE_MODULE_VERSION,
+                                intent.getIntExtra(EXTRA_NATIVE_MODULE_VERSION, 0))
                         .putExtra(EXTRA_THRESHOLD_DP,
                                 intent.getIntExtra(EXTRA_THRESHOLD_DP,
                                         ConfigBridge.STOCK_THRESHOLD_DP))
@@ -223,6 +229,7 @@ public final class SystemUiBridgeModule extends XposedModule {
                     .setPackage(MODULE_PACKAGE)
                     .putExtra(EXTRA_NONCE, nonce)
                     .putExtra(EXTRA_HOOK_STATE, 0)
+                    .putExtra(EXTRA_SYSTEMUI_MODULE_VERSION, BuildConfig.VERSION_CODE)
                     .putExtra(EXTRA_CHANNEL_STAGE, stage)
                     .putExtra(EXTRA_SENDER_UID, Process.myUid());
             context.sendBroadcast(reply, null, shareIdentityOptions());

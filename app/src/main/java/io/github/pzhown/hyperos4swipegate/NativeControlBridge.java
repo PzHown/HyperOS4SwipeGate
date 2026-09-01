@@ -42,10 +42,12 @@ public final class NativeControlBridge {
             String state,
             String pattern,
             String detail,
+            long systemUiLoadedVersionCode,
+            long nativeLoadedVersionCode,
             long receivedAtElapsedMs
     ) {
         static Snapshot unknown() {
-            return new Snapshot("UNKNOWN", "", "等待 HyOS Runtime Hook 状态", 0L);
+            return new Snapshot("UNKNOWN", "", "等待 HyOS Runtime Hook 状态", 0L, 0L, 0L);
         }
 
         public boolean fresh() {
@@ -151,6 +153,7 @@ public final class NativeControlBridge {
                     ? "Native 状态通道超时；Hook 本身尚未确认失败。lastStage=" + channelStage
                     : "Native 状态通道异常：" + lastError + "；lastStage=" + channelStage;
             return new Snapshot("CHANNEL_ERROR", current.pattern(), detail,
+                    current.systemUiLoadedVersionCode(), current.nativeLoadedVersionCode(),
                     current.receivedAtElapsedMs());
         }
         return current;
@@ -282,6 +285,10 @@ public final class NativeControlBridge {
             String pattern = safeString(intent.getStringExtra(SystemUiBridgeModule.EXTRA_PATTERN));
             String detail = safeString(intent.getStringExtra(SystemUiBridgeModule.EXTRA_DETAIL));
             String log = safeString(intent.getStringExtra(SystemUiBridgeModule.EXTRA_NATIVE_LOG));
+            long systemUiLoadedVersion = intent.getIntExtra(
+                    SystemUiBridgeModule.EXTRA_SYSTEMUI_MODULE_VERSION, 0);
+            long nativeLoadedVersion = intent.getIntExtra(
+                    SystemUiBridgeModule.EXTRA_NATIVE_MODULE_VERSION, 0);
 
             boolean nativeReply = "NATIVE_REPLY_RELAYED".equals(stage)
                     || state != 0
@@ -296,7 +303,8 @@ public final class NativeControlBridge {
             }
 
             latestSnapshot = new Snapshot(
-                    stateName(state), pattern, detail, SystemClock.elapsedRealtime());
+                    stateName(state), pattern, detail,
+                    systemUiLoadedVersion, nativeLoadedVersion, SystemClock.elapsedRealtime());
             if (!log.isBlank()) latestLog = log.trim();
             lastError = "";
             unansweredSinceElapsedMs = 0L;

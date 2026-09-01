@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(hyperos4swipegate LANGUAGES C CXX ASM)
 
+if(NOT DEFINED SWIPEGATE_VERSION_CODE)
+    message(FATAL_ERROR "SWIPEGATE_VERSION_CODE must be supplied by Gradle")
+endif()
+
 add_library(
         hyperos4swipegate
         SHARED
@@ -17,6 +21,9 @@ add_library(
 
 target_include_directories(hyperos4swipegate PRIVATE include)
 target_compile_features(hyperos4swipegate PRIVATE cxx_std_20)
+target_compile_definitions(hyperos4swipegate PRIVATE
+        SWIPEGATE_VERSION_CODE=${SWIPEGATE_VERSION_CODE}
+)
 target_compile_options(hyperos4swipegate PRIVATE
         -Wall
         -Wextra

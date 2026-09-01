@@ -44,6 +44,7 @@ constexpr const char *kLogLevelExtra = "swipegate_log_level";
 constexpr const char *kHapticEnabledExtra = "swipegate_haptic_enabled";
 constexpr const char *kBreakOpenEnabledExtra = "swipegate_break_open_enabled";
 constexpr const char *kHookStateExtra = "swipegate_hook_state";
+constexpr const char *kNativeModuleVersionExtra = "swipegate_native_module_version";
 constexpr const char *kPatternExtra = "swipegate_pattern";
 constexpr const char *kDetailExtra = "swipegate_detail";
 constexpr const char *kNativeLogExtra = "swipegate_native_log";
@@ -606,6 +607,8 @@ bool sendNativeReply(int64_t nonce) {
             || !addBundleBool(extras, kMarkerExtra, true)
             || !addBundleI64(extras, kNonceExtra, nonce)
             || !addBundleI32(extras, kHookStateExtra, static_cast<int32_t>(state))
+            || !addBundleI32(extras, kNativeModuleVersionExtra,
+                    static_cast<int32_t>(SWIPEGATE_VERSION_CODE))
             || !addBundleI32(extras, kThresholdExtra, threshold)
             || !addBundleI32(extras, kLogLevelExtra, logLevel)
             || !addBundleBool(extras, kHapticEnabledExtra, hapticEnabled > 0)
@@ -754,9 +757,10 @@ void handleControlCarrier(void *intent) {
     if (breakOpenChanged) persistValue(kBreakOpenFileName, breakOpenEnabled ? 1 : 0);
 
     std::snprintf(carrierLog, sizeof(carrierLog),
-                  "CONTROL_CARRIER accepted nonce=%lld threshold=%d logLevel=%d haptic=%d breakOpen=%d senderUidRead=%d",
+                  "CONTROL_CARRIER accepted nonce=%lld threshold=%d logLevel=%d haptic=%d breakOpen=%d senderUidRead=%d nativeVersion=%d",
                   static_cast<long long>(nonce), thresholdDp, logLevel, hapticEnabled ? 1 : 0,
-                  breakOpenEnabled ? 1 : 0, senderUidRead ? 1 : 0);
+                  breakOpenEnabled ? 1 : 0, senderUidRead ? 1 : 0,
+                  static_cast<int>(SWIPEGATE_VERSION_CODE));
     bridgeLog(ANDROID_LOG_INFO, carrierLog);
 
     if (!sendNativeReply(nonce)) {
