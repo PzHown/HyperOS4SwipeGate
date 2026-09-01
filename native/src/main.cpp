@@ -690,6 +690,7 @@ __attribute__((noinline)) void hapticFeedbackCaptureHook(void *storage, int32_t 
     void *rawReturnAddress = __builtin_return_address(0);
     const uintptr_t callerReturnAddress = reinterpret_cast<uintptr_t>(
             __builtin_extract_return_addr(rawReturnAddress)) & kPointerAddressMask;
+    const uintptr_t callsite = callerReturnAddress >= 4u ? callerReturnAddress - 4u : 0u;
     const int64_t now = monotonicMs();
     traceStockHapticCall(constant, now, callerReturnAddress);
     if (storage != nullptr) {
