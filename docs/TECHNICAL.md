@@ -1,240 +1,132 @@
 # Technical Notes
 
-本文记录 HyperOS4 SwipeGate 当前版本的逆向目标、Hook 策略、运行链路与安全约束。普通使用请直接查看项目根目录的 [README](../README.md)。
+本文记录 HyperOS4 SwipeGate 当前 0.8.2 系列的逆向目标、Hook 策略、运行链路与安全约束。普通使用请查看项目根目录的 [README](../README.md)。
 
 ## 目标环境
 
-目标兼容范围：
+当前目标兼容范围：
 
 - HyperOS 4 System Launcher 8.0+
-- 已测试版本：`RELEASE-8.01.02.5459-260807-08242024-R`
-- 已测试版本：`RELEASE-8.01.02.5465-260807-08262034-R`
-- 已测试版本：`RELEASE-8.01.02.6174-260818-08281208-R`
-- Launcher 包名：`com.miui.home`
-- SystemUI 包名：`com.android.systemui`
+- Android 17 / API 37
+- arm64-v8a
+- Launcher：`com.miui.home`
+- SystemUI：`com.android.systemui`
 - Launcher 进程入口：`/system_ext/bin/hyos_spawner`
 - native 库：`libapp_launcher.so`
-- 架构：arm64-v8a
-- LSPosed Modern API 102 `java_init` + `native_init`
+- LSPosed Modern API 102：`java_init` + `native_init`
 
-### 必需作用域
+已明确测试：
 
-SwipeGate 当前需要同时启用两个 LSPosed 作用域：
+- `RELEASE-8.01.02.5459-260807-08242024-R`
+- `RELEASE-8.01.02.5465-260807-08262034-R`
+- `RELEASE-8.01.02.6174-260818-08281208-R`
+- `RELEASE-8.01.02.6179-260818-08292132-R`
+
+模块不会根据 `versionName` 做硬编码放行，也不会直接使用固定 RVA 安装 Hook。所有固定地址只作为逆向与诊断参考。
+
+## 必需作用域与 Rootless 控制链路
+
+必须同时启用：
 
 ```text
 com.miui.home
 com.android.systemui
 ```
 
-两者职责不同：
+职责：
 
-- `com.miui.home`：承载 Launcher / HyOS native 目标与手势 Hook。
-- `com.android.systemui`：承载 `SystemUiBridgeModule`，负责 App 与 HyOS Runtime 之间的实时配置和状态中继。
+- `com.miui.home`：Launcher / HyOS native 目标、手势、进度、触觉与 break-open Hook。
+- `com.android.systemui`：`SystemUiBridgeModule`，负责 App 与 HyOS Runtime 的实时配置和状态中继。
 
-因此 **系统桌面与系统界面缺一不可**。`com.android.systemui` 不是为了诊断而附加的可选作用域，而是当前控制链路的一部分。
-
-模块不会根据 Launcher `versionName` 做硬编码拒绝，也不再使用固定 offset 直接定位 Hook。当前会扫描 `libapp_launcher.so` 的可执行段，并只在语义解析或已验证 exact Pattern 能唯一确认目标时继续安装 Hook。
-
-## 原厂 88 dp 边界
-
-逆向 `GestureInputBackHelper::on_swipe_process` 后可以确认，Launcher 会将真实横向距离传入原厂侧边栏状态机。
-
-当前已验证版本中：
-
-```text
-110 dp × 0.8 = 88 dp
-```
-
-因此 `88 dp` 是当前已验证 Launcher 版本的原厂侧边栏转换边界。
-
-SwipeGate 不主动调用不稳定的 Launcher Rust 辅助函数，而是使用已验证的原厂边界常量，并自行完成 dp → px 换算。
-
-## Hook 目标与动态定位
-
-目标函数：
-
-```text
-GestureInputBackHelper::on_swipe_process
-```
-
-最初逆向的 `RELEASE-8.01.02.5459-260807-08242024-R` 中该函数曾位于：
-
-```text
-libapp_launcher.so + 0x816fc4
-```
-
-这个 offset 现在仅作为历史诊断参考，不参与 Hook 定位。
-
-当前主路径为语义解析器，并保留 exact Pattern 作为已验证版本的保守兜底：
-
-```text
-libapp_launcher.so loaded
-        ↓
-解析 ELF / PLT import 与 MotionEvent 调用图
-        ↓
-验证 on_swipe_process 行为结构
-        ↓
-semantic candidate 唯一 → 接受
-        ↓
-必要时与 exact Pattern 交叉验证 / fallback
-        ↓
-冲突、0 candidate、2+ candidate → fail closed
-```
-
-更完整的语义定位规则见 [SEMANTIC_RESOLVER.md](SEMANTIC_RESOLVER.md)。
-
-## Exact Pattern fallback
-
-当前保留两个已验证 Pattern：
-
-- `8.01.02.5459-v1`
-- `8.01.02.6174-v2`
-
-规则：
-
-1. semantic resolver 唯一，exact 无结果：接受 semantic
-2. semantic 与 exact 都唯一且地址一致：接受 semantic
-3. semantic 与 exact 指向不同地址：fail closed
-4. semantic 无法唯一确认，但 exact 唯一：使用 exact fallback
-5. 两边均无法唯一确认：fail closed
-
-后续验证新的 Launcher 8.0+ 版本时，如果目标行为结构仍可被唯一确认，不需要因为 RVA/offset 变化重新适配。
-
-## 安装前安全校验
-
-扫描得到目标后仍不会立即无条件 Hook。
-
-安装前会再次确认：
-
-1. 目标结构仍满足刚才的解析结果
-2. 保存当前函数入口原始指令
-3. Hook 返回成功且 trampoline 有效
-4. Hook 后入口确实已经改变
-5. semantic 与 exact resolver 不发生冲突
-
-如果扫描不到目标、出现多个候选、解析结果在安装前发生变化或检测到未知第三方 patch，都会拒绝安装。
-
-## Rootless 运行时控制链路
-
-当前实时配置与状态主链路不再依赖 `su`、`resetprop` 或 `setprop`，也不要求 Launcher 提供稳定的 libxposed Java runtime。
+实时控制链路：
 
 ```text
 SwipeGate App
-   ↓ NativeControlBridge private query
+   ↓ private query / control
 SystemUiBridgeModule in com.android.systemui
-   ↓ Xiaomi protected com.android.systemui.fsgesture carrier
+   ↓ Xiaomi com.android.systemui.fsgesture carrier
 HyOS / Launcher native runtime
-   ↓ native control receiver / gate
-Gesture Hook
-   ↓ authenticated native reply
+   ↓ control receiver
+Native hooks
+   ↓ authenticated reply
 SystemUiBridgeModule
    ↓ private reply
 SwipeGate App
 ```
 
-这也是为什么 `com.android.systemui` 必须加入作用域。
+不需要 `su`、`setprop` 或 `resetprop`。RemotePreferences 与 Launcher cache 继续保留作为兼容和持久化辅助通道。
 
-App 会把以下运行参数放入实时控制消息：
-
-```text
-threshold_dp
-log_level
-```
-
-native 端收到后会更新当前运行状态，并把需要持久化的值写入 Launcher 自有 cache，以便后续进程重启继续使用。
-
-### RemotePreferences 兼容通道
-
-LSPosed API 102 RemotePreferences 仍然保留，用于兼容普通 Java target / 历史配置镜像：
+控制消息当前可携带：
 
 ```text
-App
-   ↓ XposedService API 102
-RemotePreferences (group: swipegate)
-   ↓ ModuleMain compatibility bridge
-Launcher cache
+threshold
+logLevel
+haptic
+breakOpen
+nonce / version handshake
 ```
 
-但对 HyperOS 4 HyOS native 主路径而言，**SystemUI 中继是实时控制与状态的关键链路**，不能只依赖 RemotePreferences 判断功能完整性。
+native 端会回报当前加载的 `SWIPEGATE_VERSION_CODE`，App 据此区分“已连接但旧 native 尚未重启”和“已加载当前版本”。
 
-旧版本留下的系统属性：
+## 主 Hook：GestureInputBackHelper::on_swipe_process
+
+主目标：
 
 ```text
-persist.hyperos4swipegate.threshold_dp
+GestureInputBackHelper::on_swipe_process
 ```
 
-仅作为升级迁移 fallback，不再是新配置的写入通道。其他系统属性（包括 density）不会被修改。
-
-App 当前提供的可修改范围：
+历史参考 RVA：
 
 ```text
-88..300 dp
+5459: libapp_launcher.so + 0x816fc4
+6174: libapp_launcher.so + 0x657080
 ```
 
-其中：
+这些 RVA 不参与生产定位。
 
-- `88 dp` 为原厂边界
-- `89–300 dp` 才会延后原厂侧边栏触发
-- 旧版本保存的 `0` 继续兼容为原厂 `88 dp` alias，但新界面不再提供 `0–87 dp`
-
-## App 状态检测
-
-模块 App 不通过 `su -c pidof/logcat/getprop` 判断状态。
-
-当前状态检测至少包含：
-
-1. XposedService API 102 已连接
-2. LSPosed 版本满足要求
-3. **系统桌面 `com.miui.home` 已加入作用域**
-4. **系统界面 `com.android.systemui` 已加入作用域**
-5. `/system_ext/bin/hyos_spawner` 存在
-6. `getRunningTargets()` 直接命中 Launcher / 相同 UID / `hyos_spawner`，或满足完整 capability fallback
-7. Native Hook 状态通过运行时通道返回且保持 fresh
-
-对部分不暴露 native-only child 的 HYOS Runtime，兼容激活证据必须同时满足：
+当前定位策略：
 
 ```text
-LSPosed API 102
-+ supported framework
-+ com.miui.home in scope
-+ com.android.systemui in scope
-+ hyos_spawner present
+libapp_launcher.so loaded
+        ↓
+解析 mapped ELF / DT_JMPREL / PLT imports
+        ↓
+以 MotionEvent imported API 调用图寻找候选
+        ↓
+验证 AArch64 frame family 与行为结构
+        ↓
+semantic candidate 唯一 → 接受
+        ↓
+与 gesture-frame-v1 / gesture-frame-v2 exact fingerprint 交叉验证
+        ↓
+冲突、0 candidate、multiple candidates → fail closed
 ```
 
-缺少任意一个必需作用域时，主页应显示未激活，并明确指出缺少的是系统桌面、系统界面，或两者。
+详细规则见 [SEMANTIC_RESOLVER.md](SEMANTIC_RESOLVER.md)。
 
-诊断页会分别显示：
+## Exact Pattern fallback
 
-- 系统桌面作用域
-- 系统界面作用域
-- Launcher 完整版本号
-- HyOS Runtime
-- Native Hook / profile / detail
+当前 exact fingerprint 名称：
 
-这些激活证据仍不能替代 native Pattern 健康检查。Native Hook 是否成功安装、是否遇到解析冲突，以实时 Hook status 与 `HOOK_SCAN` / `HOOK_HEALTH` 为准。
+- `gesture-frame-v1`
+- `gesture-frame-v2`
 
-## Hook 策略
+它们是行为实现的已验证代码特征，不是 Launcher 版本白名单。
 
-`on_swipe_process` 会收到本次手势的真实横向距离。
+处理规则：
 
-当用户设置的门槛高于 `88 dp` 且实际距离尚未达到用户门槛时，SwipeGate 不阻断整个返回手势，而是把传给原函数的距离限制在原厂 `88 dp` 边界之前。
+1. semantic 唯一，exact 无结果：接受 semantic
+2. semantic 与 exact 唯一且地址一致：接受
+3. semantic 与 exact 指向不同地址：拒绝安装
+4. semantic 无法唯一确认，exact 唯一：允许 exact-authoritative fallback
+5. 两边均不能唯一确认：拒绝安装
 
-```text
-if customThreshold > 88dp and horizontalDistance < customThreshold:
-    effectiveDistance = just below 88dp
-else:
-    effectiveDistance = horizontalDistance
+6179 实机曾出现 `semantic-conflict-exact-authoritative`，当前 resolver 会在已验证 exact fingerprint 唯一且完整时采用保守 authoritative 路径，而不是猜测新的 RVA。
 
-call original on_swipe_process(effectiveDistance)
-```
+## ABI-transparent wrapper
 
-这样可以保留原厂返回动画和状态机，只延后进入侧边栏停顿分支的时机。
-
-## ABI-transparent Hook wrapper
-
-当前 AArch64 wrapper 透明保存调用现场，只修改 `s0` 中的 horizontal distance，再转发到 LSPosed trampoline。
-
-主要保存：
+AArch64 wrapper 保存：
 
 - `x0..x8`
 - `q0..q7`
@@ -242,113 +134,307 @@ call original on_swipe_process(effectiveDistance)
 
 读取：
 
-- `w1`：readyFinish
-- `w2`：side
-- `s0`：horizontalDistance
+- `w1`：`readyFinish`
+- `w2`：`side`
+- `s0`：horizontal distance
 
-这降低了不同 Launcher codegen 在 Point 参数布局上的差异影响，但仍要求关键手势参数保持当前 AAPCS64 约定。
+wrapper 调用 `swipegate_hook_enter_and_gate()` 后恢复寄存器，再调用 LSPosed trampoline。这样不再依赖旧版本中 Point 参数是指针还是拆分浮点的 C++ prototype 差异。
 
-## Density 解析
+自动兼容仍要求关键参数保持当前 AAPCS64 约定。
 
-只有自定义门槛高于 `88 dp` 时才需要进行 dp → px 换算。
+## Launcher 8.x 原厂进度坐标
 
-当前按以下顺序解析 density：
+后续对 Launcher APK 的直接逆向确认，原厂 `88 dp` 不只是一个侧边栏布尔阈值。
 
-1. `persist.sys.miui_resolution`
-2. `persist.sys.dpi`
-3. `ro.sf.lcd_density`
-4. `qemu.sf.lcd_density`
+共享函数：
 
-如果无法获得有效 density，模块不会尝试自定义距离换算，而是回退到原厂行为。
+```text
+BackGestureUtils::convert_offset
+```
+
+已知 RVA：
+
+```text
+5459: 0x773814
+6174: 0x60bb80
+```
+
+6174 直接调用点包括：
+
+```text
+GestureStubViewWindow::handle_back_gesture
+GestureInputBackHelper::on_swipe_process
+GestureStubViewWindow::on_swipe_stop_direct
+GestureBackArrowView::on_vsync
+```
+
+核心尺度：
+
+```text
+stock total coordinate ≈ 110 dp
+READY progress = 0.8
+110 dp × 0.8 = 88 dp
+```
+
+`on_swipe_process` 会把 `convert_offset(distance) / 20` 与 `0.8` 比较；`GestureBackArrowView::on_vsync` 和 Release 路径也复用同一换算。因此只在主 Hook 中把距离冻结到 88dp 附近会造成动画进度与自定义阈值脱节。
+
+## 自定义阈值：共享进度缩放
+
+0.8.2-beta2 起，首选策略不再是“88dp 后冻结距离直到用户阈值”。
+
+当自定义门槛 `D > 88dp` 时，SwipeGate Hook `BackGestureUtils::convert_offset`，把输入映射为：
+
+```text
+mappedDistance = rawDistance × 88 / D
+```
+
+然后调用小米原函数。
+
+这等价于把原厂 `110dp` 总坐标动态扩展为：
+
+```text
+D / 0.8 = D × 1.25
+```
+
+因此：
+
+```text
+rawDistance = D
+→ mappedDistance = 88dp
+→ Xiaomi progress = 0.8
+→ READY 与用户门槛重合
+```
+
+优势：
+
+- 原始手势距离继续传给 `on_swipe_process`，不破坏其他 raw distance / velocity 计算
+- Ready 前动画连续，不再长期卡在约 0.8
+- 到门槛时不会从 0.8 突跳到高进度
+- Ready 之后仍使用 Xiaomi 自己的 nonlinear easing
+- `on_vsync`、Release 和状态判断重新共享同一个进度坐标
+
+### convert_offset resolver
+
+不会硬编码上述 RVA。当前从已经解析成功的 `on_swipe_process` 内部反推 `convert_offset`：
+
+- 扫描约 `0x900` 字节 caller 区域
+- 候选必须由直接 `BL` 调用
+- 调用后紧跟 `fmov s1, #20.0`
+- 候选函数体必须出现已验证的 `s0 → s8` 输入保存、负值 guard 与 `110.0f` 常量结构
+- 至少 3 个 caller corroboration
+- 只能有 1 个 qualified candidate
+
+5459 与 6174 的 APK 静态分析均满足该结构。
+
+如果该 resolver 失败，模块不会猜测函数地址，而是保守回退到旧的 88dp clamp 逻辑。
+
+## Legacy clamp fallback
+
+只有进度 Hook 未成功安装时，主 gate 才保留旧 fallback：
+
+```text
+if customThreshold > 88dp
+and rawDistance < customThreshold
+and rawDistance > stockBoundary:
+    effectiveDistance = just below 88dp
+else:
+    effectiveDistance = rawDistance
+```
+
+此路径主要用于 fail-safe，不再是 0.8.2-beta2 的首选动画方案。
+
+## Haptic V2：Ready 触觉与 Release 去重
+
+Launcher 8.0 的原生 Back Release 使用 HyperRT：
+
+```text
+get_global_runtime
+→ HapticFeedback_perform_ext_haptic_feedback(..., constant=0)
+→ Runtime_dec_strong
+```
+
+SwipeGate 在进入第一段 Ready 时，通过解析出的原生 HyperRT bridge 主动执行一次同类 `constant=0` 反馈。
+
+### 真实 Release callsite
+
+6179 运行时 trace 与 6174 静态逆向共同确认：
+
+```text
+GestureStubViewWindow::handle_back_gesture
+HapticFeedback_perform_ext_haptic_feedback callsite RVA 0x654298
+```
+
+生产实现不简单硬编码该 RVA，而是验证其周边结构：
+
+```text
+bl get_global_runtime
+mov x22, x0
+...
+sub x0, x29, #0xe8
+mov w1, wzr
+bl HapticFeedback_perform_ext_haptic_feedback
+mov x0, x22
+bl Runtime_dec_strong
+```
+
+只有唯一候选才发布 `stock-back-release-haptic-v1`。
+
+### 750ms 去重规则
+
+```text
+Ready → Release < 750ms
+    suppress stock Release HyperRT call
+
+Ready → Release >= 750ms
+    preserve stock Release
+
+Ready → Threshold → Release
+    eligibility 已清除，不套用 Ready→Release 去重
+
+Ready → Threshold → Ready → Release
+    第二次 Ready 更新时间戳并重新建立 eligibility
+```
+
+去重只匹配真实 Release callsite。`0x885000`、Threshold 触觉与其他 native `constant=0` 调用保持原厂行为。
+
+被 suppress 时只跳过 `perform_ext_haptic_feedback` 本身；Launcher 会从下一条指令继续执行 `Runtime_dec_strong` 和原有 bookkeeping。
+
+## Break-open Beta
+
+当前只 Hook：
+
+```text
+WindowTransitionUtil::is_merge_back_break_open_anim_support
+```
+
+逻辑：
+
+```text
+beta enabled  → return true
+beta disabled → return stock result
+```
+
+不修改：
+
+- backing flag
+- `BackControllApi::can_use_break_open_anim_impl`
+- handler 全局状态
+
+旧的 backing-flag 实验曾导致 Launcher startup `SIGBUS BUS_ADRALN`，已废弃，不能重新引入。
+
+## 16 KB Page Guard
+
+HyperRT 可能对包含 inline hook 的页执行：
+
+```text
+madvise(..., MADV_DONTNEED)
+```
+
+这会恢复被 inline Hook 修改的代码页。当前实现借鉴 MiuiBackGestureHook 的思路，在 `libhyper_os_flutter.so` 的 live GOT 上窄范围拦截 `madvise`：
+
+- 非 `MADV_DONTNEED` 原样放行
+- 不覆盖本模块 Hook 页的范围原样放行
+- 只跳过与已登记 Hook 页重叠的页面
+- 其余区间仍调用原始 `madvise`
+
+页面保护与 watchdog repair 双保险并存。
 
 ## Hook 健康检查
 
-模块会持续检查已经安装的目标函数入口状态：
+watchdog 持续检查主 Hook 入口：
 
-- 当前 Hook patch 仍存在：保持运行
-- 原始指令被恢复：尝试执行一次 unhook + rehook 修复
-- 入口变成非原厂、也不是本模块 patch：视为其他补丁或未知修改，不强行覆盖
-- Launcher native 映射发生变化：清除旧目标并重新进行解析
+- patch 仍存在：`HEALTHY`
+- 原始指令被恢复：等待 active calls 退出后尝试 unhook + rehook
+- 入口既不是原始字节也不是本模块 patch：判定 foreign patch，拒绝覆盖
+- Launcher mapping 变化：清理旧跟踪并重新解析
 
-修复前会等待当前 Hook 调用退出，避免在函数仍执行时直接替换入口。
+附加功能 resolver 也会在未就绪时重试：
 
-这套逻辑的目标是：**可以恢复自己的 Hook，但不抢占未知的第三方 patch。**
+- Release callsite
+- HyperRT runtime bridge / capture hook
+- Back progress `convert_offset`
+- Break-open
 
-## 扫描频率
+## Density 与阈值
 
-正常 Hook 已安装时不会反复扫描整个 native text。
+UI 可调范围：
 
-- library load callback：立即解析一次
-- 尚未找到目标时：watchdog 周期性重新解析
-- Hook 正常后：主要检查已解析的目标入口与映射变化
+```text
+88..300 dp
+```
 
-## 日志
+native 最大接受值：
 
-native 日志 Tag：
+```text
+320 dp
+```
+
+`0` 作为历史配置 alias 解释为 stock `88 dp`。
+
+进度缩放的 `88 / customThreshold` 比例本身与 density 无关；density 主要用于主 gate 的自定义阈值像素判断与 legacy fallback。
+
+## 诊断日志
+
+native Tag：
 
 ```text
 HyperOS4SwipeGateNative
 ```
 
-常见日志关键字：
+主要关键字：
 
 ```text
-DP_GATE
+CONTROL_CARRIER
 HOOK_SCAN
 HOOK_HEALTH
-resolver=
-hook installed
-repaired successfully
-install refused
-foreign
+DP_GATE
+PROGRESS_V1
+HAPTIC_V2
+BREAK_OPEN_HEALTH
+PAGE_GUARD
 ```
 
-App 的「诊断」页提供无 Root 的 LSPosed service、两个必需作用域、Launcher 完整版本、HYOS Runtime、Native Hook 与运行日志信息。
+典型健康状态应包括：
 
-## 构建
+```text
+HOOK_HEALTH healthy ...
+PROGRESS_V1 convert_offset hook ready ...
+HAPTIC_V2 release callsite ready ...
+BREAK_OPEN_HEALTH healthy ...       # 开启 Beta 时
+```
 
-本地 Debug 构建：
+诊断页同时展示版本、Launcher 完整版本、LSPosed 连接、两个 scope、HyOS Runtime、主 Hook profile 与 native 日志。
+
+## 构建与 CI
+
+本地 Debug：
 
 ```bash
 gradle :app:assembleDebug
 ```
 
-GitHub Actions 会检查：
+GitHub Actions 检查：
 
-- LSPosed API 102 模块元数据
-- `java_init` / `native_init` 打包入口
-- `com.miui.home` scope
-- `com.android.systemui` scope
-- scope 总数严格为 2
+- LSPosed API 102 metadata
+- `java_init` / `native_init`
+- scope 恰好为 `com.miui.home` 与 `com.android.systemui`
 - arm64-v8a native 库
-- `native_init` 导出符号
-- 16 KB ELF LOAD 对齐
+- `native_init` 导出
+- 16 KB ELF LOAD alignment
 - APK 16 KB zip alignment
-- APK 签名证书
+- 签名证书连续性
 
-## 适配与验证其他 Launcher 8.0+ 版本
+## 新 Launcher 版本验证原则
 
-Launcher 8.0+ 是目标兼容范围，目前已明确测试：
+新 Launcher 8.0+ 不应因为 RVA 变化就新增硬编码 offset。至少验证：
 
-- `RELEASE-8.01.02.5459-260807-08242024-R`
-- `RELEASE-8.01.02.5465-260807-08262034-R`
-- `RELEASE-8.01.02.6174-260818-08281208-R`
+1. `on_swipe_process` semantic / exact resolver 能唯一确认目标
+2. AArch64 参数布局未破坏当前 wrapper 假设
+3. `convert_offset` resolver 唯一；否则确认 fallback 行为可接受
+4. 自定义门槛前后的动画连续、Ready 可逆、Release 正常
+5. Haptic Release callsite 结构仍能唯一解析；否则保持 stock haptic
+6. Break-open target 唯一；否则不开启 Beta
+7. page guard / watchdog 不覆盖第三方未知 patch
+8. 任何 0 candidate、multiple candidates 或冲突都 fail closed
 
-测试其他版本时先观察诊断页的 Launcher **完整版本号**与 Native Hook profile，再观察 native 日志：
-
-```text
-HOOK_SCAN resolved ...
-```
-
-如果成功解析到唯一目标，重点验证手势行为即可；不需要因为 offset 不同就重新适配。
-
-只有出现 resolver 无法唯一确认、exact fallback 也不匹配，或目标函数行为结构明显变化时，才需要重新分析。新增适配前至少需要确认：
-
-1. `on_swipe_process` 的真实语义和参数布局没有变化
-2. 原厂侧边栏边界仍然等价于当前逻辑
-3. 语义候选或 exact Pattern 在目标 executable segments 中唯一
-4. arm64 调用约定与 trampoline 正常
-5. 返回手势在门槛前后的动画和可逆状态没有回归
-6. Hook 被恢复、冲突、0 candidate、multiple candidates 时均能 fail closed
-
-当前策略优先保证未验证版本在不兼容时维持原厂行为，而不是为了扩大版本号范围降低校验强度。
+当前优先级始终是：**不确定时保持小米原厂行为，而不是为了扩大兼容范围降低验证强度。**
