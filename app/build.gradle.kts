@@ -13,7 +13,7 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // 0.8.2-beta2: scale Launcher Back progress coordinate so animation READY matches custom threshold.
+        // 0.8.2-beta2: semantic convert_offset scaling keeps Back animation READY aligned with custom threshold.
         versionCode = 63
         versionName = "0.8.2-beta2"
 
