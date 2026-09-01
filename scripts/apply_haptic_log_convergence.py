@@ -53,7 +53,7 @@ main.write_text(text)
 
 replace_once(
     "app/build.gradle.kts",
-    "        // dev.18: dedup the runtime-proven Launcher 8.x stock Back release HyperRT callsite.\n"
+    "        // dev.18: dedup the runtime-proven Launcher 8.x stock Back release HyperRT callsite (6174/6179).\n"
     "        versionCode = 60\n"
     "        versionName = \"0.8.1-dev.18\"\n",
     "        // dev.19: converge runtime-proven release dedup; remove temporary hot-path tracing.\n"
