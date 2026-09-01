@@ -1,7 +1,29 @@
-1. 新增 HyperOS 4 Launcher 8.0+「丰富侧滑震动反馈」实验功能：进入 Ready 时补充一次原生 HyperRT 震动。
-2. 6174 静态逆向 + 6179 实机 trace 已确认真实 Back Release HyperRT 调用点；仅在 Ready→Release 小于 750ms 时精确去重松手震动，Threshold/Three 与其他原生震动保持小米行为。
-3. 重构 `BackGestureUtils::convert_offset` 共享进度映射：Ready 前把原厂 `0→88dp` 连续映射到 `0→自定义阈值`，让动画 Ready、状态判断与用户门槛一致，修复高阈值时动画被压缩、Ready 动画短一截和触发瞬间跳进度的问题。
-4. 修正高阈值下 Ready→完整进度距离随阈值一起变长的问题：Ready 后固定保留原厂 `22dp` 的 `88→110dp` 区间，并使用 C1 连续的 cubic Hermite 过渡恢复到 1:1 距离尺度，避免新的速度断层。
-5. 增强 Launcher 8.x semantic/exact resolver、16 KB `MADV_DONTNEED` 页面保护与 Hook watchdog repair；解析不确定时 fail closed。
-6. Break-open Beta 使用 `WindowTransitionUtil::is_merge_back_break_open_anim_support` 函数级安全 Hook，不修改 backing flag；已验证 Launcher 8.01.02.6174 / 6179。
-7. 完善 App → SystemUI → HyOS Runtime / Launcher native 的 Rootless 控制与诊断链路，并更新 README / TECHNICAL / SEMANTIC_RESOLVER 中的兼容性与排查说明。
+## 0.9.0 更新日志
+
+1. 新增「丰富侧滑震动反馈」实验功能  
+   侧滑进入 Ready 状态时会补充一次更自然的系统原生震动反馈，让手势阶段感更清晰。
+
+2. 优化返回手势震动逻辑  
+   减少短时间内重复震动的问题，同时尽量保留系统原有的侧滑、停顿和松手反馈。
+
+3. 重做侧滑动画进度同步  
+   自定义触发距离后，返回动画会跟随新的阈值平滑延展，不再出现动画提前到位、停住或到达阈值时突然跳动的问题。
+
+4. 优化高阈值下的完整动画距离  
+   修复阈值设置越大，Ready 之后还需要继续滑很长距离才能完成动画的问题。现在 Ready 后的动画距离更接近系统原厂手感。
+
+5. 提升 Launcher 8.x 兼容性与稳定性  
+   加强 Hook 识别、异常保护和自动恢复机制，系统桌面更新后如果无法安全识别目标，会优先保持原厂行为，降低异常风险。
+
+6. 新增「启动动画期间立即返回 · Beta」  
+   从桌面打开 App 后，无需等待启动动画结束即可侧滑返回，保持更连贯的返回操作体验。
+
+7. 完善免 Root 控制与诊断  
+   优化 App、SystemUI 与 Launcher 之间的配置同步和状态检测，诊断信息更加完整，排查问题更方便。
+
+### 本次重点
+
+- 自定义侧滑阈值的动画体验大幅改善
+- 高阈值下手势距离更合理
+- 震动反馈更自然
+- Launcher 8.x 兼容性与稳定性进一步提升
