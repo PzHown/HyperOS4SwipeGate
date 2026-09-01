@@ -13,9 +13,9 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // dev.15: end-to-end loaded-version handshake for reliable restart-required detection.
-        versionCode = 57
-        versionName = "0.8.1-dev.15"
+        // dev.16: Launcher 8.x release-boundary haptic dedup at GestureBackArrowView.
+        versionCode = 58
+        versionName = "0.8.1-dev.16"
 
         ndk {
             abiFilters += "arm64-v8a"
