@@ -13,7 +13,7 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // dev.16: Launcher 8.x release-boundary haptic dedup at GestureBackArrowView.
+        // dev.16: verified Launcher 8.x release-boundary haptic dedup at GestureBackArrowView.
         versionCode = 58
         versionName = "0.8.1-dev.16"
 
