@@ -110,31 +110,7 @@ constexpr PatternSpec kSemanticOnSwipeProcessPattern = {
         "semantic-motion-graph", nullptr, nullptr, 0,
 };
 
-// Launcher 8.0.x GestureBackArrowView::check_and_perform_haptic_feedback entry.
-// 6174 disassembly starts with:
-//   ldr w8,[x0,#0x18] / ldrb w9,[x0,#0x20] / cbnz feedback_done /
-//   cmp w8,#4 / b.hi / and w8,w8,#0xff / cmp w8,#3 / b.ne.
-// Branch immediates are masked; register/opcode/state constants remain exact. A candidate
-// is accepted only when the same function also contains the imported HyperRT haptic call
-// followed by feedback_done=true, so this is a semantic 8.x feature fingerprint rather
-// than a hard-coded RVA.
-constexpr uint8_t kReleaseFeedbackPatternV1[] = {
-        0x08,0x18,0x40,0xb9, 0x09,0x80,0x40,0x39, 0x09,0x00,0x00,0x35,
-        0x1f,0x11,0x00,0x71, 0x08,0x00,0x00,0x54, 0x08,0x1d,0x00,0x12,
-        0x1f,0x0d,0x00,0x71, 0x01,0x00,0x00,0x54,
-};
-constexpr uint8_t kReleaseFeedbackMaskV1[] = {
-        0xff,0xff,0xff,0xff, 0xff,0xff,0xff,0xff, 0x1f,0x00,0x00,0xff,
-        0xff,0xff,0xff,0xff, 0x1f,0x00,0x00,0xff, 0xff,0xff,0xff,0xff,
-        0xff,0xff,0xff,0xff, 0x1f,0x00,0x00,0xff,
-};
-constexpr PatternSpec kReleaseFeedbackPattern = {
-        "release-ready-state-back-v1", kReleaseFeedbackPatternV1,
-        kReleaseFeedbackMaskV1, sizeof(kReleaseFeedbackPatternV1),
-};
-
 static_assert(sizeof(kOnSwipeProcessPatternV1) == sizeof(kOnSwipeProcessMaskV1));
-static_assert(sizeof(kReleaseFeedbackPatternV1) == sizeof(kReleaseFeedbackMaskV1));
 static_assert(sizeof(kOnSwipeProcessPatternV1) >= kHookProbeSize);
 
 HookFunType gHookFunction = nullptr;
@@ -176,15 +152,13 @@ std::atomic<bool> gHapticRuntimeBridgeResolved{false};
 std::atomic<uint64_t> gHapticTraceSequence{0};
 std::atomic<int64_t> gLastReadyHapticAtMs{0};
 std::atomic<bool> gReadyReleaseDedupEligible{false};
-// Launcher 8.0.x emits the stock hand-up vibration synchronously from
-// GestureBackArrowView::check_and_perform_haptic_feedback during on_swipe_stop. The
-// boundary hook keeps Xiaomi's state bookkeeping intact and only scopes the nested
-// constant=0 HyperRT call for one-shot suppression.
-std::atomic<void *> gOriginalReleaseFeedbackHelper{nullptr};
-std::atomic<uintptr_t> gReleaseFeedbackTarget{0};
-std::atomic<bool> gReleaseFeedbackHookInstalled{false};
-thread_local bool gReleaseFeedbackScopeArmed = false;
-thread_local int64_t gReleaseFeedbackScopeReadyAtMs = 0;
+// Runtime tracing on Launcher 8.01.02.6179 proved the stock hand-up vibration reaches
+// HyperRT from GestureStubViewWindow::handle_back_gesture callsite RVA 0x654298. The same
+// callsite exists in 6174. Resolve the instruction semantically from its surrounding
+// get_global_runtime -> constant 0 -> ext haptic -> Runtime_dec_strong sequence; never
+// suppress unrelated constant=0 haptics.
+std::atomic<uintptr_t> gStockBackReleaseHapticCallsite{0};
+std::atomic<bool> gStockBackReleaseHapticCallsiteResolved{false};
 // Haptic segment state is independent from the Launcher hook health state.
 // 0 = outside/idle, 1 = first segment (Back, below custom threshold),
 // 2 = second segment (custom threshold reached). Only entering segment 1 is replayed.
@@ -688,25 +662,24 @@ void traceStockHapticCall(int32_t constant, int64_t now, uintptr_t callerReturnA
     const int64_t deltaReadyMs = readyAt > 0 && now >= readyAt ? now - readyAt : -1;
     const int segment = gHapticGestureSegment.load(std::memory_order_acquire);
     const bool eligible = gReadyReleaseDedupEligible.load(std::memory_order_acquire);
-    const bool releaseHook = gReleaseFeedbackHookInstalled.load(std::memory_order_acquire);
-    const uintptr_t releaseTarget = gReleaseFeedbackTarget.load(std::memory_order_acquire);
+    const uintptr_t releaseCallsite = gStockBackReleaseHapticCallsite.load(std::memory_order_acquire);
     const uintptr_t launcherBase = gHookedBase.load(std::memory_order_acquire);
-    const uintptr_t releaseTargetRva = launcherBase != 0 && releaseTarget >= launcherBase
-            ? releaseTarget - launcherBase : 0u;
+    const uintptr_t releaseCallsiteRva = launcherBase != 0 && releaseCallsite >= launcherBase
+            ? releaseCallsite - launcherBase : 0u;
+    const bool releaseMatch = releaseCallsite != 0 && callsite == releaseCallsite;
     const uint64_t sequence = gHapticTraceSequence.fetch_add(1, std::memory_order_relaxed) + 1;
     const long tid = static_cast<long>(syscall(SYS_gettid));
 
     logLine(ANDROID_LOG_INFO,
-            "HAPTIC_TRACE stock-call seq=%llu tid=%ld constant=%d caller=%p callsite=%p module=%s moduleBase=%p lrRva=0x%zx callsiteRva=0x%zx launcherCaller=%d launcherBase=%p deltaReadyMs=%lld segment=%d eligible=%d releaseHook=%d releaseTarget=%p releaseTargetRva=0x%zx scopeArmed=%d",
+            "HAPTIC_TRACE stock-call seq=%llu tid=%ld constant=%d caller=%p callsite=%p module=%s moduleBase=%p lrRva=0x%zx callsiteRva=0x%zx launcherCaller=%d launcherBase=%p deltaReadyMs=%lld segment=%d eligible=%d releaseCallsite=%p releaseCallsiteRva=0x%zx releaseMatch=%d",
             static_cast<unsigned long long>(sequence), tid, constant,
             reinterpret_cast<void *>(callerReturnAddress), reinterpret_cast<void *>(callsite),
             callerResolved ? traceModuleBasename(callerInfo.dli_fname) : "<unresolved>",
             reinterpret_cast<void *>(moduleBase), static_cast<size_t>(lrRva),
             static_cast<size_t>(callsiteRva), launcherCaller ? 1 : 0,
             reinterpret_cast<void *>(launcherBase), static_cast<long long>(deltaReadyMs),
-            segment, eligible ? 1 : 0, releaseHook ? 1 : 0,
-            reinterpret_cast<void *>(releaseTarget), static_cast<size_t>(releaseTargetRva),
-            gReleaseFeedbackScopeArmed ? 1 : 0);
+            segment, eligible ? 1 : 0, reinterpret_cast<void *>(releaseCallsite),
+            static_cast<size_t>(releaseCallsiteRva), releaseMatch ? 1 : 0);
 }
 
 __attribute__((noinline)) void hapticFeedbackCaptureHook(void *storage, int32_t constant) {
@@ -736,21 +709,35 @@ __attribute__((noinline)) void hapticFeedbackCaptureHook(void *storage, int32_t 
             gOriginalHapticFeedback.load(std::memory_order_acquire));
     if (original == nullptr) return;
 
-    // The stock 8.0.x hand-up effect is synchronous inside the resolved
-    // GestureBackArrowView release helper. Suppress only the nested constant=0 call while
-    // that exact helper is active. The helper itself still runs and sets feedback_done,
-    // preserving Xiaomi's release state machine.
-    if (constant == kHapticConstant && gReleaseFeedbackScopeArmed) {
-        gReleaseFeedbackScopeArmed = false;
-        const int64_t readyAt = gReleaseFeedbackScopeReadyAtMs;
-        gReleaseFeedbackScopeReadyAtMs = 0;
+    // 6179 runtime evidence identifies the real hand-up haptic as the validated direct
+    // HyperRT callsite in GestureStubViewWindow::handle_back_gesture. Scope dedup to this
+    // single instruction; every other native haptic remains untouched. Returning here skips
+    // only HyperRT perform_ext_haptic_feedback. Launcher resumes at the next instruction and
+    // still performs Runtime_dec_strong and the rest of its stock release bookkeeping.
+    const uintptr_t releaseCallsite = gStockBackReleaseHapticCallsite.load(std::memory_order_acquire);
+    if (constant == kHapticConstant && releaseCallsite != 0 && callsite == releaseCallsite) {
+        const bool eligible = gReadyReleaseDedupEligible.exchange(false, std::memory_order_acq_rel);
+        const int64_t readyAt = gLastReadyHapticAtMs.load(std::memory_order_acquire);
+        const int64_t delta = readyAt > 0 && now >= readyAt ? now - readyAt : -1;
+        const bool suppress = eligible && delta >= 0 && delta < kReadyReleaseDedupMs;
+
+        // A committed Back ends the first-segment lifecycle. This was previously reset from
+        // the wrong GestureBackArrowView helper, which 6179 never entered.
+        gHapticGestureSegment.store(0, std::memory_order_release);
+
+        if (suppress) {
+            logLine(ANDROID_LOG_INFO,
+                    "HAPTIC_V2 release suppressed reason=ready-release-callsite constant=%d deltaMs=%lld windowMs=%lld source=GestureStubViewWindow::handle_back_gesture callsite=%p",
+                    constant, static_cast<long long>(delta),
+                    static_cast<long long>(kReadyReleaseDedupMs),
+                    reinterpret_cast<void *>(callsite));
+            return;
+        }
         logLine(ANDROID_LOG_INFO,
-                "HAPTIC_V2 release suppressed reason=ready-release-boundary constant=%d deltaMs=%lld windowMs=%lld source=GestureBackArrowView::check_and_perform_haptic_feedback",
-                constant,
-                readyAt > 0 && now >= readyAt
-                        ? static_cast<long long>(now - readyAt) : -1LL,
-                static_cast<long long>(kReadyReleaseDedupMs));
-        return;
+                "HAPTIC_V2 release preserved reason=callsite-window constant=%d eligible=%d deltaMs=%lld windowMs=%lld callsite=%p",
+                constant, eligible ? 1 : 0, static_cast<long long>(delta),
+                static_cast<long long>(kReadyReleaseDedupMs),
+                reinterpret_cast<void *>(callsite));
     }
 
     original(storage, constant);
@@ -969,42 +956,15 @@ bool performNativeHaptic(const char *stage) {
     return true;
 }
 
-using ReleaseFeedbackHelperFn = void (*)(void *);
-
-bool releaseFeedbackCandidateHasHapticCall(
-        const LibraryInfo &library, uintptr_t candidate, uintptr_t hapticSlot) {
-    if (candidate == 0 || hapticSlot == 0 || !libraryContainsRange(library, candidate, 0xc0)) {
-        return false;
-    }
-    for (uintptr_t pc = candidate + 0x20; pc <= candidate + 0xb0; pc += 4) {
-        uint32_t callInsn = 0;
-        std::memcpy(&callInsn, reinterpret_cast<const void *>(pc), sizeof(callInsn));
-        uintptr_t callTarget = 0;
-        if (!decodeBlTarget(pc, callInsn, &callTarget)
-                || !pltReferencesSlot(library, callTarget, hapticSlot)) {
-            continue;
-        }
-        if (!libraryContainsRange(library, pc + 16, 4)) return false;
-        uint32_t movFeedbackDone = 0;
-        uint32_t storeFeedbackDone = 0;
-        std::memcpy(&movFeedbackDone,
-                    reinterpret_cast<const void *>(pc + 12), sizeof(movFeedbackDone));
-        std::memcpy(&storeFeedbackDone,
-                    reinterpret_cast<const void *>(pc + 16), sizeof(storeFeedbackDone));
-        // 6174: mov w8,#1 ; strb w8,[x19,#0x20]. This corroborates that the call is
-        // check_and_perform_haptic_feedback rather than an unrelated constant=0 site.
-        if (movFeedbackDone == 0x52800028u && storeFeedbackDone == 0x39008268u) {
-            return true;
-        }
-    }
-    return false;
-}
-
-uintptr_t resolveReleaseFeedbackTarget(const LibraryInfo &library, const char **featureName) {
+uintptr_t resolveStockBackReleaseHapticCallsite(const LibraryInfo &library, const char **featureName) {
     if (featureName != nullptr) *featureName = nullptr;
+    if (library.base == 0) return 0;
+
     const ImportedFunctionResolution haptic = resolveImportedFunction(library, kHapticSymbol);
-    if (haptic.matches != 1 || haptic.slot == 0) {
-        if (featureName != nullptr) *featureName = "haptic-import-unresolved";
+    const ImportedFunctionResolution decStrong = resolveImportedFunction(library, "Runtime_dec_strong");
+    if (haptic.matches != 1 || haptic.slot == 0
+            || decStrong.matches != 1 || decStrong.slot == 0) {
+        if (featureName != nullptr) *featureName = "imports-unresolved";
         return 0;
     }
 
@@ -1012,93 +972,94 @@ uintptr_t resolveReleaseFeedbackTarget(const LibraryInfo &library, const char **
     size_t matches = 0;
     for (size_t rangeIndex = 0; rangeIndex < library.executableRangeCount; ++rangeIndex) {
         const ExecutableRange &range = library.executableRanges[rangeIndex];
-        if (range.start == 0 || range.size < kReleaseFeedbackPattern.size) continue;
-        const uintptr_t first = (range.start + 3u) & ~static_cast<uintptr_t>(3u);
-        const uintptr_t last = range.start + range.size - kReleaseFeedbackPattern.size;
-        for (uintptr_t cursor = first; cursor <= last; cursor += 4u) {
-            if (!patternMatchesAt(cursor, kReleaseFeedbackPattern)) continue;
-            if (!releaseFeedbackCandidateHasHapticCall(library, cursor, haptic.slot)) continue;
-            found = cursor;
+        if (range.start == 0 || range.size < 40) continue;
+        const uintptr_t first = (range.start + 20u + 3u) & ~static_cast<uintptr_t>(3u);
+        const uintptr_t last = range.start + range.size - 12u;
+        for (uintptr_t pc = first; pc <= last; pc += 4u) {
+            uint32_t hapticCallInsn = 0;
+            std::memcpy(&hapticCallInsn, reinterpret_cast<const void *>(pc), sizeof(hapticCallInsn));
+            uintptr_t hapticPlt = 0;
+            if (!decodeBlTarget(pc, hapticCallInsn, &hapticPlt)
+                    || !pltReferencesSlot(library, hapticPlt, haptic.slot)) {
+                continue;
+            }
+
+            uint32_t getRuntimeCallInsn = 0;
+            uint32_t saveRuntime = 0;
+            uint32_t storageArg = 0;
+            uint32_t movW1Zero = 0;
+            uint32_t restoreRuntime = 0;
+            uint32_t decStrongCallInsn = 0;
+            std::memcpy(&getRuntimeCallInsn,
+                        reinterpret_cast<const void *>(pc - 20u), sizeof(getRuntimeCallInsn));
+            std::memcpy(&saveRuntime,
+                        reinterpret_cast<const void *>(pc - 16u), sizeof(saveRuntime));
+            std::memcpy(&storageArg,
+                        reinterpret_cast<const void *>(pc - 8u), sizeof(storageArg));
+            std::memcpy(&movW1Zero,
+                        reinterpret_cast<const void *>(pc - 4u), sizeof(movW1Zero));
+            std::memcpy(&restoreRuntime,
+                        reinterpret_cast<const void *>(pc + 4u), sizeof(restoreRuntime));
+            std::memcpy(&decStrongCallInsn,
+                        reinterpret_cast<const void *>(pc + 8u), sizeof(decStrongCallInsn));
+
+            // 6174 and runtime-confirmed 6179 sequence around RVA 0x654298:
+            //   bl get_global_runtime
+            //   mov x22,x0
+            //   ...
+            //   sub x0,x29,#0xe8
+            //   mov w1,wzr
+            //   bl HapticFeedback_perform_ext_haptic_feedback
+            //   mov x0,x22
+            //   bl Runtime_dec_strong
+            if (saveRuntime != 0xaa0003f6u) continue;       // mov x22,x0
+            if (storageArg != 0xd103a3a0u) continue;        // sub x0,x29,#0xe8
+            if (movW1Zero != 0x2a1f03e1u) continue;        // mov w1,wzr
+            if (restoreRuntime != 0xaa1603e0u) continue;   // mov x0,x22
+
+            uintptr_t getRuntimeTarget = 0;
+            uintptr_t decStrongPlt = 0;
+            if (!decodeBlTarget(pc - 20u, getRuntimeCallInsn, &getRuntimeTarget)
+                    || !libraryContainsRange(library, getRuntimeTarget, 4)
+                    || !decodeBlTarget(pc + 8u, decStrongCallInsn, &decStrongPlt)
+                    || !pltReferencesSlot(library, decStrongPlt, decStrong.slot)) {
+                continue;
+            }
+
+            found = pc;
             if (++matches > 1) {
                 if (featureName != nullptr) *featureName = "ambiguous";
                 return 0;
             }
         }
     }
-    if (matches == 1 && featureName != nullptr) {
-        *featureName = kReleaseFeedbackPattern.name;
-    }
+
+    if (matches == 1 && featureName != nullptr) *featureName = "stock-back-release-haptic-v1";
     return matches == 1 ? found : 0;
 }
 
-void releaseFeedbackHelperHook(void *arrowState) {
-    const auto original = reinterpret_cast<ReleaseFeedbackHelperFn>(
-            gOriginalReleaseFeedbackHelper.load(std::memory_order_acquire));
-    if (original == nullptr) return;
-
-    const int64_t now = monotonicMs();
-    const bool eligible = gReadyReleaseDedupEligible.exchange(false, std::memory_order_acq_rel);
-    const int64_t readyAt = gLastReadyHapticAtMs.load(std::memory_order_acquire);
-    const int64_t delta = readyAt > 0 && now >= readyAt ? now - readyAt : -1;
-    const bool suppress = eligible && delta >= 0 && delta < kReadyReleaseDedupMs
-            && gHapticCaptureHookInstalled.load(std::memory_order_acquire);
-    logLine(ANDROID_LOG_INFO,
-            "HAPTIC_TRACE release-boundary-enter tid=%ld eligible=%d deltaReadyMs=%lld segment=%d suppress=%d target=%p",
-            static_cast<long>(syscall(SYS_gettid)), eligible ? 1 : 0,
-            static_cast<long long>(delta),
-            gHapticGestureSegment.load(std::memory_order_acquire), suppress ? 1 : 0,
-            reinterpret_cast<void *>(gReleaseFeedbackTarget.load(std::memory_order_acquire)));
-
-    gReleaseFeedbackScopeReadyAtMs = suppress ? readyAt : 0;
-    gReleaseFeedbackScopeArmed = suppress;
-    if (suppress) {
-        logLine(ANDROID_LOG_INFO,
-                "HAPTIC_V2 release boundary armed deltaMs=%lld windowMs=%lld semantic=READY_STATE_BACK",
-                static_cast<long long>(delta), static_cast<long long>(kReadyReleaseDedupMs));
-    }
-
-    // Do not skip Xiaomi's helper. The nested HyperRT call is intercepted instead, so
-    // feedback_done and all release-state bookkeeping remain stock.
-    original(arrowState);
-
-    gReleaseFeedbackScopeArmed = false;
-    gReleaseFeedbackScopeReadyAtMs = 0;
-    gHapticGestureSegment.store(0, std::memory_order_release);
-}
-
-bool installReleaseFeedbackHapticHook(const LibraryInfo &library) {
-    if (library.base == 0 || gHookFunction == nullptr) return false;
+bool resolveAndPublishStockBackReleaseHapticCallsite(const LibraryInfo &library, const char *source) {
     const char *featureName = nullptr;
-    const uintptr_t target = resolveReleaseFeedbackTarget(library, &featureName);
-    if (target == 0) {
+    const uintptr_t callsite = resolveStockBackReleaseHapticCallsite(library, &featureName);
+    if (callsite == 0) {
+        gStockBackReleaseHapticCallsiteResolved.store(false, std::memory_order_release);
+        gStockBackReleaseHapticCallsite.store(0, std::memory_order_release);
         logLine(ANDROID_LOG_WARN,
-                "HAPTIC_V2 release boundary unresolved feature=%s activeProfile=%s; stock release remains untouched",
+                "HAPTIC_V2 release callsite unresolved source=%s feature=%s activeProfile=%s; stock release remains untouched",
+                source == nullptr ? "unknown" : source,
                 featureName == nullptr ? "none" : featureName, gActivePatternName);
         return false;
     }
-    if (gReleaseFeedbackHookInstalled.load(std::memory_order_acquire)
-            && gReleaseFeedbackTarget.load(std::memory_order_acquire) == target) {
-        return true;
-    }
 
-    void *backup = nullptr;
-    const int rc = swipegate_install_protected_inline_hook(
-            gHookFunction, reinterpret_cast<void *>(target),
-            reinterpret_cast<void *>(releaseFeedbackHelperHook), &backup);
-    if (rc != 0 || backup == nullptr) {
-        logLine(ANDROID_LOG_ERROR,
-                "HAPTIC_V2 release boundary hook failed rc=%d target=%p backup=%p",
-                rc, reinterpret_cast<void *>(target), backup);
-        return false;
-    }
-
-    gOriginalReleaseFeedbackHelper.store(backup, std::memory_order_release);
-    gReleaseFeedbackTarget.store(target, std::memory_order_release);
-    gReleaseFeedbackHookInstalled.store(true, std::memory_order_release);
+    gStockBackReleaseHapticCallsite.store(callsite, std::memory_order_release);
+    gStockBackReleaseHapticCallsiteResolved.store(true, std::memory_order_release);
+    const uintptr_t rva = callsite >= library.base ? callsite - library.base : 0u;
     logLine(ANDROID_LOG_INFO,
-            "HAPTIC_V2 release boundary hook ready feature=%s activeProfile=%s target=%p semantic=READY_STATE_BACK synchronous=1",
-            featureName == nullptr ? "unknown" : featureName, gActivePatternName,
-            reinterpret_cast<void *>(target));
+            "HAPTIC_V2 release callsite ready source=%s feature=%s callsite=%p callsiteRva=0x%zx reference6174_6179=0x654298 exactReference=%d",
+            source == nullptr ? "unknown" : source,
+            featureName == nullptr ? "unknown" : featureName,
+            reinterpret_cast<void *>(callsite), static_cast<size_t>(rva),
+            rva == 0x654298u ? 1 : 0);
     return true;
 }
 
@@ -1248,16 +1209,9 @@ bool installFreshHookLocked(const LibraryInfo &library, uintptr_t target,
             densityDpi > 0 ? dpToPx(effectiveDp, densityDpi) : 0.0f,
             probeHex(patchedHead).c_str(),
             static_cast<unsigned long long>(gRepairCount.load(std::memory_order_relaxed)));
-    // 8.0.x stock hand-up candidate from 6174. Keep it installed while the provider-level
-    // caller trace determines the actual 6179 release callsite.
-    const bool releaseBoundaryReady = installReleaseFeedbackHapticHook(library);
-    const uintptr_t releaseBoundaryTarget = gReleaseFeedbackTarget.load(std::memory_order_acquire);
-    logLine(ANDROID_LOG_INFO,
-            "HAPTIC_TRACE release-boundary-status installed=%d target=%p targetRva=0x%zx launcherBase=%p",
-            releaseBoundaryReady ? 1 : 0, reinterpret_cast<void *>(releaseBoundaryTarget),
-            library.base != 0 && releaseBoundaryTarget >= library.base
-                    ? static_cast<size_t>(releaseBoundaryTarget - library.base) : 0u,
-            reinterpret_cast<void *>(library.base));
+    // Runtime tracing on 6179 identified the real stock hand-up HyperRT callsite. Resolve
+    // its structural fingerprint now; no secondary Launcher function hook is required.
+    resolveAndPublishStockBackReleaseHapticCallsite(library, "primary-hook-install");
     return true;
 }
 
@@ -1354,9 +1308,8 @@ void resetTrackedHookForRemapLocked(uintptr_t newBase) {
     gExpectedOriginalHeadReady = false;
     gActivePatternName = "<none>";
     gActiveResolverDetail = "<none>";
-    gReleaseFeedbackHookInstalled.store(false, std::memory_order_release);
-    gReleaseFeedbackTarget.store(0, std::memory_order_release);
-    gOriginalReleaseFeedbackHelper.store(nullptr, std::memory_order_release);
+    gStockBackReleaseHapticCallsiteResolved.store(false, std::memory_order_release);
+    gStockBackReleaseHapticCallsite.store(0, std::memory_order_release);
 }
 
 bool ensureHookLocked(const LibraryInfo &library, const char *source) {
@@ -1376,17 +1329,18 @@ bool ensureHookLocked(const LibraryInfo &library, const char *source) {
             int64_t last = gLastHealthyLogMs.load(std::memory_order_relaxed);
             if (now - last >= kHealthyLogIntervalMs
                     && gLastHealthyLogMs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
-                const uintptr_t releaseTarget = gReleaseFeedbackTarget.load(std::memory_order_acquire);
+                const uintptr_t releaseCallsite = gStockBackReleaseHapticCallsite.load(
+                        std::memory_order_acquire);
                 logLine(ANDROID_LOG_INFO,
-                        "HOOK_HEALTH healthy source=%s base=%p target=%p pattern=%s resolver=%s detail=%s configuredDp=%d repairs=%llu hapticCapture=%d releaseHook=%d releaseTarget=%p releaseTargetRva=0x%zx",
+                        "HOOK_HEALTH healthy source=%s base=%p target=%p pattern=%s resolver=%s detail=%s configuredDp=%d repairs=%llu hapticCapture=%d releaseCallsiteReady=%d releaseCallsite=%p releaseCallsiteRva=0x%zx",
                         source, reinterpret_cast<void *>(library.base), reinterpret_cast<void *>(trackedTarget),
                         gActivePatternName, gActivePatternName, gActiveResolverDetail, readThresholdDp(),
                         static_cast<unsigned long long>(gRepairCount.load(std::memory_order_relaxed)),
                         gHapticCaptureHookInstalled.load(std::memory_order_acquire) ? 1 : 0,
-                        gReleaseFeedbackHookInstalled.load(std::memory_order_acquire) ? 1 : 0,
-                        reinterpret_cast<void *>(releaseTarget),
-                        library.base != 0 && releaseTarget >= library.base
-                                ? static_cast<size_t>(releaseTarget - library.base) : 0u);
+                        gStockBackReleaseHapticCallsiteResolved.load(std::memory_order_acquire) ? 1 : 0,
+                        reinterpret_cast<void *>(releaseCallsite),
+                        library.base != 0 && releaseCallsite >= library.base
+                                ? static_cast<size_t>(releaseCallsite - library.base) : 0u);
             }
             return true;
         }
@@ -1453,8 +1407,8 @@ void hookWatchdogWorker() {
         if (library.base != 0) {
             missingPolls = 0;
             ensureHook(library, "watchdog");
-            if (!gReleaseFeedbackHookInstalled.load(std::memory_order_acquire)) {
-                installReleaseFeedbackHapticHook(library);
+            if (!gStockBackReleaseHapticCallsiteResolved.load(std::memory_order_acquire)) {
+                resolveAndPublishStockBackReleaseHapticCallsite(library, "watchdog");
             }
             swipegate_back_break_maintain();
             if (!gHapticCaptureHookInstalled.load(std::memory_order_acquire)
@@ -1576,7 +1530,7 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
             reinterpret_cast<void *>(entries->hook_func), reinterpret_cast<void *>(entries->unhook_func),
             static_cast<long long>(kHookHealthIntervalMs));
     logLine(ANDROID_LOG_INFO,
-            "HAPTIC_V2 enabled policy=hyperrt-stock-runtime ready-added=1 threshold-stock=1 release-stock=1 ready-release-dedup-ms=%lld threshold-never-dedup=1 release-boundary=GestureBackArrowView constant=0",
+            "HAPTIC_V2 enabled policy=hyperrt-stock-runtime ready-added=1 threshold-stock=1 release-stock=1 ready-release-dedup-ms=%lld threshold-never-dedup=1 release-source=GestureStubViewWindow::handle_back_gesture callsite-scoped=1 constant=0",
             static_cast<long long>(kReadyReleaseDedupMs));
 
     const LibraryInfo library = findLauncherLibrary();
