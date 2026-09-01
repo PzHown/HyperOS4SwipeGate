@@ -13,7 +13,7 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // dev.18: dedup the runtime-proven Launcher 8.x stock Back release HyperRT callsite.
+        // dev.18: dedup the runtime-proven Launcher 8.x stock Back release HyperRT callsite (6174/6179).
         versionCode = 60
         versionName = "0.8.1-dev.18"
 
