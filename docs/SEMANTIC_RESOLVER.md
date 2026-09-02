@@ -1,6 +1,6 @@
 # Semantic Resolver
 
-本文记录 SwipeGate 当前用于定位 HyperOS 4 Launcher 8.x `GestureInputBackHelper::on_swipe_process` 的语义解析策略。旧文档中关于“仅 dev 验证、main 仍停留在 0.6.0”的描述已经过时；当前架构已长期使用 semantic resolver，并继续保留 exact fingerprint 作为保守 fallback。
+本文记录 SwipeGate 当前用于定位 HyperOS 4 Launcher 8.x `GestureInputBackHelper::on_swipe_process` 的语义解析策略。旧文档中关于“仅 dev 验证、main 仍停留在 0.6.0”的描述已经过时；当前主 Hook 以 exact fingerprint 为兼容性契约；当 fingerprint 出现多个候选时，使用 `BackGestureUtils::convert_offset` 行为链消歧。MotionEvent semantic resolver 目前仅用于诊断与交叉验证，不再在没有 exact 目标时单独接管主 Hook。
 
 ## 目标
 
@@ -62,11 +62,11 @@ gesture-frame-v2
 
 决策原则：
 
-1. semantic 唯一，exact 无候选：接受 semantic
-2. semantic 与 exact 指向同一唯一地址：接受
-3. semantic 与 exact 冲突且无法证明哪一侧可信：fail closed
-4. semantic 不稳定，但已验证 exact fingerprint 唯一且完整：允许 exact-authoritative fallback
-5. 0 candidate 或 multiple candidates：fail closed
+1. exact 唯一：保持 exact-authoritative；semantic 可 corroborate，但不能否决已验证 exact
+2. exact 多候选：逐个验证 `convert_offset` 行为链；仅一个通过时接受 `exact-behavior-disambiguated`
+3. exact 多候选且 0 个或多个行为候选通过：fail closed
+4. exact 无候选：MotionEvent semantic 仅报告候选，不安装主 Hook；当前 ABI 未经证明时 fail closed
+5. semantic 与 exact 指向同一唯一地址：记录 `semantic-corroborated`；冲突时记录但仍由唯一 exact authoritative
 
 6179 实机当前主 Hook 日志可出现：
 
@@ -76,6 +76,15 @@ pattern=gesture-frame-v2
 ```
 
 这表示 semantic 图在该编译版本上与 exact 结果不完全一致，但 `gesture-frame-v2` 仍是唯一已验证目标，因此采用 exact authoritative 路径；不是使用硬编码 RVA。
+
+6230 APK 静态验证出现两个 exact fingerprint：`gesture-frame-v1` 与 `gesture-frame-v2`。其中只有 v2 候选通过 `BackGestureUtils::convert_offset` 行为链验证，因此生产 resolver 应输出：
+
+```text
+detail=exact-behavior-disambiguated
+pattern=gesture-frame-v2
+```
+
+这是行为证据消歧，不是 6230 版本白名单或固定 RVA fallback。
 
 ## ABI-transparent wrapper
 

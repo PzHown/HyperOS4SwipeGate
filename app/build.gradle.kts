@@ -13,9 +13,9 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // 0.9.0: stable release with synchronized Back progress, native haptics and break-open support.
-        versionCode = 64
-        versionName = "0.9.0"
+        // 0.9.1: compatibility release with safer Launcher 6230 target disambiguation.
+        versionCode = 65
+        versionName = "0.9.1"
 
         ndk {
             abiFilters += "arm64-v8a"

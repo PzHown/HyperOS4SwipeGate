@@ -1,29 +1,23 @@
-## 0.9.0 更新日志
+## 0.9.1 更新日志
 
-1. 新增「丰富侧滑震动反馈」实验功能  
-   侧滑进入 Ready 状态时会补充一次更自然的系统原生震动反馈，让手势阶段感更清晰。
+1. 修复 Launcher `8.01.02.6230` 下 Native Hook 目标识别失败的问题。
+   新版 Launcher 中旧版 exact fingerprint 会同时命中两个函数，0.9.1 不再因为多候选直接拒绝安装，而是使用 `BackGestureUtils::convert_offset` 的完整行为链逐个验证候选，仅在能够唯一证明真实 `on_swipe_process` 时安装 Hook。
 
-2. 优化返回手势震动逻辑  
-   减少短时间内重复震动的问题，同时尽量保留系统原有的侧滑、停顿和松手反馈。
+2. 保持 fail-closed，不为 6230 写死 RVA。
+   本次兼容没有加入版本白名单、固定地址、优先新版 pattern 或“取第一个候选”等不安全 fallback；如果多个候选仍无法唯一验证，模块会继续保持原厂行为。
 
-3. 重做侧滑动画进度同步  
-   自定义触发距离后，返回动画会跟随新的阈值平滑延展，不再出现动画提前到位、停住或到达阈值时突然跳动的问题。
+3. 收紧 semantic resolver 的主 Hook 权限。
+   反编译确认当前 MotionEvent semantic graph 在 6230 会定位到外层 `MotionEvent*` 事件处理函数，与主 Hook 的 `w1 / w2 / s0` ABI 不一致。因此 semantic 目前只用于诊断和交叉验证，不再在没有可信 exact 目标时单独接管主 Hook，降低 Launcher 崩溃风险。
 
-4. 优化高阈值下的完整动画距离  
-   修复阈值设置越大，Ready 之后还需要继续滑很长距离才能完成动画的问题。现在 Ready 后的动画距离更接近系统原厂手感。
+4. 改进 Native diagnostics。
+   多候选时会分别记录 candidate RVA、fingerprint、`convert_offset` RVA、corroborated callsites 和 qualification 结果；失败日志也会区分 exact / semantic candidate 数量及具体 failure reason，方便后续适配 Launcher 更新。
 
-5. 提升 Launcher 8.x 兼容性与稳定性  
-   加强 Hook 识别、异常保护和自动恢复机制，系统桌面更新后如果无法安全识别目标，会优先保持原厂行为，降低异常风险。
-
-6. 新增「启动动画期间立即返回 · Beta」  
-   从桌面打开 App 后，无需等待启动动画结束即可侧滑返回，保持更连贯的返回操作体验。
-
-7. 完善免 Root 控制与诊断  
-   优化 App、SystemUI 与 Launcher 之间的配置同步和状态检测，诊断信息更加完整，排查问题更方便。
+5. 保持已有 Launcher 兼容路径不变。
+   对原本只有一个已验证 exact fingerprint 的 5459 / 6174 / 6179 等版本，仍沿用原来的 exact-authoritative 路径，不额外强制新的行为验证条件，尽量减少回归面。
 
 ### 本次重点
 
-- 自定义侧滑阈值的动画体验大幅改善
-- 高阈值下手势距离更合理
-- 震动反馈更自然
-- Launcher 8.x 兼容性与稳定性进一步提升
+- 新增 Launcher 8.01.02.6230 安全兼容
+- 多 exact 候选可通过行为证据自动消歧
+- semantic-only 错 ABI 风险收口
+- 诊断信息更完整
