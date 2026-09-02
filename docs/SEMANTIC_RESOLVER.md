@@ -77,6 +77,15 @@ pattern=gesture-frame-v2
 
 这表示 semantic 图在该编译版本上与 exact 结果不完全一致，但 `gesture-frame-v2` 仍是唯一已验证目标，因此采用 exact authoritative 路径；不是使用硬编码 RVA。
 
+6230 APK 静态验证出现两个 exact fingerprint：`gesture-frame-v1` 与 `gesture-frame-v2`。其中只有 v2 候选通过 `BackGestureUtils::convert_offset` 行为链验证，因此生产 resolver 应输出：
+
+```text
+detail=exact-behavior-disambiguated
+pattern=gesture-frame-v2
+```
+
+这是行为证据消歧，不是 6230 版本白名单或固定 RVA fallback。
+
 ## ABI-transparent wrapper
 
 主 Hook wrapper 使用 AArch64 汇编保存：
