@@ -72,6 +72,7 @@ constexpr uint32_t kMovW8Float110 = 0x52a85b88u;
 constexpr size_t kHookProbeSize = 16;
 constexpr size_t kMaxExecutableRanges = 12;
 constexpr size_t kMaxLoadRanges = 16;
+constexpr size_t kMaxExactCandidates = 8;
 
 constexpr uintptr_t kReferenceOnSwipeProcessOffset = 0x816fc4;
 
@@ -495,14 +496,38 @@ struct PatternMatch {
     const char *detail = nullptr;
 };
 
+struct ExactCandidateSet {
+    std::array<PatternMatch, kMaxExactCandidates> matches{};
+    size_t count = 0;
+    bool overflow = false;
+};
+
+struct ExactCandidateEvidence {
+    PatternMatch match{};
+    uintptr_t progressTarget = 0;
+    size_t corroboratedCallsites = 0;
+    bool qualified = false;
+};
+
 struct TargetResolution {
     PatternMatch match{};
     size_t uniqueCandidates = 0;
+    size_t exactCandidates = 0;
+    size_t exactQualifiedCandidates = 0;
+    bool exactOverflow = false;
+    size_t semanticCandidates = 0;
+    uintptr_t semanticTarget = 0;
+    swipe_semantic::FrameShape semanticShape = swipe_semantic::FrameShape::Unknown;
+    std::array<ExactCandidateEvidence, kMaxExactCandidates> exactEvidence{};
+    const char *failureDetail = nullptr;
 };
 
-TargetResolution resolveExactOnSwipeProcessTarget(const LibraryInfo &library) {
-    std::vector<PatternMatch> matches;
-    matches.reserve(2);
+uintptr_t resolveBackProgressConvertOffsetTarget(
+        const LibraryInfo &library, uintptr_t onSwipeProcessTarget,
+        size_t *corroboratedCallsites);
+
+ExactCandidateSet resolveExactOnSwipeProcessTarget(const LibraryInfo &library) {
+    ExactCandidateSet result;
 
     for (const PatternSpec &pattern : kOnSwipeProcessPatterns) {
         for (size_t rangeIndex = 0; rangeIndex < library.executableRangeCount; ++rangeIndex) {
@@ -513,46 +538,90 @@ TargetResolution resolveExactOnSwipeProcessTarget(const LibraryInfo &library) {
             const uintptr_t last = range.start + range.size - pattern.size;
             for (uintptr_t cursor = alignedStart; cursor <= last; cursor += 4U) {
                 if (!patternMatchesAt(cursor, pattern)) continue;
-                const auto duplicate = std::find_if(matches.begin(), matches.end(),
-                        [cursor](const PatternMatch &item) { return item.address == cursor; });
-                if (duplicate == matches.end()) {
-                    matches.push_back({cursor, &pattern, nullptr});
-                    if (matches.size() > 1) return {{}, matches.size()};
+                bool duplicate = false;
+                for (size_t i = 0; i < result.count; ++i) {
+                    if (result.matches[i].address == cursor) {
+                        duplicate = true;
+                        break;
+                    }
                 }
+                if (duplicate) continue;
+                if (result.count >= result.matches.size()) {
+                    result.overflow = true;
+                    return result;
+                }
+                result.matches[result.count++] = {cursor, &pattern, nullptr};
             }
         }
     }
-
-    if (matches.size() == 1) return {matches.front(), 1};
-    return {{}, matches.size()};
+    return result;
 }
 
 TargetResolution resolveOnSwipeProcessTarget(const LibraryInfo &library) {
     const swipe_semantic::Resolution semantic = swipe_semantic::Resolve(library.base);
-    const TargetResolution exact = resolveExactOnSwipeProcessTarget(library);
+    const ExactCandidateSet exact = resolveExactOnSwipeProcessTarget(library);
 
-    // A unique exact profile is an already validated compatibility contract.
-    // Semantic resolution may corroborate it, but cannot disable or replace it.
-    // This keeps 5459/6174 safe while the semantic matcher evolves on real devices.
-    if (exact.uniqueCandidates == 1 && exact.match.address != 0 && exact.match.pattern != nullptr) {
+    TargetResolution result;
+    result.exactCandidates = exact.count;
+    result.exactOverflow = exact.overflow;
+    result.semanticCandidates = semantic.candidate_count;
+    result.semanticTarget = semantic.target;
+    result.semanticShape = semantic.shape;
+    for (size_t i = 0; i < exact.count; ++i) {
+        result.exactEvidence[i].match = exact.matches[i];
+    }
+
+    if (exact.overflow) {
+        result.failureDetail = "exact-candidate-overflow";
+        return result;
+    }
+
+    if (exact.count == 1 && exact.matches[0].address != 0
+            && exact.matches[0].pattern != nullptr) {
+        const PatternMatch &match = exact.matches[0];
+        const char *detail = "exact-authoritative";
         if (semantic.candidate_count == 1 && semantic.target != 0) {
-            const bool agrees = semantic.target == exact.match.address;
-            return {{exact.match.address, exact.match.pattern,
-                     agrees ? "semantic-corroborated" : "semantic-conflict-exact-authoritative"}, 1};
+            detail = semantic.target == match.address
+                    ? "semantic-corroborated"
+                    : "semantic-conflict-exact-authoritative";
         }
-        return {{exact.match.address, exact.match.pattern, "exact-authoritative"}, 1};
+        result.match = {match.address, match.pattern, detail};
+        result.uniqueCandidates = 1;
+        return result;
     }
 
-    // Multiple exact hits are unsafe even if semantic happens to choose one.
-    if (exact.uniqueCandidates > 1) return {{}, exact.uniqueCandidates};
-
-    // Unknown launcher build: semantic resolution is allowed to take over only
-    // after proving exactly one candidate. Otherwise fail closed.
-    if (semantic.candidate_count == 1 && semantic.target != 0) {
-        return {{semantic.target, &kSemanticOnSwipeProcessPattern,
-                 swipe_semantic::FrameShapeName(semantic.shape)}, 1};
+    if (exact.count > 1) {
+        size_t qualified = 0;
+        PatternMatch selected{};
+        for (size_t i = 0; i < exact.count; ++i) {
+            size_t corroboratedCallsites = 0;
+            const uintptr_t progressTarget = resolveBackProgressConvertOffsetTarget(
+                    library, exact.matches[i].address, &corroboratedCallsites);
+            ExactCandidateEvidence &evidence = result.exactEvidence[i];
+            evidence.progressTarget = progressTarget;
+            evidence.corroboratedCallsites = corroboratedCallsites;
+            evidence.qualified = progressTarget != 0;
+            if (!evidence.qualified) continue;
+            selected = exact.matches[i];
+            ++qualified;
+        }
+        result.exactQualifiedCandidates = qualified;
+        if (qualified == 1 && selected.address != 0 && selected.pattern != nullptr) {
+            result.match = {selected.address, selected.pattern,
+                            "exact-behavior-disambiguated"};
+            result.uniqueCandidates = 1;
+            return result;
+        }
+        result.failureDetail = qualified == 0
+                ? "exact-multiple-no-qualified-target"
+                : "exact-multiple-behavior-still-ambiguous";
+        return result;
     }
-    return {{}, semantic.candidate_count};
+
+    result.failureDetail = semantic.candidate_count == 1 && semantic.target != 0
+            ? "semantic-only-primary-abi-unverified"
+            : "no-validated-exact-target";
+    return result;
 }
 
 int parseDensityDpi(const char *text) {
@@ -1519,13 +1588,35 @@ bool ensureHookLocked(const LibraryInfo &library, const char *source) {
     gLastPatternScanMs.store(now, std::memory_order_relaxed);
 
     const TargetResolution resolution = resolveOnSwipeProcessTarget(library);
+    if (resolution.exactCandidates > 1 || resolution.exactOverflow) {
+        for (size_t i = 0; i < resolution.exactCandidates; ++i) {
+            const ExactCandidateEvidence &evidence = resolution.exactEvidence[i];
+            const uintptr_t candidateRva = evidence.match.address >= library.base
+                    ? evidence.match.address - library.base : 0u;
+            const uintptr_t progressRva = evidence.progressTarget >= library.base
+                    ? evidence.progressTarget - library.base : 0u;
+            logLine(ANDROID_LOG_INFO,
+                    "HOOK_SCAN exact candidate source=%s index=%zu rva=0x%zx pattern=%s progressQualified=%d convertOffsetRva=0x%zx corroboratedCalls=%zu",
+                    source, i, static_cast<size_t>(candidateRva),
+                    evidence.match.pattern == nullptr ? "<none>" : evidence.match.pattern->name,
+                    evidence.qualified ? 1 : 0, static_cast<size_t>(progressRva),
+                    evidence.corroboratedCallsites);
+        }
+    }
     if (resolution.uniqueCandidates != 1 || resolution.match.address == 0 || resolution.match.pattern == nullptr) {
         gHookInstalled.store(false, std::memory_order_release);
         gHookHealthState.store(3, std::memory_order_release);
+        const uintptr_t semanticRva = resolution.semanticTarget >= library.base
+                ? resolution.semanticTarget - library.base : 0u;
         logLine(ANDROID_LOG_ERROR,
-                "HOOK_SCAN install refused source=%s candidates=%zu base=%p execRanges=%zu referenceOffset=0x%zx; semantic/exact resolvers found no unique validated target",
-                source, resolution.uniqueCandidates, reinterpret_cast<void *>(library.base),
-                library.executableRangeCount, static_cast<size_t>(kReferenceOnSwipeProcessOffset));
+                "HOOK_SCAN install refused source=%s candidates=%zu exactCandidates=%zu exactQualified=%zu exactOverflow=%d semanticCandidates=%zu semanticRva=0x%zx semanticShape=%s failure=%s base=%p execRanges=%zu referenceOffset=0x%zx",
+                source, resolution.uniqueCandidates, resolution.exactCandidates,
+                resolution.exactQualifiedCandidates, resolution.exactOverflow ? 1 : 0,
+                resolution.semanticCandidates, static_cast<size_t>(semanticRva),
+                swipe_semantic::FrameShapeName(resolution.semanticShape),
+                resolution.failureDetail == nullptr ? "unknown" : resolution.failureDetail,
+                reinterpret_cast<void *>(library.base), library.executableRangeCount,
+                static_cast<size_t>(kReferenceOnSwipeProcessOffset));
         return false;
     }
 
@@ -1679,7 +1770,7 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     gUnhookFunction = entries->unhook_func;
     if (launcherProcess) swipegate_back_break_enable(entries->hook_func, entries->unhook_func);
     logLine(ANDROID_LOG_INFO,
-            "DP_GATE native_init accepted api=%u exe=%s process=%s launcherCmdline=%d hook_func=%p unhook_func=%p watchdog=%lldms resolver=exact-profile-first+semantic-unknown-build abi=transparent-s0 repair=unhook+rehook",
+            "DP_GATE native_init accepted api=%u exe=%s process=%s launcherCmdline=%d hook_func=%p unhook_func=%p watchdog=%lldms resolver=exact-profile+back-progress-disambiguation semantic=diagnostic-only abi=transparent-s0 repair=unhook+rehook",
             entries->version, executable.c_str(), processName.c_str(), launcherProcess ? 1 : 0,
             reinterpret_cast<void *>(entries->hook_func), reinterpret_cast<void *>(entries->unhook_func),
             static_cast<long long>(kHookHealthIntervalMs));
