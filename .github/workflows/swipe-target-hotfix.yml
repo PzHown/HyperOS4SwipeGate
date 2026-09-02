@@ -24,6 +24,7 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import textwrap
 
           path = Path('native/src/main.cpp')
           text = path.read_text()
@@ -192,9 +193,6 @@ jobs:
                   return result;
               }
 
-              // A unique exact profile remains the compatibility contract used by existing
-              // 5459/6174/6179 builds. Do not make the derived progress resolver a new
-              // requirement for launchers which were already uniquely identified.
               if (exact.count == 1 && exact.matches[0].address != 0
                       && exact.matches[0].pattern != nullptr) {
                   const PatternMatch &match = exact.matches[0];
@@ -209,10 +207,6 @@ jobs:
                   return result;
               }
 
-              // A fingerprint is only a frame-family hint once it becomes non-unique. In that
-              // case require the already production-validated BackGestureUtils::convert_offset
-              // behavior chain to distinguish the real on_swipe_process target. This is what
-              // separates Launcher 6230's real v2 target from an unrelated v1 prologue reuse.
               if (exact.count > 1) {
                   size_t qualified = 0;
                   PatternMatch selected{};
@@ -241,12 +235,6 @@ jobs:
                   return result;
               }
 
-              // The current MotionEvent semantic graph identifies an outer event handler on
-              // Launcher 6230 (x1 is MotionEvent*), not the inner ABI used by the primary hook
-              // (w1=readyFinish, w2=side, s0=horizontalDistance). Keep semantic output as
-              // diagnostics/corroboration until call-graph + ABI validation proves the inner
-              // swipe processor. Unknown builds therefore fail closed instead of risking a
-              // Launcher crash from a structurally plausible but ABI-incompatible target.
               result.failureDetail = semantic.candidate_count == 1 && semantic.target != 0
                       ? "semantic-only-primary-abi-unverified"
                       : "no-validated-exact-target";
@@ -254,8 +242,6 @@ jobs:
           }
           '''
 
-          # Raw strings above retain source indentation from this script. Dedent to match file.
-          import textwrap
           replace_once(textwrap.dedent(old_resolver), textwrap.dedent(new_resolver))
 
           old_scan = r'''    const TargetResolution resolution = resolveOnSwipeProcessTarget(library);
@@ -302,7 +288,7 @@ jobs:
                   return false;
               }
           '''
-          replace_once(textwrap.dedent(old_scan), textwrap.dedent(new_scan))
+          replace_once(old_scan, new_scan)
 
           replace_once(
               'watchdog=%lldms resolver=exact-profile-first+semantic-unknown-build abi=transparent-s0 repair=unhook+rehook',
@@ -318,9 +304,6 @@ jobs:
           doc = doc.replace(
               '1. semantic 唯一，exact 无候选：接受 semantic\n2. semantic 与 exact 指向同一唯一地址：接受\n3. semantic 与 exact 冲突且无法证明哪一侧可信：fail closed\n4. semantic 不稳定，但已验证 exact fingerprint 唯一且完整：允许 exact-authoritative fallback\n5. 0 candidate 或 multiple candidates：fail closed',
               '1. exact 唯一：保持 exact-authoritative；semantic 可 corroborate，但不能否决已验证 exact\n2. exact 多候选：逐个验证 `convert_offset` 行为链；仅一个通过时接受 `exact-behavior-disambiguated`\n3. exact 多候选且 0 个或多个行为候选通过：fail closed\n4. exact 无候选：MotionEvent semantic 仅报告候选，不安装主 Hook；当前 ABI 未经证明时 fail closed\n5. semantic 与 exact 指向同一唯一地址：记录 `semantic-corroborated`；冲突时记录但仍由唯一 exact authoritative')
-          doc = doc.replace(
-              'Unknown launcher build: semantic resolution is allowed to take over only\n',
-              'Unknown launcher build: semantic resolution is diagnostic-only until the inner hook ABI is proven\n')
           docs.write_text(doc)
           PY
 
