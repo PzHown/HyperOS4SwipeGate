@@ -16,6 +16,7 @@ add_library(
         src/config_reader.cpp
         src/log_filter.cpp
         src/control_channel.cpp
+        src/runtime_config_store.cpp
         src/broadcast_send_capture_hook.S
 )
 
