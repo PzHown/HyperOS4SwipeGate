@@ -1,0 +1,24 @@
+name: Runtime host regressions
+
+on:
+  pull_request:
+    branches: [main, dev]
+  push:
+    branches: [main, dev, fix/runtime-config-and-hook-safety]
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Run persistence, relay and GOT regressions
+        env:
+          CXX: clang++
+        run: bash tests/run_host_tests.sh
