@@ -4,9 +4,9 @@
 extern "C" {
 #endif
 
-// Live configuration received through SystemUI -> Xiaomi fsgesture -> HyOS Runtime. A negative
-// value means no authenticated runtime value has arrived yet and callers should fall back to the
-// persisted launcher cache / legacy property path.
+// Launcher-local configuration: restored from persistent storage on initialization,
+// then updated by authenticated SystemUI carriers. No App heartbeat is required.
+// A negative result means this is not yet an initialized Launcher process.
 int swipegate_control_threshold_dp();
 int swipegate_control_log_level();
 int swipegate_control_haptic_enabled();
@@ -16,8 +16,8 @@ int swipegate_control_break_open_enabled();
 // the user-facing App log level; App log retention remains controlled by log_level.
 void swipegate_control_on_log(int priority, const char *text);
 
-// Ensure the process-local HyOS Runtime bridge installer is active. There is no socket and no
-// network transport; this function only drives the native broadcast bridge lifecycle.
+// Restore local configuration and ensure the process-local broadcast bridge installer.
+// This does not wake the App, open a socket, or fetch App preferences.
 void swipegate_control_sync_if_due();
 
 #ifdef __cplusplus
