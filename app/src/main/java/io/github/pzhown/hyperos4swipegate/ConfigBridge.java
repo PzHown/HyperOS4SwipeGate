@@ -18,10 +18,9 @@ public final class ConfigBridge {
     public static final String PREF_KEY_BREAK_OPEN_ENABLED = "break_open_enabled";
     public static final boolean DEFAULT_BREAK_OPEN_ENABLED = false;
 
-    public static final int DEFAULT_THRESHOLD_DP = 0; // Legacy alias: 0 = Xiaomi stock/default (88dp).
+    public static final int DEFAULT_THRESHOLD_DP = 0;
     public static final int STOCK_THRESHOLD_DP = 88;
     public static final int MAX_THRESHOLD_DP = 300;
-
     public static final int LOG_LEVEL_OFF = 0;
     public static final int LOG_LEVEL_COMPACT = 1;
     public static final int LOG_LEVEL_DETAILED = 2;
@@ -35,22 +34,15 @@ public final class ConfigBridge {
     public static final String REMOTE_PREF_KEY_DIAGNOSTICS_TOKEN = "diagnostics_token";
     public static final String NATIVE_CONFIG_FILE = "hyperos4swipegate_config";
     public static final String NATIVE_LOG_LEVEL_FILE = "hyperos4swipegate_log_level";
-
-    // Legacy migration fallback only. Live configuration is now exchanged directly with the native
-    // HyperOS Runtime child and persisted by native code into Launcher cache.
     public static final String SYSTEM_PROPERTY = "persist.hyperos4swipegate.threshold_dp";
     public static final String LEGACY_SYSTEM_PROPERTY_PX = "persist.hyperos4swipegate.threshold_px";
     public static final String LEGACY_SYSTEM_PROPERTY_EXTRA_DP = "persist.hyperos4swipegate.extra_dp";
 
     private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
-
     private ConfigBridge() {}
 
-    public interface Callback {
-        void onResult(Result result);
-    }
-
+    public interface Callback { void onResult(Result result); }
     public record Result(boolean success, int value, String message) {}
 
     public static SharedPreferences localPreferences(Context context) {
@@ -63,66 +55,51 @@ public final class ConfigBridge {
         return Math.max(LOG_LEVEL_OFF, Math.min(LOG_LEVEL_DETAILED, logLevel));
     }
 
+    private static void synchronize(Context app) {
+        NativeControlBridge.initialize(app);
+        NativeControlBridge.requestConfigRefresh();
+    }
+
+    private static String saveMessage() {
+        return NativeControlBridge.isConfigurationPersisted()
+                ? "桌面已确认配置持久化，无需 App 常驻"
+                : "已保存到 App，等待桌面确认持久化";
+    }
+
     public static void applyThresholdDpAsync(Context context, int thresholdDp, Callback callback) {
         Context app = context.getApplicationContext();
-        int safeValue = Math.max(STOCK_THRESHOLD_DP, Math.min(MAX_THRESHOLD_DP, thresholdDp));
-
-        // Local preferences are the authoritative App-side configuration. NativeControlBridge sends
-        // this value directly to the Launcher child on the next heartbeat/gesture and native code
-        // persists it into Launcher cache for subsequent restarts.
-        localPreferences(app).edit().putInt(PREF_KEY_THRESHOLD_DP, safeValue).apply();
-        NativeControlBridge.initialize(app);
-
+        int value = Math.max(STOCK_THRESHOLD_DP, Math.min(MAX_THRESHOLD_DP, thresholdDp));
+        localPreferences(app).edit().putInt(PREF_KEY_THRESHOLD_DP, value).apply();
+        synchronize(app);
         EXECUTOR.execute(() -> {
-            // Keep RemotePreferences mirrored as a compatibility aid for ordinary Java targets, but
-            // never fail the setting operation when HyperOS Runtime omits the Java module entry.
-            try {
-                XposedServiceBridge.applyThresholdDp(app, safeValue);
-            } catch (Throwable ignored) {
-            }
-            String message = NativeControlBridge.hasFreshPeer()
-                    ? "ok"
-                    : "已保存，Native 将在下一次桌面侧滑/心跳同步";
-            Result result = new Result(true, safeValue, message);
-            MAIN.post(() -> callback.onResult(result));
+            try { XposedServiceBridge.applyThresholdDp(app, value); } catch (Throwable ignored) {}
+            MAIN.post(() -> callback.onResult(new Result(true, value, saveMessage())));
         });
     }
 
     public static void applyHapticEnabledAsync(Context context, boolean enabled, Callback callback) {
         Context app = context.getApplicationContext();
         localPreferences(app).edit().putBoolean(PREF_KEY_HAPTIC_ENABLED, enabled).apply();
-        NativeControlBridge.initialize(app);
-        NativeControlBridge.requestConfigRefresh();
-        Result result = new Result(true, enabled ? 1 : 0, "ok");
-        MAIN.post(() -> callback.onResult(result));
+        synchronize(app);
+        MAIN.post(() -> callback.onResult(new Result(true, enabled ? 1 : 0, saveMessage())));
     }
 
     public static void applyBreakOpenEnabledAsync(Context context, boolean enabled, Callback callback) {
         Context app = context.getApplicationContext();
         localPreferences(app).edit().putBoolean(PREF_KEY_BREAK_OPEN_ENABLED, enabled).apply();
-        NativeControlBridge.initialize(app);
-        NativeControlBridge.requestConfigRefresh();
-        Result result = new Result(true, enabled ? 1 : 0, "ok");
-        MAIN.post(() -> callback.onResult(result));
+        synchronize(app);
+        MAIN.post(() -> callback.onResult(new Result(true, enabled ? 1 : 0, saveMessage())));
     }
 
     public static void applyLogLevelAsync(Context context, int logLevel, Callback callback) {
         Context app = context.getApplicationContext();
-        int safeValue = sanitizeLogLevel(logLevel);
-        localPreferences(app).edit().putInt(PREF_KEY_LOG_LEVEL, safeValue).apply();
-        NativeControlBridge.initialize(app);
+        int value = sanitizeLogLevel(logLevel);
+        localPreferences(app).edit().putInt(PREF_KEY_LOG_LEVEL, value).apply();
+        synchronize(app);
         NativeControlBridge.clearLog();
-
         EXECUTOR.execute(() -> {
-            try {
-                XposedServiceBridge.applyLogLevel(app, safeValue);
-            } catch (Throwable ignored) {
-            }
-            String message = NativeControlBridge.hasFreshPeer()
-                    ? "ok"
-                    : "已保存，Native 将在下一次桌面侧滑/心跳同步";
-            Result result = new Result(true, safeValue, message);
-            MAIN.post(() -> callback.onResult(result));
+            try { XposedServiceBridge.applyLogLevel(app, value); } catch (Throwable ignored) {}
+            MAIN.post(() -> callback.onResult(new Result(true, value, saveMessage())));
         });
     }
 }
