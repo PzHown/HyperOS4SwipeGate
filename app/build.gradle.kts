@@ -13,9 +13,9 @@ android {
         applicationId = "io.github.pzhown.hyperos4swipegate"
         minSdk = 33
         targetSdk = 37
-        // 0.9.1: compatibility release with safer Launcher 6230 target disambiguation.
-        versionCode = 65
-        versionName = "0.9.1"
+        // 0.9.2: durable native configuration, bounded/authenticated relay, transactional GOT guard.
+        versionCode = 66
+        versionName = "0.9.2"
 
         ndk {
             abiFilters += "arm64-v8a"
