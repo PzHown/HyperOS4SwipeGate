@@ -6,29 +6,25 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.os.Process;
+import android.os.SystemClock;
 
 import androidx.annotation.NonNull;
 
 import java.lang.reflect.Method;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
 
 /**
- * Java-side relay that intentionally lives in SystemUI, not MiuiHome.
- *
- * HyperOS 4 MiuiHome is a Rust/hyos_spawner process and does not provide a reliable libxposed Java
- * runtime. SystemUI does. We therefore reuse Xiaomi's existing protected
- * {@code com.android.systemui.fsgesture} receiver as the authenticated carrier into the launcher
- * native runtime, then relay the native HyperOS broadcast reply back to the SwipeGate app.
+ * Relay in SystemUI, independent from the settings App's lifetime.
+ * The return capability is sent only through Xiaomi's protected, package-targeted
+ * fsgesture carrier. It is never included in App broadcasts or diagnostic logs.
  */
 public final class SystemUiBridgeModule extends XposedModule {
     static final String SYSTEM_UI_PACKAGE = "com.android.systemui";
     static final String LAUNCHER_PACKAGE = "com.miui.home";
     static final String MODULE_PACKAGE = "io.github.pzhown.hyperos4swipegate";
-
     static final String ACTION_APP_QUERY = MODULE_PACKAGE + ".action.RUNTIME_QUERY";
     static final String ACTION_APP_REPLY = MODULE_PACKAGE + ".action.RUNTIME_REPLY";
     static final String ACTION_NATIVE_REPLY = MODULE_PACKAGE + ".action.NATIVE_RUNTIME_REPLY";
@@ -36,6 +32,9 @@ public final class SystemUiBridgeModule extends XposedModule {
 
     static final String EXTRA_MARKER = "swipegate_control";
     static final String EXTRA_NONCE = "swipegate_nonce";
+    static final String EXTRA_CHALLENGE_HIGH = "swipegate_challenge_high";
+    static final String EXTRA_CHALLENGE_LOW = "swipegate_challenge_low";
+    static final String EXTRA_CONFIG_PERSISTED = "swipegate_config_persisted";
     static final String EXTRA_THRESHOLD_DP = "swipegate_threshold_dp";
     static final String EXTRA_LOG_LEVEL = "swipegate_log_level";
     static final String EXTRA_HAPTIC_ENABLED = "swipegate_haptic_enabled";
@@ -51,16 +50,15 @@ public final class SystemUiBridgeModule extends XposedModule {
 
     private static final int MAX_CONTEXT_ATTEMPTS = 80;
     private static final long CONTEXT_RETRY_MS = 250L;
-
     private final AtomicBoolean started = new AtomicBoolean(false);
-    private final AtomicLong pendingNonce = new AtomicLong(0L);
-    private volatile Context systemUiContext;
+    private ControlRequest pending;
+    private long newestAppNonce;
+    private Intent cachedReply;
 
     @Override
     public void onModuleLoaded(@NonNull XposedModuleInterface.ModuleLoadedParam param) {
-        if (!SYSTEM_UI_PACKAGE.equals(param.getProcessName())) return;
-        if (!started.compareAndSet(false, true)) return;
-
+        if (!SYSTEM_UI_PACKAGE.equals(param.getProcessName())
+                || !started.compareAndSet(false, true)) return;
         Thread worker = new Thread(this::initializeWhenContextReady, "SwipeGateSystemUiBridge");
         worker.setDaemon(true);
         worker.start();
@@ -91,13 +89,10 @@ public final class SystemUiBridgeModule extends XposedModule {
     }
 
     private void initialize(Context context) {
-        systemUiContext = context;
-        IntentFilter appQuery = new IntentFilter(ACTION_APP_QUERY);
-        context.registerReceiver(appQueryReceiver, appQuery, Context.RECEIVER_EXPORTED);
-
-        IntentFilter nativeReply = new IntentFilter(ACTION_NATIVE_REPLY);
-        context.registerReceiver(nativeReplyReceiver, nativeReply, Context.RECEIVER_EXPORTED);
-
+        context.registerReceiver(appQueryReceiver, new IntentFilter(ACTION_APP_QUERY),
+                Context.RECEIVER_EXPORTED);
+        context.registerReceiver(nativeReplyReceiver, new IntentFilter(ACTION_NATIVE_REPLY),
+                Context.RECEIVER_EXPORTED);
         log(android.util.Log.INFO, "HyperOS4SwipeGateSystemUI",
                 "SystemUI runtime bridge ready uid=" + Process.myUid()
                         + " loadedVersion=" + BuildConfig.VERSION_CODE);
@@ -107,59 +102,51 @@ public final class SystemUiBridgeModule extends XposedModule {
         @Override
         public void onReceive(Context context, Intent intent) {
             if (!ACTION_APP_QUERY.equals(intent.getAction())) return;
-            final int senderUid = getSentFromUid();
-            final String senderPackage = getSentFromPackage();
+            int senderUid = getSentFromUid();
             if (senderUid == Process.INVALID_UID
-                    || !MODULE_PACKAGE.equals(senderPackage)
-                    || !isUidOwner(context, senderUid, MODULE_PACKAGE)) {
-                log(android.util.Log.WARN, "HyperOS4SwipeGateSystemUI",
-                        "Rejected runtime query from uid=" + senderUid
-                                + " package=" + senderPackage);
+                    || !MODULE_PACKAGE.equals(getSentFromPackage())
+                    || !isUidOwner(context, senderUid, MODULE_PACKAGE)) return;
+
+            long nonce = intent.getLongExtra(EXTRA_NONCE, 0L);
+            int threshold = intent.getIntExtra(EXTRA_THRESHOLD_DP, -1);
+            int level = intent.getIntExtra(EXTRA_LOG_LEVEL, -1);
+            boolean haptic = intent.getBooleanExtra(EXTRA_HAPTIC_ENABLED, false);
+            boolean breakOpen = intent.getBooleanExtra(EXTRA_BREAK_OPEN_ENABLED, false);
+            if (nonce <= 0L || threshold < ConfigBridge.STOCK_THRESHOLD_DP
+                    || threshold > ConfigBridge.MAX_THRESHOLD_DP
+                    || level < ConfigBridge.LOG_LEVEL_OFF || level > ConfigBridge.LOG_LEVEL_DETAILED
+                    || !intent.hasExtra(EXTRA_HAPTIC_ENABLED)
+                    || !intent.hasExtra(EXTRA_BREAK_OPEN_ENABLED)) return;
+
+            if (nonce < newestAppNonce) return;
+            newestAppNonce = nonce;
+            long now = SystemClock.elapsedRealtime();
+            if (pending == null || pending.nonce != nonce || pending.expired(now)) {
+                pending = new ControlRequest(nonce, now, threshold, level, haptic, breakOpen);
+                cachedReply = null;
+            } else if (!pending.matchesConfig(threshold, level, haptic, breakOpen)) {
                 return;
             }
-
-            final long nonce = intent.getLongExtra(EXTRA_NONCE, 0L);
-            final int thresholdDp = intent.getIntExtra(
-                    EXTRA_THRESHOLD_DP, ConfigBridge.STOCK_THRESHOLD_DP);
-            final int logLevel = intent.getIntExtra(
-                    EXTRA_LOG_LEVEL, ConfigBridge.DEFAULT_LOG_LEVEL);
-            final boolean hapticEnabled = intent.getBooleanExtra(
-                    EXTRA_HAPTIC_ENABLED, ConfigBridge.DEFAULT_HAPTIC_ENABLED);
-            final boolean breakOpenEnabled = intent.getBooleanExtra(
-                    EXTRA_BREAK_OPEN_ENABLED, ConfigBridge.DEFAULT_BREAK_OPEN_ENABLED);
-            if (nonce <= 0L
-                    || thresholdDp < ConfigBridge.STOCK_THRESHOLD_DP
-                    || thresholdDp > ConfigBridge.MAX_THRESHOLD_DP
-                    || logLevel < ConfigBridge.LOG_LEVEL_OFF
-                    || logLevel > ConfigBridge.LOG_LEVEL_DETAILED) {
-                log(android.util.Log.WARN, "HyperOS4SwipeGateSystemUI",
-                        "Rejected malformed runtime query nonce=" + nonce
-                                + " threshold=" + thresholdDp + " logLevel=" + logLevel);
+            if (!pending.canForward(now)) return;
+            pending.markForwarded(now);
+            if (cachedReply != null) {
+                relay(context, cachedReply);
                 return;
             }
-
-            long previousNonce = pendingNonce.getAndSet(nonce);
-            if (previousNonce == nonce) {
-                log(android.util.Log.DEBUG, "HyperOS4SwipeGateSystemUI",
-                        "Ignored duplicate runtime query nonce=" + nonce);
-                return;
-            }
-
             sendAppStage(context, nonce, "SYSTEMUI_QUERY_RECEIVED");
             try {
                 Intent carrier = new Intent(ACTION_HYOS_CARRIER)
                         .setPackage(LAUNCHER_PACKAGE)
                         .putExtra(EXTRA_MARKER, true)
                         .putExtra(EXTRA_NONCE, nonce)
-                        .putExtra(EXTRA_THRESHOLD_DP, thresholdDp)
-                        .putExtra(EXTRA_LOG_LEVEL, logLevel)
-                        .putExtra(EXTRA_HAPTIC_ENABLED, hapticEnabled)
-                        .putExtra(EXTRA_BREAK_OPEN_ENABLED, breakOpenEnabled)
+                        .putExtra(EXTRA_CHALLENGE_HIGH, pending.challengeHigh)
+                        .putExtra(EXTRA_CHALLENGE_LOW, pending.challengeLow)
+                        .putExtra(EXTRA_THRESHOLD_DP, threshold)
+                        .putExtra(EXTRA_LOG_LEVEL, level)
+                        .putExtra(EXTRA_HAPTIC_ENABLED, haptic)
+                        .putExtra(EXTRA_BREAK_OPEN_ENABLED, breakOpen)
                         .putExtra(EXTRA_SENDER_UID, Process.myUid());
                 context.sendBroadcast(carrier, null, shareIdentityOptions());
-                log(android.util.Log.INFO, "HyperOS4SwipeGateSystemUI",
-                        "Runtime carrier sent nonce=" + nonce
-                                + " threshold=" + thresholdDp + " logLevel=" + logLevel);
                 sendAppStage(context, nonce, "CARRIER_SENT");
             } catch (Throwable t) {
                 log(android.util.Log.ERROR, "HyperOS4SwipeGateSystemUI",
@@ -172,73 +159,65 @@ public final class SystemUiBridgeModule extends XposedModule {
     private final BroadcastReceiver nativeReplyReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            if (!ACTION_NATIVE_REPLY.equals(intent.getAction())) return;
-            final long nonce = intent.getLongExtra(EXTRA_NONCE, 0L);
-            final long expected = pendingNonce.get();
-            final int claimedLauncherUid = intent.getIntExtra(EXTRA_SENDER_UID, -1);
-            if (nonce <= 0L || nonce != expected
-                    || !isUidOwner(context, claimedLauncherUid, LAUNCHER_PACKAGE)) {
-                log(android.util.Log.WARN, "HyperOS4SwipeGateSystemUI",
-                        "Rejected native reply nonce=" + nonce + " expected=" + expected
-                                + " launcherUid=" + claimedLauncherUid);
-                if (expected > 0L) {
-                    sendAppStage(context, expected, "NATIVE_REPLY_REJECTED");
-                }
-                return;
-            }
+            if (!ACTION_NATIVE_REPLY.equals(intent.getAction()) || pending == null) return;
+            long nonce = intent.getLongExtra(EXTRA_NONCE, 0L);
+            if (!pending.authenticates(nonce,
+                    intent.getLongExtra(EXTRA_CHALLENGE_HIGH, 0L),
+                    intent.getLongExtra(EXTRA_CHALLENGE_LOW, 0L),
+                    SystemClock.elapsedRealtime())) return;
 
-            try {
-                Intent reply = new Intent(ACTION_APP_REPLY)
-                        .setPackage(MODULE_PACKAGE)
-                        .putExtra(EXTRA_NONCE, nonce)
-                        .putExtra(EXTRA_HOOK_STATE,
-                                intent.getIntExtra(EXTRA_HOOK_STATE, 0))
-                        .putExtra(EXTRA_SYSTEMUI_MODULE_VERSION, BuildConfig.VERSION_CODE)
-                        .putExtra(EXTRA_NATIVE_MODULE_VERSION,
-                                intent.getIntExtra(EXTRA_NATIVE_MODULE_VERSION, 0))
-                        .putExtra(EXTRA_THRESHOLD_DP,
-                                intent.getIntExtra(EXTRA_THRESHOLD_DP,
-                                        ConfigBridge.STOCK_THRESHOLD_DP))
-                        .putExtra(EXTRA_LOG_LEVEL,
-                                intent.getIntExtra(EXTRA_LOG_LEVEL,
-                                        ConfigBridge.DEFAULT_LOG_LEVEL))
-                        .putExtra(EXTRA_HAPTIC_ENABLED,
-                                intent.getBooleanExtra(EXTRA_HAPTIC_ENABLED,
-                                        ConfigBridge.DEFAULT_HAPTIC_ENABLED))
-                        .putExtra(EXTRA_PATTERN, safeString(intent.getStringExtra(EXTRA_PATTERN)))
-                        .putExtra(EXTRA_DETAIL, safeString(intent.getStringExtra(EXTRA_DETAIL)))
-                        .putExtra(EXTRA_NATIVE_LOG,
-                                safeString(intent.getStringExtra(EXTRA_NATIVE_LOG)))
-                        .putExtra(EXTRA_CHANNEL_STAGE, "NATIVE_REPLY_RELAYED")
-                        .putExtra(EXTRA_SENDER_UID, Process.myUid());
-                context.sendBroadcast(reply, null, shareIdentityOptions());
-                pendingNonce.compareAndSet(nonce, 0L);
-                log(android.util.Log.INFO, "HyperOS4SwipeGateSystemUI",
-                        "Native runtime reply relayed nonce=" + nonce);
-            } catch (Throwable t) {
-                log(android.util.Log.ERROR, "HyperOS4SwipeGateSystemUI",
-                        "Runtime reply relay failed", t);
-            }
-        }
-    };
+            int actualUid = getSentFromUid();
+            String actualPackage = getSentFromPackage();
+            if (actualUid != Process.INVALID_UID
+                    && !isUidOwner(context, actualUid, LAUNCHER_PACKAGE)) return;
+            if (actualPackage != null && !LAUNCHER_PACKAGE.equals(actualPackage)) return;
 
-    private void sendAppStage(Context context, long nonce, String stage) {
-        if (context == null || nonce <= 0L || stage == null || stage.isBlank()) return;
-        try {
+            int threshold = intent.getIntExtra(EXTRA_THRESHOLD_DP, -1);
+            int level = intent.getIntExtra(EXTRA_LOG_LEVEL, -1);
+            boolean haptic = intent.getBooleanExtra(EXTRA_HAPTIC_ENABLED, false);
+            boolean breakOpen = intent.getBooleanExtra(EXTRA_BREAK_OPEN_ENABLED, false);
+            if (!intent.hasExtra(EXTRA_HAPTIC_ENABLED)
+                    || !intent.hasExtra(EXTRA_BREAK_OPEN_ENABLED)
+                    || !pending.matchesConfig(threshold, level, haptic, breakOpen)) return;
+            boolean persisted = intent.getBooleanExtra(EXTRA_CONFIG_PERSISTED, false);
             Intent reply = new Intent(ACTION_APP_REPLY)
                     .setPackage(MODULE_PACKAGE)
                     .putExtra(EXTRA_NONCE, nonce)
-                    .putExtra(EXTRA_HOOK_STATE, 0)
+                    .putExtra(EXTRA_HOOK_STATE, intent.getIntExtra(EXTRA_HOOK_STATE, 0))
                     .putExtra(EXTRA_SYSTEMUI_MODULE_VERSION, BuildConfig.VERSION_CODE)
-                    .putExtra(EXTRA_CHANNEL_STAGE, stage)
+                    .putExtra(EXTRA_NATIVE_MODULE_VERSION,
+                            intent.getIntExtra(EXTRA_NATIVE_MODULE_VERSION, 0))
+                    .putExtra(EXTRA_THRESHOLD_DP, threshold)
+                    .putExtra(EXTRA_LOG_LEVEL, level)
+                    .putExtra(EXTRA_HAPTIC_ENABLED, haptic)
+                    .putExtra(EXTRA_BREAK_OPEN_ENABLED, breakOpen)
+                    .putExtra(EXTRA_CONFIG_PERSISTED, persisted)
+                    .putExtra(EXTRA_PATTERN, safeString(intent.getStringExtra(EXTRA_PATTERN)))
+                    .putExtra(EXTRA_DETAIL, safeString(intent.getStringExtra(EXTRA_DETAIL)))
+                    .putExtra(EXTRA_NATIVE_LOG, safeString(intent.getStringExtra(EXTRA_NATIVE_LOG)))
+                    .putExtra(EXTRA_CHANNEL_STAGE, "NATIVE_REPLY_RELAYED")
                     .putExtra(EXTRA_SENDER_UID, Process.myUid());
+            if (persisted) cachedReply = new Intent(reply);
+            relay(context, reply);
+        }
+    };
+
+    private void relay(Context context, Intent reply) {
+        try {
             context.sendBroadcast(reply, null, shareIdentityOptions());
-            log(android.util.Log.INFO, "HyperOS4SwipeGateSystemUI",
-                    "Runtime stage ack=" + stage + " nonce=" + nonce);
         } catch (Throwable t) {
             log(android.util.Log.ERROR, "HyperOS4SwipeGateSystemUI",
-                    "Runtime stage ack failed stage=" + stage, t);
+                    "Runtime reply relay failed", t);
         }
+    }
+
+    private void sendAppStage(Context context, long nonce, String stage) {
+        relay(context, new Intent(ACTION_APP_REPLY).setPackage(MODULE_PACKAGE)
+                .putExtra(EXTRA_NONCE, nonce)
+                .putExtra(EXTRA_HOOK_STATE, 0)
+                .putExtra(EXTRA_SYSTEMUI_MODULE_VERSION, BuildConfig.VERSION_CODE)
+                .putExtra(EXTRA_CHANNEL_STAGE, stage)
+                .putExtra(EXTRA_SENDER_UID, Process.myUid()));
     }
 
     private static Context currentApplication() {
@@ -257,9 +236,10 @@ public final class SystemUiBridgeModule extends XposedModule {
         if (context == null || uid < 0 || packageName == null) return false;
         try {
             String[] packages = context.getPackageManager().getPackagesForUid(uid);
-            if (packages == null) return false;
-            for (String candidate : packages) {
-                if (packageName.equals(candidate)) return true;
+            if (packages != null) {
+                for (String candidate : packages) {
+                    if (packageName.equals(candidate)) return true;
+                }
             }
         } catch (Throwable ignored) {
         }
