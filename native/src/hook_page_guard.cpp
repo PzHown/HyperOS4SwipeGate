@@ -1,4 +1,5 @@
 #include "hook_page_guard.h"
+#include "got_patch_transaction.h"
 
 #include <android/log.h>
 #include <elf.h>
@@ -10,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -23,12 +25,6 @@ constexpr size_t kMaxLoadRanges = 16;
 constexpr size_t kMaxProtectedPages = 128;
 constexpr size_t kMaxMadviseSlots = 8;
 constexpr size_t kInlinePatchGuardSpan = 32;
-
-// Design adapted from MiuiBackGestureHook's Android 17 MADV_DONTNEED
-// protection. SwipeGate patches the already-loaded HyperRT GOT directly,
-// avoiding an additional LSPlt runtime dependency while preserving the same
-// narrow policy: only HyperRT madvise calls are intercepted, and only exact
-// pages containing our inline hooks are withheld from MADV_DONTNEED.
 
 struct Range {
     uintptr_t start = 0;
@@ -48,6 +44,7 @@ using MadviseFn = int (*)(void *, size_t, int);
 
 std::atomic<MadviseFn> gOriginalMadvise{nullptr};
 std::atomic<bool> gGuardReady{false};
+std::atomic<bool> gGuardPoisoned{false};
 std::atomic<int64_t> gLastGuardFailureLogMs{0};
 std::atomic<uint64_t> gPreservedRanges{0};
 std::mutex gGuardInstallMutex;
@@ -202,7 +199,7 @@ int guardedMadvise(void *address, size_t length, int advice) {
     }
 
     const uint64_t count = gPreservedRanges.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (count <= 4 || count % 128 == 0) {
+    if (gGuardReady.load(std::memory_order_acquire) && (count <= 4 || count % 128 == 0)) {
         logLine(ANDROID_LOG_INFO,
                 "PAGE_GUARD preserved MADV_DONTNEED range=%p-%p protectedPages=%zu count=%llu",
                 address, reinterpret_cast<void *>(end),
@@ -288,6 +285,7 @@ size_t collectMadviseSlots(const RuntimeImage &image,
                            std::array<uintptr_t, kMaxMadviseSlots> *slots) {
     if (slots == nullptr) return 0;
     size_t found = 0;
+    bool overflow = false;
     auto scan = [&](uintptr_t address, size_t bytes) {
         if (address == 0 || bytes < sizeof(ElfW(Rela))) return;
         const size_t count = bytes / sizeof(ElfW(Rela));
@@ -295,19 +293,23 @@ size_t collectMadviseSlots(const RuntimeImage &image,
         for (size_t i = 0; i < count; ++i) {
             const size_t symbolIndex = static_cast<size_t>(ELF64_R_SYM(relocations[i].r_info));
             if (symbolIndex > (SIZE_MAX / dynamic.syment)) continue;
-            const uintptr_t symbolAddress = dynamic.symtab + symbolIndex * dynamic.syment;
+            const size_t offset = symbolIndex * dynamic.syment;
+            if (offset > UINTPTR_MAX - dynamic.symtab) continue;
+            const uintptr_t symbolAddress = dynamic.symtab + offset;
             if (!imageContains(image, symbolAddress, sizeof(ElfW(Sym)))) continue;
             const auto *symbol = reinterpret_cast<const ElfW(Sym) *>(symbolAddress);
             if (symbol->st_name >= dynamic.strsz) continue;
             const char *name = reinterpret_cast<const char *>(dynamic.strtab + symbol->st_name);
-            if (std::strcmp(name, kMadviseSymbol) != 0) continue;
+            const size_t nameBytes = std::strlen(kMadviseSymbol) + 1;
+            if (nameBytes > dynamic.strsz - symbol->st_name
+                    || std::memcmp(name, kMadviseSymbol, nameBytes) != 0) continue;
             const uintptr_t slot = resolveImagePointer(
                     image, static_cast<uintptr_t>(relocations[i].r_offset), sizeof(void *));
             if (slot == 0) continue;
             bool duplicate = false;
             for (size_t j = 0; j < found; ++j) duplicate |= (*slots)[j] == slot;
             if (duplicate) continue;
-            if (found >= slots->size()) return;
+            if (found >= slots->size()) { overflow = true; return; }
             (*slots)[found++] = slot;
         }
     };
@@ -315,27 +317,12 @@ size_t collectMadviseSlots(const RuntimeImage &image,
         scan(dynamic.jmprel, dynamic.pltrelsz);
     if (dynamic.rela != 0 && dynamic.relasz != 0)
         scan(dynamic.rela, dynamic.relasz);
-    return found;
-}
-
-bool patchMadviseSlot(uintptr_t slot, void **oldValue) {
-    if (oldValue == nullptr) return false;
-    const int oldProtection = queryProtection(slot);
-    if (oldProtection == 0) return false;
-    const uintptr_t page = pageStart(slot);
-    if (!addProtectedPage(slot)) return false;
-    if (mprotect(reinterpret_cast<void *>(page), pageSize(), oldProtection | PROT_WRITE) != 0) {
-        return false;
-    }
-    auto **pointer = reinterpret_cast<void **>(slot);
-    *oldValue = __atomic_load_n(pointer, __ATOMIC_ACQUIRE);
-    __atomic_store_n(pointer, reinterpret_cast<void *>(guardedMadvise), __ATOMIC_RELEASE);
-    const bool restored = mprotect(reinterpret_cast<void *>(page), pageSize(), oldProtection) == 0;
-    return restored;
+    return overflow ? 0 : found;
 }
 
 bool ensureGuardLocked() {
     if (gGuardReady.load(std::memory_order_acquire)) return true;
+    if (gGuardPoisoned.load(std::memory_order_acquire)) return false;
     const RuntimeImage image = findRuntimeImage();
     if (image.base == 0 || image.loadRangeCount == 0) return false;
 
@@ -345,25 +332,29 @@ bool ensureGuardLocked() {
     const size_t slotCount = collectMadviseSlots(image, dynamic, &slots);
     if (slotCount == 0) return false;
 
-    MadviseFn original = reinterpret_cast<MadviseFn>(madvise);
-    if (original == nullptr) return false;
-    gOriginalMadvise.store(original, std::memory_order_release);
-
-    struct Applied {
-        uintptr_t slot = 0;
-        void *oldValue = nullptr;
-    };
-    std::array<Applied, kMaxMadviseSlots> applied{};
-    size_t appliedCount = 0;
     for (size_t i = 0; i < slotCount; ++i) {
-        void *oldValue = nullptr;
-        if (!patchMadviseSlot(slots[i], &oldValue)) {
+        if (!addProtectedPage(slots[i])) return false;
+    }
+    const auto result = swipegate::patchPointerSlots(slots, slotCount,
+            reinterpret_cast<void *>(guardedMadvise), queryProtection,
+            [](uintptr_t slot, int protection) {
+                return mprotect(reinterpret_cast<void *>(pageStart(slot)), pageSize(), protection) == 0;
+            },
+            [](void *upstream) {
+                const auto original = reinterpret_cast<MadviseFn>(upstream);
+                MadviseFn previous = gOriginalMadvise.load(std::memory_order_acquire);
+                if (previous != nullptr && previous != original) return false;
+                gOriginalMadvise.store(original, std::memory_order_release);
+                return true;
+            });
+    if (result != swipegate::PointerPatchResult::Installed) {
+        const bool poisoned = result == swipegate::PointerPatchResult::RollbackFailed;
+        if (poisoned) {
+            gGuardPoisoned.store(true, std::memory_order_release);
             logLine(ANDROID_LOG_ERROR,
-                    "PAGE_GUARD failed to patch HyperRT madvise slot=%p index=%zu/%zu failClosed=1",
-                    reinterpret_cast<void *>(slots[i]), i + 1, slotCount);
-            return false;
+                    "PAGE_GUARD rollback incomplete; no new hooks; restartRequired=1");
         }
-        applied[appliedCount++] = {slots[i], oldValue};
+        return false;
     }
 
     gGuardReady.store(true, std::memory_order_release);
@@ -376,6 +367,7 @@ bool ensureGuardLocked() {
 
 bool ensureGuard() {
     if (gGuardReady.load(std::memory_order_acquire)) return true;
+    if (gGuardPoisoned.load(std::memory_order_acquire)) return false;
     std::lock_guard<std::mutex> lock(gGuardInstallMutex);
     const bool ready = ensureGuardLocked();
     if (!ready) {
@@ -385,7 +377,7 @@ bool ensureGuard() {
                 && gLastGuardFailureLogMs.compare_exchange_strong(
                         last, now, std::memory_order_relaxed)) {
             logLine(ANDROID_LOG_WARN,
-                    "PAGE_GUARD not ready; protected inline hook deferred failClosed=1");
+                    "PAGE_GUARD not ready; no new inline hook installed");
         }
     }
     return ready;
