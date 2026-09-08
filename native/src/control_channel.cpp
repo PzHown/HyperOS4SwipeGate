@@ -1,5 +1,7 @@
 #include "control_channel.h"
 #include "native_api.h"
+#include "hook_page_guard.h"
+#include "runtime_config_store.h"
 
 #include <android/log.h>
 #include <dlfcn.h>
@@ -9,6 +11,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -39,6 +42,9 @@ constexpr const char *kNativeReplyAction =
 
 constexpr const char *kMarkerExtra = "swipegate_control";
 constexpr const char *kNonceExtra = "swipegate_nonce";
+constexpr const char *kChallengeHighExtra = "swipegate_challenge_high";
+constexpr const char *kChallengeLowExtra = "swipegate_challenge_low";
+constexpr const char *kConfigPersistedExtra = "swipegate_config_persisted";
 constexpr const char *kThresholdExtra = "swipegate_threshold_dp";
 constexpr const char *kLogLevelExtra = "swipegate_log_level";
 constexpr const char *kHapticEnabledExtra = "swipegate_haptic_enabled";
@@ -50,9 +56,6 @@ constexpr const char *kDetailExtra = "swipegate_detail";
 constexpr const char *kNativeLogExtra = "swipegate_native_log";
 constexpr const char *kSenderUidExtra = "sender_uid";
 
-constexpr const char *kConfigFileName = "hyperos4swipegate_config";
-constexpr const char *kLogLevelFileName = "hyperos4swipegate_log_level";
-constexpr const char *kBreakOpenFileName = "hyperos4swipegate_break_open";
 constexpr int kAndroidUserOffset = 100000;
 constexpr int kMinThresholdDp = 88;
 constexpr int kMaxThresholdDp = 300;
@@ -146,6 +149,11 @@ std::atomic<void *> gOriginalIntentSetAction{nullptr};
 std::atomic<void *> gCapturedRuntime{nullptr};
 std::atomic<void *> gCapturedRStringVtable{nullptr};
 std::atomic<int64_t> gLastAcceptedCarrierNonce{0};
+std::atomic<bool> gKnownLauncher{false};
+std::atomic<bool> gConfigLoaded{false};
+std::atomic<int64_t> gNextConfigLoadMs{0};
+std::atomic_flag gConfigIoLock = ATOMIC_FLAG_INIT;
+bool gConfigPersisted = false;
 
 int gThresholdDp = -1;
 int gLogLevel = -1;
@@ -202,7 +210,10 @@ std::string readProcessName() {
 }
 
 bool isLauncherProcess() {
-    return readProcessName() == kLauncherPackage;
+    if (gKnownLauncher.load(std::memory_order_acquire)) return true;
+    if (readProcessName() != kLauncherPackage) return false;
+    gKnownLauncher.store(true, std::memory_order_release);
+    return true;
 }
 
 constexpr size_t constStringLength(const char *value) {
@@ -222,28 +233,55 @@ void bridgeLog(int priority, const char *message) {
     __android_log_write(priority, kTag, message == nullptr ? "" : message);
 }
 
-void persistValue(const char *fileName, int value) {
-    if (fileName == nullptr) return;
-    const int userId = static_cast<int>(getuid()) / kAndroidUserOffset;
-    char path[256]{};
-    const char *formats[] = {
-            "/data/user_de/%d/com.miui.home/cache/%s",
-            "/data/user/%d/com.miui.home/cache/%s",
-            "/data/data/com.miui.home/cache/%s",
-    };
-    char text[24]{};
-    const int length = std::snprintf(text, sizeof(text), "%d\n", value);
-    if (length <= 0) return;
-    for (size_t index = 0; index < 3; ++index) {
-        if (index == 2 && userId != 0) break;
-        if (index < 2) std::snprintf(path, sizeof(path), formats[index], userId, fileName);
-        else std::snprintf(path, sizeof(path), formats[index], fileName);
-        const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-        if (fd < 0) continue;
-        const ssize_t written = write(fd, text, static_cast<size_t>(length));
-        close(fd);
-        if (written == length) return;
+class ConfigIoGuard {
+public:
+    ConfigIoGuard() {
+        while (gConfigIoLock.test_and_set(std::memory_order_acquire)) sched_yield();
     }
+    ~ConfigIoGuard() { gConfigIoLock.clear(std::memory_order_release); }
+};
+
+swipegate::RuntimeConfigStore configStore() {
+    const std::string user = std::to_string(static_cast<int>(getuid()) / kAndroidUserOffset);
+    return swipegate::RuntimeConfigStore({
+            "/data/user_de/" + user + "/com.miui.home",
+            "/data/user/" + user + "/com.miui.home",
+    });
+}
+
+swipegate::RuntimeConfig currentConfigLocked() {
+    return {gThresholdDp, gLogLevel, gHapticEnabled == 1, gBreakOpenEnabled == 1};
+}
+
+void publishConfigLocked(const swipegate::RuntimeConfig &config) {
+    gThresholdDp = config.thresholdDp;
+    gLogLevel = config.logLevel;
+    gHapticEnabled = config.hapticEnabled ? 1 : 0;
+    gBreakOpenEnabled = config.breakOpenEnabled ? 1 : 0;
+    if (config.logLevel == 0) gAppLog.clear();
+}
+
+void ensurePersistentConfigLoaded() {
+    if (gConfigLoaded.load(std::memory_order_acquire) || !isLauncherProcess()) return;
+    timespec time{};
+    clock_gettime(CLOCK_MONOTONIC, &time);
+    const int64_t now = static_cast<int64_t>(time.tv_sec) * 1000 + time.tv_nsec / 1000000;
+    if (now < gNextConfigLoadMs.load(std::memory_order_relaxed)) return;
+    ConfigIoGuard io;
+    if (gConfigLoaded.load(std::memory_order_relaxed)) return;
+    swipegate::RuntimeConfig config;
+    const auto store = configStore();
+    const auto result = store.load(&config);
+    const bool persisted = result == swipegate::ConfigLoadResult::Loaded
+            || (result == swipegate::ConfigLoadResult::Migrated && store.save(config));
+    {
+        SpinGuard guard;
+        publishConfigLocked(config);
+        gConfigPersisted = persisted;
+    }
+    gNextConfigLoadMs.store(now + 5000, std::memory_order_relaxed);
+    gConfigLoaded.store(result != swipegate::ConfigLoadResult::IoError,
+                        std::memory_order_release);
 }
 
 bool startsWith(const char *text, const char *prefix) {
@@ -411,7 +449,9 @@ T resolveLauncherSymbol(const char *name) {
     void *handle = dlopen(launcher.path.c_str(), RTLD_NOW | RTLD_NOLOAD);
     if (handle == nullptr) handle = dlopen(kLauncherLibrary, RTLD_NOW | RTLD_NOLOAD);
     if (handle == nullptr) return nullptr;
-    return reinterpret_cast<T>(dlsym(handle, name));
+    void *symbol = dlsym(handle, name);
+    dlclose(handle);
+    return reinterpret_cast<T>(symbol);
 }
 
 bool isNativeSuccess(const NativeResult &result) {
@@ -556,7 +596,7 @@ void hookIntentSetActionCapture(void *intent, ROptionRString *value) {
     if (original != nullptr) original(intent, value);
 }
 
-bool sendNativeReply(int64_t nonce) {
+bool sendNativeReply(int64_t nonce, int64_t challengeHigh, int64_t challengeLow) {
     void *runtime = gCapturedRuntime.load(std::memory_order_acquire);
     if (reinterpret_cast<uintptr_t>(runtime) < 0x100000000ull) {
         bridgeLog(ANDROID_LOG_WARN, "NATIVE_REPLY waiting reason=runtime-not-captured");
@@ -587,6 +627,8 @@ bool sendNativeReply(int64_t nonce) {
     int threshold;
     int logLevel;
     int hapticEnabled;
+    int breakOpenEnabled;
+    bool configPersisted;
     std::string pattern;
     std::string detail;
     std::string appLog;
@@ -596,6 +638,8 @@ bool sendNativeReply(int64_t nonce) {
         threshold = gThresholdDp;
         logLevel = gLogLevel;
         hapticEnabled = gHapticEnabled;
+        breakOpenEnabled = gBreakOpenEnabled;
+        configPersisted = gConfigPersisted;
         pattern = gPattern.substr(0, kMaxPatternBytes);
         detail = gDetail.substr(0, kMaxDetailBytes);
         appLog = gAppLog.substr(gAppLog.size() > kMaxAppLogBytes
@@ -606,12 +650,16 @@ bool sendNativeReply(int64_t nonce) {
     if (extras == nullptr
             || !addBundleBool(extras, kMarkerExtra, true)
             || !addBundleI64(extras, kNonceExtra, nonce)
+            || !addBundleI64(extras, kChallengeHighExtra, challengeHigh)
+            || !addBundleI64(extras, kChallengeLowExtra, challengeLow)
+            || !addBundleBool(extras, kConfigPersistedExtra, configPersisted)
             || !addBundleI32(extras, kHookStateExtra, static_cast<int32_t>(state))
             || !addBundleI32(extras, kNativeModuleVersionExtra,
                     static_cast<int32_t>(SWIPEGATE_VERSION_CODE))
             || !addBundleI32(extras, kThresholdExtra, threshold)
             || !addBundleI32(extras, kLogLevelExtra, logLevel)
             || !addBundleBool(extras, kHapticEnabledExtra, hapticEnabled > 0)
+            || !addBundleBool(extras, kBreakOpenEnabledExtra, breakOpenEnabled > 0)
             || !addBundleI32(extras, kSenderUidExtra, static_cast<int32_t>(getuid()))
             || !addBundleString(extras, kPatternExtra, pattern)
             || !addBundleString(extras, kDetailExtra, detail)
@@ -642,14 +690,12 @@ void handleControlCarrier(void *intent) {
     const auto getExtras = resolveLauncherSymbol<IntentGetExtrasFn>("Intent_get_extras");
     if (intent == nullptr || getExtras == nullptr || !intentActionEquals(intent, kCarrierAction)) return;
 
-    // HyperOS Runtime supplies sender_package_name independently of Intent extras. Treat that as
-    // the authentication boundary. sender_uid remains a best-effort cross-check only because
-    // Xiaomi's private PackageManager ABI can differ across launcher/runtime builds.
     if (!intentSenderEquals(intent, kSystemUiPackage)) {
         bridgeLog(ANDROID_LOG_WARN, "CONTROL_CARRIER rejected reason=runtime-sender-not-systemui");
         return;
     }
 
+    ensurePersistentConfigLoaded();
     void *extras = getExtras(intent);
     bool marker = false;
     int32_t senderUid = -1;
@@ -658,7 +704,12 @@ void handleControlCarrier(void *intent) {
     bool hapticEnabled = false;
     bool breakOpenEnabled = false;
     int64_t nonce = 0;
+    int64_t challengeHigh = 0;
+    int64_t challengeLow = 0;
 
+    const bool challengePresent = readNativeI64(extras, kChallengeHighExtra, &challengeHigh)
+            && readNativeI64(extras, kChallengeLowExtra, &challengeLow)
+            && (challengeHigh != 0 || challengeLow != 0);
     const bool markerRead = readNativeBool(extras, kMarkerExtra, &marker);
     const bool senderUidRead = readNativeI32(extras, kSenderUidExtra, &senderUid);
     const bool nonceRead = readNativeI64(extras, kNonceExtra, &nonce);
@@ -669,6 +720,11 @@ void handleControlCarrier(void *intent) {
             extras, kBreakOpenEnabledExtra, &breakOpenEnabled);
 
     char carrierLog[384]{};
+    if (!challengePresent) {
+        bridgeLog(ANDROID_LOG_WARN,
+                  "CONTROL_CARRIER rejected reason=challenge-missing; reload SystemUI and Launcher");
+        return;
+    }
     if (!markerRead || !marker) {
         std::snprintf(carrierLog, sizeof(carrierLog),
                       "CONTROL_CARRIER rejected reason=marker read=%d value=%d",
@@ -726,35 +782,38 @@ void handleControlCarrier(void *intent) {
                   "CONTROL_CARRIER break-open field missing; preserving previous/default state");
     }
 
-    const int64_t previousNonce = gLastAcceptedCarrierNonce.exchange(
-            nonce, std::memory_order_acq_rel);
-    if (previousNonce == nonce) {
-        std::snprintf(carrierLog, sizeof(carrierLog),
-                      "CONTROL_CARRIER duplicate nonce=%lld; state unchanged, reply retry=%d",
-                      static_cast<long long>(nonce), sendNativeReply(nonce) ? 1 : 0);
-        bridgeLog(ANDROID_LOG_DEBUG, carrierLog);
+    const swipegate::RuntimeConfig incoming{
+            thresholdDp, logLevel, hapticEnabled, breakOpenEnabled};
+    bool staleOrChangedRequest = false;
+    {
+        ConfigIoGuard io;
+        bool saveNeeded;
+        {
+            SpinGuard guard;
+            const auto previous = currentConfigLocked();
+            const int64_t newestNonce = gLastAcceptedCarrierNonce.load(std::memory_order_relaxed);
+            staleOrChangedRequest = nonce < newestNonce
+                    || (nonce == newestNonce && !(previous == incoming));
+            saveNeeded = !gConfigPersisted || !(previous == incoming);
+            if (!staleOrChangedRequest) {
+                publishConfigLocked(incoming);
+                if (saveNeeded) gConfigPersisted = false;
+            }
+        }
+        if (!staleOrChangedRequest) {
+            if (saveNeeded) {
+                const bool saved = configStore().save(incoming);
+                SpinGuard guard;
+                gConfigPersisted = saved;
+            }
+            gLastAcceptedCarrierNonce.store(nonce, std::memory_order_release);
+            gConfigLoaded.store(true, std::memory_order_release);
+        }
+    }
+    if (staleOrChangedRequest) {
+        bridgeLog(ANDROID_LOG_WARN, "CONTROL_CARRIER rejected reason=stale-or-mutated-nonce");
         return;
     }
-
-    bool thresholdChanged;
-    bool logLevelChanged;
-    bool hapticChanged;
-    bool breakOpenChanged;
-    {
-        SpinGuard guard;
-        thresholdChanged = gThresholdDp != thresholdDp;
-        logLevelChanged = gLogLevel != logLevel;
-        hapticChanged = gHapticEnabled != (hapticEnabled ? 1 : 0);
-        breakOpenChanged = gBreakOpenEnabled != (breakOpenEnabled ? 1 : 0);
-        gThresholdDp = thresholdDp;
-        gLogLevel = logLevel;
-        gHapticEnabled = hapticEnabled ? 1 : 0;
-        gBreakOpenEnabled = breakOpenEnabled ? 1 : 0;
-        if (logLevel <= 0) gAppLog.clear();
-    }
-    if (thresholdChanged) persistValue(kConfigFileName, thresholdDp);
-    if (logLevelChanged) persistValue(kLogLevelFileName, logLevel);
-    if (breakOpenChanged) persistValue(kBreakOpenFileName, breakOpenEnabled ? 1 : 0);
 
     std::snprintf(carrierLog, sizeof(carrierLog),
                   "CONTROL_CARRIER accepted nonce=%lld threshold=%d logLevel=%d haptic=%d breakOpen=%d senderUidRead=%d nativeVersion=%d",
@@ -763,7 +822,7 @@ void handleControlCarrier(void *intent) {
                   static_cast<int>(SWIPEGATE_VERSION_CODE));
     bridgeLog(ANDROID_LOG_INFO, carrierLog);
 
-    if (!sendNativeReply(nonce)) {
+    if (!sendNativeReply(nonce, challengeHigh, challengeLow)) {
         bridgeLog(ANDROID_LOG_WARN,
                 "Runtime carrier accepted but native reply is not ready; waiting for HyperOS Runtime capture");
     }
@@ -790,7 +849,7 @@ void *installerMain(void *) {
             if (!gSendCaptureHookInstalled.load(std::memory_order_acquire)) {
                 void *target = resolveExactFileSymbol(broadcastImage, kBroadcastSendSymbol);
                 if (target != nullptr
-                        && hook(target, reinterpret_cast<void *>(SwipeGateBroadcastSendCaptureHook),
+                        && swipegate_install_protected_inline_hook(hook, target, reinterpret_cast<void *>(SwipeGateBroadcastSendCaptureHook),
                                 &g_swipegate_original_broadcast_send) == 0
                         && g_swipegate_original_broadcast_send != nullptr) {
                     gSendCaptureHookInstalled.store(true, std::memory_order_release);
@@ -802,7 +861,7 @@ void *installerMain(void *) {
                 void *target = reinterpret_cast<void *>(targetFn);
                 void *backup = nullptr;
                 if (target != nullptr
-                        && hook(target, reinterpret_cast<void *>(hookIntentSetActionCapture),
+                        && swipegate_install_protected_inline_hook(hook, target, reinterpret_cast<void *>(hookIntentSetActionCapture),
                                 &backup) == 0 && backup != nullptr) {
                     gOriginalIntentSetAction.store(backup, std::memory_order_release);
                     gRStringVtableCaptureHookInstalled.store(true, std::memory_order_release);
@@ -815,7 +874,7 @@ void *installerMain(void *) {
                                                        kBroadcastReceiverOnReceiveSymbol);
                 void *backup = nullptr;
                 if (target != nullptr
-                        && hook(target, reinterpret_cast<void *>(hookBroadcastReceiverOnReceive),
+                        && swipegate_install_protected_inline_hook(hook, target, reinterpret_cast<void *>(hookBroadcastReceiverOnReceive),
                                 &backup) == 0 && backup != nullptr) {
                     gOriginalReceiver.store(backup, std::memory_order_release);
                     gReceiverHookInstalled.store(true, std::memory_order_release);
@@ -838,7 +897,9 @@ void *installerMain(void *) {
 }
 
 void startInstallerIfLauncher() {
-    if (!isLauncherProcess() || gHookFunction.load(std::memory_order_acquire) == nullptr) return;
+    if (!isLauncherProcess()) return;
+    ensurePersistentConfigLoaded();
+    if (gHookFunction.load(std::memory_order_acquire) == nullptr) return;
     if (gReceiverHookInstalled.load(std::memory_order_acquire)
             && gSendCaptureHookInstalled.load(std::memory_order_acquire)
             && gRStringVtableCaptureHookInstalled.load(std::memory_order_acquire)) return;
@@ -881,6 +942,11 @@ void startChildProbeAfterFork() {
 
 void resetAfterFork() {
     gStateLock.clear(std::memory_order_release);
+    gConfigIoLock.clear(std::memory_order_release);
+    gConfigLoaded.store(false, std::memory_order_release);
+    gNextConfigLoadMs.store(0, std::memory_order_relaxed);
+    gKnownLauncher.store(false, std::memory_order_release);
+    gConfigPersisted = false;
     gInstallerStarted.store(false, std::memory_order_release);
     gChildProbeStarted.store(false, std::memory_order_release);
     gReceiverHookInstalled.store(false, std::memory_order_release);
@@ -908,21 +974,25 @@ extern "C" void SwipeGateCaptureBroadcastRuntime(void *holder) {
 }
 
 extern "C" int swipegate_control_threshold_dp() {
+    ensurePersistentConfigLoaded();
     SpinGuard guard;
     return gThresholdDp;
 }
 
 extern "C" int swipegate_control_log_level() {
+    ensurePersistentConfigLoaded();
     SpinGuard guard;
     return gLogLevel;
 }
 
 extern "C" int swipegate_control_haptic_enabled() {
+    ensurePersistentConfigLoaded();
     SpinGuard guard;
     return gHapticEnabled;
 }
 
 extern "C" int swipegate_control_break_open_enabled() {
+    ensurePersistentConfigLoaded();
     SpinGuard guard;
     return gBreakOpenEnabled;
 }
